@@ -1,0 +1,4 @@
+org_id,org_name,parent_id
+ORG-MFG,制造一组（示例）,ORG-ROOT
+ORG-OPS,门店运营组（示例）,ORG-ROOT
+ORG-SALES,外勤销售组（示例）,ORG-ROOT

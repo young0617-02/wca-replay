@@ -1,0 +1,176 @@
+"""验收项的机械化检查：A2 / A9 / A10 / A11 / A12 + F-011 结构完整性。
+
+能把验收标准写成断言的，就不要写在文档里靠自觉；剩下必须人工的（如盲跑演示）
+在 docs/演示脚本-30分钟.md 里逐步骤标注。
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+
+# A10 禁词（用拼接构造，避免本文件自身成为命中项）
+FORBIDDEN_LITERALS = [
+    "企业" + "级",
+    "客" + "户",
+    "上" + "线",
+    "部署" + "完成",
+    "验证" + "通过",
+]
+FORBIDDEN_PATTERNS = [re.compile(r"支持\s*\d+\s*人"), re.compile(r"\bSLA\s*99\.")]
+# 本检查覆盖 README、docs、src、evals、data、tools、config，以及根目录的方案文档；
+# tests 目录排除在外：那里是「写断言的地方」，禁词字面量必须能出现在扫查逻辑里
+SCANNED_DIRS = ["README.md", "docs", "src", "evals", "data", "tools", "config"]
+SCANNED_ROOT_GLOBS = ["项目方案-*.md", "项目汇报-*.md"]
+
+
+def _scan_targets() -> list[Path]:
+    out: list[Path] = []
+    for rel in SCANNED_DIRS:
+        p = ROOT / rel
+        if p.is_file():
+            out.append(p)
+        elif p.is_dir():
+            out += [f for f in p.rglob("*")
+                    if f.is_file() and f.suffix in {".md", ".py", ".jsonl", ".json", ".txt", ".sql"}]
+    for pattern in SCANNED_ROOT_GLOBS:
+        out += [f for f in ROOT.glob(pattern) if f.is_file()]
+    return out
+
+
+def test_no_false_claims_in_docs_and_code():
+    """A10：宣称类禁词命中数必须为 0。"""
+    hits = []
+    for f in _scan_targets():
+        text = f.read_text(encoding="utf-8", errors="replace")
+        for word in FORBIDDEN_LITERALS:
+            if word in text:
+                for n, line in enumerate(text.splitlines(), start=1):
+                    if word in line:
+                        hits.append(f"{f.relative_to(ROOT)}:{n} 命中 {word}")
+        for pat in FORBIDDEN_PATTERNS:
+            for n, line in enumerate(text.splitlines(), start=1):
+                if pat.search(line):
+                    hits.append(f"{f.relative_to(ROOT)}:{n} 命中模式 {pat.pattern}")
+    assert not hits, "发现不可举证的宣称表述：\n" + "\n".join(hits[:20])
+
+
+def test_readme_separates_measured_from_design_values():
+    """A9：性能口径必须三态标注（实测 / 设计值 / 未测）。"""
+    text = (ROOT / "docs" / "口径声明.md").read_text(encoding="utf-8")
+    for metric in ("检索段 P95", "端到端 P95", "举证包导出"):
+        assert metric in text, f"口径声明缺少 {metric}"
+    assert "实测" in text and "设计值" in text and "未测" in text
+
+
+def test_golden_set_structure_and_size():
+    """F-011：≥60 条、三档齐、每条有可复核标准答案。"""
+    items = _golden_items()
+    assert len(items) >= 60, f"评测集只有 {len(items)} 条，未达 ≥60 的要求"
+    tiers = {i["tier"] for i in items}
+    assert {"retrieval", "numeric", "mixed"} <= tiers, tiers
+    for it in items:
+        assert it.get("question"), it
+        assert it.get("gold", {}), f"{it['id']} 缺标准答案"
+        assert it.get("basis"), f"{it['id']} 缺条文依据（A2）"
+        if it["tier"] == "numeric":
+            assert it.get("derivation"), f"{it['id']} 数值题必须写手工推导过程，避免引擎自证"
+
+
+def test_golden_set_citations_resolve_to_corpus():
+    """A2：每条标准答案的依据都能在知识库语料里定位到条目。"""
+    corpus_ids = set()
+    for line in (ROOT / "src" / "kb" / "corpus" / "kb_doc.jsonl").read_text(
+            encoding="utf-8").splitlines():
+        if line.strip():
+            corpus_ids.add(json.loads(line)["doc_id"])
+    missing = []
+    for it in _golden_items():
+        for doc_id in it["basis"]:
+            if doc_id not in corpus_ids:
+                missing.append(f"{it['id']} -> {doc_id}")
+    assert not missing, "评测集引用了不存在的条文条目：\n" + "\n".join(missing)
+
+
+def test_every_golden_numeric_expectation_is_int_or_str():
+    for it in _golden_items():
+        for key, value in it.get("gold", {}).items():
+            if isinstance(value, float):
+                raise AssertionError(f"{it['id']}.{key} 是浮点，判定链禁止浮点")
+
+
+def test_field_and_article_doc_exists():
+    """F-001/F-002 的产物必须真实存在且写到条号级别（中文数字或阿拉伯数字均可）。"""
+    text = (ROOT / "docs" / "字段口径与条文依据.md").read_text(encoding="utf-8")
+    anchors = {
+        "劳动法36": r"(第三十六条|第\s*36\s*条)",
+        "劳动法38": r"(第三十八条|第\s*38\s*条)",
+        "劳动法41": r"(第四十一条|第\s*41\s*条)",
+        "劳动法44": r"(第四十四条|第\s*44\s*条)",
+        "503号文": r"503",
+        "489号文": r"489",
+        "放假办法文号": r"795",
+    }
+    for name, pat in anchors.items():
+        assert re.search(pat, text), f"字段口径与条文依据文档缺少 {name}"
+    assert "未完成" in text or "尚未取得" in text, "P0 闸门状态必须如实写明（是否拿到 HR 口径）"
+
+
+
+def test_demo_script_commands_are_real():
+    """A12 的一半：演示脚本里的每条命令都必须在 CLI 中存在。"""
+    text = (ROOT / "docs" / "演示脚本-30分钟.md").read_text(encoding="utf-8")
+    from src.cli import SUBCOMMAND_NAMES
+
+    known = set(SUBCOMMAND_NAMES)
+    used = set(re.findall(r"python(?:\.exe)? -m src\.cli (\w+)", text))
+    assert used, "演示脚本没有可执行命令"
+    unknown = used - known
+    assert not unknown, f"演示脚本引用了不存在的子命令：{sorted(unknown)}"
+    assert re.search(r"python -m pytest tests/ -q", text), "演示脚本必须包含跑测试这一步"
+
+
+def test_synthetic_data_is_declared_and_reproducible():
+    """A11：合成数据必须声明来源、种子与不可指向真人。"""
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "合成数据" in readme
+    assert "--seed" in readme or "seed" in readme
+    gen = (ROOT / "data" / "generator" / "make_synthetic.py").read_text(encoding="utf-8")
+    assert "random.Random(seed)" in gen, "生成器必须使用可复现种子的随机源"
+    manifest = ROOT / "data" / "raw" / "MANIFEST.json"
+    if manifest.is_file():
+        m = json.loads(manifest.read_text(encoding="utf-8"))
+        assert m.get("seed"), "MANIFEST 必须记录种子"
+        assert "合成" in m.get("privacy", "")
+
+
+def test_schema_has_no_float_columns_for_decisions():
+    sql = (ROOT / "src" / "schema.sql").read_text(encoding="utf-8")
+    for bad in ("REAL", "FLOAT", "DOUBLE", "DECIMAL"):
+        assert bad not in sql.upper(), f"schema 出现 {bad}：判定数值必须用整数分/分钟"
+
+
+def test_rules_all_reference_kb_corpus_entries():
+    """规则命中挂的条文 id 必须都在语料里，否则 A2 会在举证时断链。"""
+    from src.kb.loader import load_corpus_rows
+    from src.rules.citations import ALL_CITATIONS
+
+    ids = {d["doc_id"] for d in load_corpus_rows()}
+    missing = [c for c in ALL_CITATIONS if not c.startswith("personnel.") and c not in ids]
+    assert not missing, f"引用了不存在的条文条目：{missing}"
+
+
+def _golden_items() -> list[dict]:
+    path = ROOT / "evals" / "golden_set_v1.jsonl"
+    if not path.is_file():
+        raise AssertionError("评测集缺失：evals/golden_set_v1.jsonl")
+    items = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            items.append(json.loads(line))
+    ids = [i["id"] for i in items]
+    assert len(ids) == len(set(ids)), "评测集存在重复 id"
+    return items

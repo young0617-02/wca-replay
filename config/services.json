@@ -1,0 +1,50 @@
+{
+  "schema": "wca-services-v1",
+  "note": "服务清单配置化：想加/减服务只改这个文件，不要改 tools/*.py。字段含义见 docs/服务启停.md。",
+  "defaults": {
+    "host": "127.0.0.1",
+    "cwd": ".",
+    "log_dir": "var/logs",
+    "run_dir": "var/run",
+    "ready_timeout_s": 30,
+    "grace_period_s": 12
+  },
+  "services": [
+    {
+      "name": "ollama",
+      "managed": false,
+      "start_order": 5,
+      "stop_order": 5,
+      "host": "127.0.0.1",
+      "port": 11434,
+      "probe": "port",
+      "required_when": {
+        "env": "WCA_LLM_PROVIDER",
+        "equals": "ollama"
+      },
+      "notes": "外部依赖预检：只有 .env 里 WCA_LLM_PROVIDER=ollama 时才要求在线。本工具不启动也不杀掉别人的模型服务。"
+    },
+    {
+      "name": "api",
+      "managed": true,
+      "start_order": 20,
+      "stop_order": 20,
+      "kind": "python-module",
+      "module": "src.api_server",
+      "argv": [
+        "<python>",
+        "-m",
+        "src.api_server"
+      ],
+      "host": "127.0.0.1",
+      "port": 8000,
+      "probe": "port",
+      "ready_timeout_s": 30,
+      "grace_period_s": 12,
+      "env": {
+        "WCA_SERVICE": "api"
+      },
+      "notes": "由 src/api_server.py 包一层 uvicorn：停止文件是优雅关闭主通道（Windows 分离进程收不到控制台信号）。对外只有 2 个只读 GET（/ask、/evidence/{run_id}），且只绑 127.0.0.1——权限模型在应用层，不要把它暴露到局域网。"
+    }
+  ]
+}

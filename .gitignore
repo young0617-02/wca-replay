@@ -1,0 +1,21 @@
+# 产物与本地环境不入库
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+var/
+reports/*.csv
+reports/变异测试-现场/
+.env
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+.DS_Store
+.idea/
+.vscode/
+
+# 举证包与审计链快照属于「跑出来的证据」，默认不入库；
+# README 说明了如何用一条命令重新生成，以及为何不提交（含本机路径与时间戳）
+data/raw/MANIFEST.json

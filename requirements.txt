@@ -1,0 +1,37 @@
+# worktime-compliance-agent 依赖（锁定版本；方案 §5「requirements 必含 pytest，锁文件必须可复现」）
+#
+# 分层说明（如实写，不糊）：
+#   * 核心校验链路（导入、规则引擎、异常分级、举证包、检索、问答 stub、判分器、测试）
+#     只用 Python 3.11+ 标准库 + pytest —— 不需要网络、不需要模型。
+#   * 只有那 2 个 HTTP 只读接口需要 fastapi/uvicorn；没装时 `python -m src.cli ask` 走同一条链路，
+#     tests/test_api.py 会自动 skip 而不是失败。
+#   * 向量检索后端（BGE-M3 + sqlite-vec/FAISS）默认不启用，见 .env 的 WCA_EMBEDDING_BACKEND。
+#     未启用的原因与降级口径写在 docs/口径声明.md，本项目不声称向量效果已实测。
+#
+# 版本取自本机实测虚拟环境 pip freeze（Windows / Python 3.12.8 / 2026-10-06）。
+
+# ---- 测试（一票否决项 A6：测试可跑）
+pytest==9.1.1
+iniconfig==2.3.0
+packaging==26.3
+pluggy==1.6.0
+colorama==0.4.6
+Pygments==2.21.0
+
+# ---- Web 层（仅 2 个只读接口）
+fastapi==0.142.2
+starlette==1.7.0
+uvicorn==0.54.0
+httpx==0.28.1
+httpcore==1.0.9
+h11==0.16.0
+anyio==4.15.1
+idna==3.20
+certifi==2026.7.22
+click==8.5.0
+annotated-doc==0.0.5
+annotated-types==0.8.0
+pydantic==2.13.5
+pydantic_core==2.46.5
+typing_extensions==4.16.0
+typing-inspection==0.4.4
