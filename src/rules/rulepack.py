@@ -3,11 +3,12 @@
 硬约束（A1 红线）：
   * 只做整数分钟 / 整数分的算术，不出现 float，不调用任何 LLM；
   * 每条 Finding 必须挂 `citations`，否则 Finding.__post_init__ 直接抛错；
-  * 金额只作为「参考测算明细」输出且 `authorized_final=0`，最终数额由人工复核决定（A4）。
+  * **引擎不输出任何应付金额**（需求 D-03 / A4）：只出小时数与倍数档位；
+    金额由 HR 负责人在复核台具名录入，`rules/` 里不存在算钱代码。
 
 严重级分工（这套克制是设计要点，不是偷懒）：
   * 时长上限类规则（CAP-*、WK-W02）可以下「明显违规」——纯数值超限，不依赖外部事实；
-  * 报酬类规则（OT-D01/02/03/04、COMP-C01）最高只到「需复核」——是否足额支付需要工资台账，
+  * 报酬类规则（OT-D01/02/03）最高只到「需复核」——是否足额支付需要工资台账，
     本项目按 §1.3 明确不做薪酬核算，因此绝不越权下判决；
   * 口径存在地方差异或年度排班未核实时，一律再降级为「需复核」，并把差异写进 explanation。
 """
@@ -27,17 +28,13 @@ from .quantities import (
     RATE_HOLIDAY_OT_PERMILLE,
     RATE_RESTDAY_OT_PERMILLE,
     RATE_WEEKDAY_OT_PERMILLE,
-    overtime_pay_cents,
 )
 from .regime import (
-    CYCLE_DAYS,
-    REGIME_COMPREHENSIVE,
-    REGIME_FLEXIBLE,
     REGIME_STANDARD,
     RegimeDecision,
 )
 
-RULE_PACK_VERSION = "rp-2026.10.shenzhen-standard.v2"
+RULE_PACK_VERSION = "rp-2026.10.gd-pilot-standard.v4"
 
 # 《劳动法》第 36 条：平均每周不超过 44 小时（40 小时来自国务院令第 174 号第 3 条）
 WEEKLY_STATUTORY_CAP_MINUTES = 44 * 60
@@ -52,12 +49,14 @@ class EmpScope:
     region_code: str
     org_id: str
     decision: RegimeDecision
-    hourly_normal_cents: int
     daily_std_minutes: int
     weekly_std_minutes: int
     facts: list[DayFacts] = field(default_factory=list)
     quality_issues: list[dict] = field(default_factory=list)
-    cycle_expected_minutes: dict[str, int] = field(default_factory=dict)
+    # 城市档：地方倍数条文与是否建档，来自 config/region_profile.json（src 里没有市名）
+    local_citations: list[str] = field(default_factory=list)
+    region_label: str = ""
+    region_known: bool = True
 
     @property
     def regime(self) -> str:
@@ -68,29 +67,23 @@ class EmpScope:
 class RuleMeta:
     rule_id: str
     name_zh: str
-    tier: str            # day / week / month / cycle / quality / scope
+    tier: str            # day / week / month / quality / scope
     citations: list[str]
     severity_kind: str   # pay(报酬类，最高需复核) / cap(上限类，可下违规) / scope / quality
     version: str = RULE_PACK_VERSION
 
 
 RULE_CATALOG: list[RuleMeta] = [
-    RuleMeta("OT-D01", "工作日延长工作时间", "day", [C.LABOR_LAW_41, C.WAGE_PAYMENT_13, C.SZ_WAGE_18], "pay"),
-    RuleMeta("OT-D02", "休息日工作安排与补休", "day", [C.LABOR_LAW_44, C.MOHRSS_503_6, C.SZ_WAGE_18], "pay"),
+    RuleMeta("OT-D01", "工作日延长工作时间", "day", [C.LABOR_LAW_41, C.WAGE_PAYMENT_13], "pay"),
+    RuleMeta("OT-D02", "休息日工作安排与补休", "day", [C.LABOR_LAW_44, C.MOHRSS_503_6], "pay"),
     RuleMeta("OT-D03", "法定节假日当天工作安排", "day",
-             [C.LABOR_LAW_44, C.LABOR_LAW_40, C.LABOR_LAW_51, C.SZ_WAGE_18], "pay"),
-    RuleMeta("OT-D04", "不定时工时员工法定节假日（深圳特有）", "day", [C.SZ_WAGE_20, C.LABOR_LAW_44], "pay"),
+             [C.LABOR_LAW_44, C.LABOR_LAW_40, C.LABOR_LAW_51], "pay"),
     RuleMeta("CAP-D05", "单日加班超过 3 小时", "day", [C.LABOR_LAW_41, C.SC_WORKTIME_3], "cap"),
     RuleMeta("CAP-W01", "连续工作 7 天无休息日", "week", [C.LABOR_LAW_38], "cap"),
     RuleMeta("WK-W02", "周实际工时超过 44 小时", "week", [C.LABOR_LAW_36], "cap"),
     RuleMeta("WK-W01", "周实际工时超过 40 小时（解释差异）", "week", [C.SC_WORKTIME_3, C.LABOR_LAW_36], "pay"),
     RuleMeta("CAP-M01", "月延长工时累计超过 36 小时", "month", [C.LABOR_LAW_41], "cap"),
     RuleMeta("CAP-M02", "月延长工时超过内部预警线", "month", [C.POLICY_OT_APPROVAL, C.LABOR_LAW_41], "quality"),
-    RuleMeta("COMP-C01", "综合计算工时周期超额", "cycle", [C.MOHRSS_503_5, C.WAGE_PAYMENT_13, C.SZ_WAGE_19], "pay"),
-    RuleMeta("COMP-C02", "未经审批按特殊工时执行", "scope",
-             [C.MOHRSS_503_3, C.MOHRSS_503_7, C.GD_APPROVAL_2009], "cap"),
-    RuleMeta("COMP-C03", "岗位不在特殊工时适用范围内", "scope", [C.MOHRSS_503_4, C.MOHRSS_503_5], "cap"),
-    RuleMeta("FX-F01", "特殊工时豁免/范围说明", "scope", [C.MOHRSS_503_4, C.WAGE_PAYMENT_13], "scope"),
     RuleMeta("XD-01", "跨天班次切分依据不足", "quality", [C.LABOR_LAW_41, C.MOHRSS_503_6], "quality"),
     RuleMeta("NIGHT-01", "夜间时段工时统计（无全国统一标准）", "scope", [C.LABOR_LAW_36], "scope"),
     RuleMeta("QUAL-01", "数据质量异常（缺卡/重复/顺序/畸形入参）", "quality",
@@ -100,13 +93,15 @@ RULE_CATALOG: list[RuleMeta] = [
     RuleMeta("POL-01", "加班缺审批记录（内部制度层）", "quality", [C.POLICY_OT_APPROVAL, C.LCT_4], "quality"),
     RuleMeta("SCOPE-01", "校验范围外：年度日历或调休安排未核实", "scope",
              [C.HOLIDAY_MEASURE_2, C.HOLIDAY_NOTICE_2026], "scope"),
+    RuleMeta("SCOPE-02", "工时制不在本期范围（综合计算工时/不定时），未覆盖", "scope",
+             [C.MOHRSS_503_3, C.MOHRSS_503_5], "scope"),
+    RuleMeta("SCOPE-03", "申报特殊工时但缺审批证据，本期按标准工时校验并提示核实资质", "scope",
+             [C.MOHRSS_503_3, C.MOHRSS_503_7], "scope"),
+    RuleMeta("SCOPE-04", "员工所属城市不在档位表内，只出国家层面结论", "scope",
+             [C.LABOR_LAW_44], "scope"),
 ]
 
 CATALOG_BY_ID = {m.rule_id: m for m in RULE_CATALOG}
-
-
-def _estimate(emp: EmpScope, minutes: int, rate_permille: int) -> int:
-    return overtime_pay_cents(emp.hourly_normal_cents, minutes, rate_permille)
 
 
 def _finding(
@@ -126,13 +121,18 @@ def _finding(
     if meta.severity_kind == "pay" and severity == SEV_VIOLATION:
         # 结构性兜底：报酬类规则不得下「明显违规」
         severity = SEV_REVIEW
+    base = list(citations if citations is not None else meta.citations)
+    if not citations and meta.severity_kind == "pay":
+        for cite in emp.local_citations:          # 报酬类结论按员工所属城市补地方条文
+            if cite not in base:
+                base.append(cite)
     return Finding(
         rule_id=rule_id,
         rule_version=meta.version,
         emp_id=emp.emp_id,
         severity=severity,
         explanation=explanation,
-        citations=list(citations or meta.citations),
+        citations=base,
         metric=metric,
         source_refs=(list(facts.source_refs) if facts else []),
         work_date=work_date,
@@ -154,50 +154,15 @@ def _is_rest(facts: DayFacts) -> bool:
 # ------------------------------------------------------------------ 日级
 def rule_day(emp: EmpScope, cfg: Config) -> list[Finding]:
     out: list[Finding] = []
+    # 范围裁决 D-02（2026-10-08）：本期只判 8 小时标准工时。声明为综合计算工时/不定时
+    # 的员工**不套用标准工时判据**（那会把不定时岗位的正常工作误判成违规），
+    # 改由 rule_scope 统一产出 SCOPE-02「未覆盖」结论。
+    if emp.regime != REGIME_STANDARD:
+        return out
     for facts in emp.facts:
         worked = facts.minutes_worked
 
-        if emp.regime == REGIME_FLEXIBLE:
-            if worked > 0 and facts.day_type == DAY_STATUTORY_HOLIDAY and cfg.region_code.startswith("4403"):
-                out.append(_finding(
-                    emp, "OT-D04", SEV_REVIEW,
-                    f"不定时工作制员工 {facts.work_date} 在法定节假日「{facts.holiday_label}」工作 {worked} 分钟。"
-                    "深圳口径要求按不低于 300% 支付（《深圳市员工工资支付条例》第 20 条），"
-                    "而全国层面（《工资支付暂行规定》第 13 条）对不定时工时不执行该标准；"
-                    "本规则采用更严的深圳口径，最终数额须人工复核。",
-                    {
-                        "minutes_holiday": worked,
-                        "rate_permille": RATE_HOLIDAY_OT_PERMILLE,
-                        "estimate_cents": _estimate(emp, worked, RATE_HOLIDAY_OT_PERMILLE),
-                        "authorized_final": 0,
-                        "region_divergence": "sz-stricter-than-national",
-                    },
-                    facts,
-                ))
-            _append_night(emp, facts, out, cfg)
-            continue
-
         if worked <= 0:
-            continue
-
-        if emp.regime in REGIME_COMPREHENSIVE:
-            if facts.day_type == DAY_STATUTORY_HOLIDAY:
-                out.append(_finding(
-                    emp, "OT-D03", SEV_REVIEW,
-                    f"综合计算工时员工 {facts.work_date} 在法定节假日「{facts.holiday_label}」工作 {worked} 分钟，"
-                    "应按不低于 300% 支付（《工资支付暂行规定》第 13 条第 3 项、"
-                    "《深圳市员工工资支付条例》第 18/19 条）。是否已足额支付须人工核对。",
-                    {
-                        "minutes_holiday": worked,
-                        "rate_permille": RATE_HOLIDAY_OT_PERMILLE,
-                        "estimate_cents": _estimate(emp, worked, RATE_HOLIDAY_OT_PERMILLE),
-                        "authorized_final": 0,
-                        "regime": emp.regime,
-                        "ambiguous_day_type": int(facts.ambiguous_day_type),
-                    },
-                    facts,
-                ))
-            _append_night(emp, facts, out, cfg)
             continue
 
         # ---- 标准工时
@@ -213,9 +178,7 @@ def rule_day(emp: EmpScope, cfg: Config) -> list[Finding]:
                 {
                     "minutes_holiday": worked,
                     "rate_permille": RATE_HOLIDAY_OT_PERMILLE,
-                    "estimate_cents": _estimate(emp, worked, RATE_HOLIDAY_OT_PERMILLE),
                     "holiday_label": facts.holiday_label,
-                    "authorized_final": 0,
                     "ambiguous_day_type": int(facts.ambiguous_day_type),
                 },
                 facts,
@@ -233,7 +196,8 @@ def rule_day(emp: EmpScope, cfg: Config) -> list[Finding]:
             else:
                 text = (
                     f"{facts.work_date} 为休息日（{facts.day_type}），安排工作 {worked} 分钟且未见补休记录，"
-                    "应按不低于 200% 支付（《劳动法》第 44 条第 2 项、《深圳市员工工资支付条例》第 18 条）。"
+                    "应按不低于 200% 支付（《劳动法》第 44 条第 2 项；地方依据见本条 citations 挂的条文，"
+                    "按员工所属城市档位解析，不在文案里写死某个城市）。"
                 )
                 sev = _demote(SEV_REVIEW, facts)
             out.append(_finding(
@@ -242,9 +206,7 @@ def rule_day(emp: EmpScope, cfg: Config) -> list[Finding]:
                     "minutes_restdays": worked,
                     "day_type": facts.day_type,
                     "rate_permille": RATE_RESTDAY_OT_PERMILLE,
-                    "estimate_cents": _estimate(emp, worked, RATE_RESTDAY_OT_PERMILLE),
                     "comp_time_granted": int(facts.comp_time_granted),
-                    "authorized_final": 0,
                 },
                 facts,
             ))
@@ -281,8 +243,6 @@ def rule_day(emp: EmpScope, cfg: Config) -> list[Finding]:
                     "minutes_worked": worked,
                     "daily_std_minutes": emp.daily_std_minutes,
                     "rate_permille": RATE_WEEKDAY_OT_PERMILLE,
-                    "estimate_cents": _estimate(emp, extension, RATE_WEEKDAY_OT_PERMILLE),
-                    "authorized_final": 0,
                     "leave_minutes_covered": facts.minutes_leave,
                     "trip_minutes_covered": facts.minutes_trip,
                 },
@@ -347,15 +307,6 @@ def _iso_week_key(d: date) -> str:
 
 def _month_key(d: date) -> str:
     return f"{d.year:04d}-{d.month:02d}"
-
-
-def _cycle_key(d: date, regime: str) -> str:
-    if regime == "comprehensive_monthly":
-        return _month_key(d)
-    if regime == "comprehensive_quarterly":
-        q = (d.month - 1) // 3 + 1
-        return f"{d.year:04d}-Q{q}"
-    return f"{d.year:04d}"
 
 
 def rule_week(emp: EmpScope, cfg: Config) -> list[Finding]:
@@ -463,102 +414,44 @@ def rule_month(emp: EmpScope, cfg: Config) -> list[Finding]:
     return out
 
 
-def rule_cycle(emp: EmpScope, cfg: Config) -> list[Finding]:
-    out: list[Finding] = []
-    if emp.regime not in REGIME_COMPREHENSIVE:
-        return out
-    agg: dict[str, dict[str, int | bool]] = {}
-    for facts in emp.facts:
-        key = _cycle_key(facts.work_date, emp.regime)
-        cur = agg.setdefault(key, {"worked": 0, "holiday": 0, "calendar_days": 0,
-                                   "workday_slots": 0, "ambiguous": 0})
-        cur["worked"] = int(cur["worked"]) + facts.minutes_worked
-        cur["calendar_days"] = int(cur["calendar_days"]) + 1
-        if facts.day_type == DAY_WORKDAY:
-            cur["workday_slots"] = int(cur["workday_slots"]) + 1
-        if facts.day_type == DAY_STATUTORY_HOLIDAY:
-            cur["holiday"] = int(cur["holiday"]) + facts.minutes_worked
-        if facts.ambiguous_day_type or facts.workday_arrangement_unverified:
-            cur["ambiguous"] = 1
-
-    for cycle_key, cur in sorted(agg.items()):
-        expected = emp.cycle_expected_minutes.get(cycle_key)
-        if expected is None:
-            # 区间把周期截断了，周期法定标准无法成立，不下结论（明确记为范围外）
-            out.append(_finding(
-                emp, "SCOPE-01", SEV_REVIEW,
-                f"周期 {cycle_key} 未完整落在本次校验区间内，无法确定该周期的法定标准工时，"
-                "本次不产出周期超额结论；请扩大区间后重跑。",
-                {"cycle_key": cycle_key, "days_in_scope": int(cur["calendar_days"]),
-                 "cycle_kind": CYCLE_DAYS.get(emp.regime, ("?", 0))[0]},
-                period_key=cycle_key,
-            ))
-            continue
-        over = int(cur["worked"]) - expected
-        if over > 0:
-            note = ("36 小时每月上限是否适用于综合计算工时存在口径差异，"
-                    "本项目保守定为需复核（见 docs/待确认清单.md 第 Q5 项）。"
-                    if not cur["ambiguous"] else
-                    "本周期含调休上班日安排未核实的日期，结论只能到需复核。")
-            out.append(_finding(
-                emp, "COMP-C01", SEV_REVIEW,
-                f"综合计算工时周期 {cycle_key}（{emp.regime}）：实际 {int(cur['worked'])} 分钟，"
-                f"对照周期法定标准 {expected} 分钟，超额 {over} 分钟，按不低于 150% 测算"
-                "（劳部发〔1994〕503 号第 5 条、《工资支付暂行规定》第 13 条、"
-                f"《深圳市员工工资支付条例》第 19 条）。{note}",
-                {
-                    "minutes_worked": int(cur["worked"]),
-                    "expected_minutes": expected,
-                    "minutes_over": over,
-                    "rate_permille": RATE_WEEKDAY_OT_PERMILLE,
-                    "estimate_cents": _estimate(emp, over, RATE_WEEKDAY_OT_PERMILLE),
-                    "authorized_final": 0,
-                    "holiday_minutes": int(cur["holiday"]),
-                    "cycle_kind": CYCLE_DAYS.get(emp.regime, ("?", 0))[0],
-                },
-                period_key=cycle_key,
-            ))
-    return out
-
-
 # ------------------------------------------------------------------ 范围与资质
 def rule_scope(emp: EmpScope, cfg: Config) -> list[Finding]:
     out: list[Finding] = []
     dec = emp.decision
 
-    if dec.declared_regime != REGIME_STANDARD and dec.effective_regime == REGIME_STANDARD:
-        reasons = "；".join(dec.reasons or ["未说明回落原因"])
+    # 范围裁决 D-02（2026-10-08）分两种情形，保守口径不同：
+    # 1) **实际按特殊工时执行**（已审批且岗位适用）——本期不判，产出 SCOPE-02「未覆盖」。
+    #    周期超额与豁免适用都属退出的判据分支，硬套标准工时会把合法的特殊工时排班误判成违规。
+    # 2) **申报特殊工时但回落为标准工时**（缺审批或岗位不符）——法律上就该按标准工时执行，
+    #    所以照常判 J1~J6；但审批资质判定需要审批台账，本期不作违规结论，只出 SCOPE-03 提示复核。
+    if not emp.region_known:
         out.append(_finding(
-            emp, "COMP-C02", SEV_VIOLATION,
-            f"声明 {dec.declared_regime} 但本周期按标准工时校验：{reasons}。"
-            "特殊工时须经劳动行政部门批准（劳部发〔1994〕503 号第 3/7 条、粤劳社发〔2009〕8 号、"
-            "深劳社规〔2009〕13 号），缺审批不得免除加班工资义务。",
-            dec.metric(),
-        ))
-    elif dec.declared_regime == REGIME_FLEXIBLE and dec.effective_regime == REGIME_FLEXIBLE:
-        extra = ("深圳口径下法定节假日仍按 300%（《深圳市员工工资支付条例》第 20 条）。"
-                 if cfg.region_code.startswith("4403") else
-                 "法定节假日是否支付 300% 存在地方差异，本项目未在锁定了深圳之外的口径。")
-        out.append(_finding(
-            emp, "FX-F01", SEV_DEFENSIBLE,
-            "不定时工作制已审批且岗位在适用范围内（503 号文第 4 条）：工作日延长工时与每月上限不执行"
-            f"（《工资支付暂行规定》第 13 条）；{extra}本条为豁免说明，非违规。",
-            dec.metric(),
-        ))
-    elif dec.declared_regime in REGIME_COMPREHENSIVE and dec.effective_regime == dec.declared_regime:
-        out.append(_finding(
-            emp, "FX-F01", SEV_DEFENSIBLE,
-            f"综合计算工时（{dec.declared_regime}）已审批且在适用范围内（503 号文第 5 条），"
-            "工时以周期平均对照法定标准；周期内法定节假日当天仍按 300%。本条为范围说明。",
-            dec.metric(),
+            emp, "SCOPE-04", SEV_REVIEW,
+            f"员工所属城市代码 {emp.region_code} 不在城市档位表内：本次只产出国家层面条文依据的结论，"
+            "不套用任何地方倍数条文，也不默认并入深圳档（需求 §7.3-3 不允许一套规则强盖多城）。"
+            "要纳入该城市请在 config/region_profile.json 增加一档并核实其适用法规。",
+            {"region_code": emp.region_code, "region_label": emp.region_label,
+             "unlisted": 1},
+            citations=[C.LABOR_LAW_44],
         ))
 
-    if dec.declared_regime != REGIME_STANDARD and not dec.eligible_by_job:
+    if dec.effective_regime != REGIME_STANDARD:
         out.append(_finding(
-            emp, "COMP-C03", SEV_VIOLATION,
-            f"岗位 {dec.job_code} 不属于所声明特殊工时的法定适用范围（503 号文第 4/5 条列举岗位），"
-            "即使取得审批也不得对该岗位适用，须重新申报或改回标准工时。",
-            dec.metric(),
+            emp, "SCOPE-02", SEV_REVIEW,
+            f"该员工按 {dec.effective_regime} 执行（岗位 {dec.job_code}，审批标记 {int(dec.approved)}），"
+            "不属于本期覆盖的 8 小时标准工时判据。本期**不产出**周期超额、豁免适用或岗位适用性结论"
+            "（综合计算工时/不定时的判据分支不可控，见需求 §6.2 与举证包「未覆盖清单」）；"
+            "全部出勤事实按未覆盖登记，需要判定请扩范围后重跑，不得套用标准工时判据硬算。",
+            {**dec.metric(), "excluded_reason": "regime-out-of-scope"},
+        ))
+    elif dec.declared_regime != REGIME_STANDARD:
+        reasons = "；".join(dec.reasons or ["未说明回落原因"])
+        out.append(_finding(
+            emp, "SCOPE-03", SEV_REVIEW,
+            f"申报 {dec.declared_regime} 但按标准工时校验（{reasons}）：本期对这类员工**照常产出 J1~J6 结论**，"
+            "因为缺审批时法律上应执行标准工时；而「未取得审批本身是否构成违规」需要行政审批台账，"
+            "本期不作违规结论（需求 §6.1-A 只包含 6 类标准工时判据），只提示人工核实资质。",
+            {**dec.metric(), "judged_as": REGIME_STANDARD},
         ))
 
     for facts in emp.facts:
@@ -638,4 +531,4 @@ def rule_quality(emp: EmpScope, cfg: Config) -> list[Finding]:
     return out
 
 
-DAY_RULES = [rule_day, rule_week, rule_month, rule_cycle, rule_scope, rule_quality]
+DAY_RULES = [rule_day, rule_week, rule_month, rule_scope, rule_quality]

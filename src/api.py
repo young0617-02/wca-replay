@@ -52,6 +52,27 @@ def close_leaked_connections() -> int:
     return n
 
 
+def borrow_connection(cfg: Config) -> sqlite3.Connection:
+    """给**异步**端点自管的连接。
+
+    异步端点跑在事件循环线程里，而依赖注入的同步生成器跑在线程池线程里；
+    把两者混用会撞上 sqlite3 的线程亲和检查（"created in that same thread"）。
+    所以异步端点用这对函数自己开、自己关，账本仍然记同一本。
+    """
+    conn = connect(cfg.db_path, cfg.sqlite_synchronous)
+    init_db(conn)
+    _STATS["borrowed"] = _STATS.get("borrowed", 0) + 1
+    _STATS["opened"] += 1
+    _LIVE[id(conn)] = conn
+    return conn
+
+
+def return_connection(conn: sqlite3.Connection) -> None:
+    _LIVE.pop(id(conn), None)
+    conn.close()
+    _STATS["closed"] += 1
+
+
 def checkpoint_wal(cfg: Config) -> str:
     """把 WAL 里的数据落回主库文件，返回 ok/skip/failed。"""
     if not Path(cfg.db_path).is_file():
@@ -69,7 +90,7 @@ def checkpoint_wal(cfg: Config) -> str:
             conn.close()
 
 try:  # FastAPI 只在启动 API 时必需；核心校验与测试不依赖它
-    from fastapi import Depends, FastAPI, HTTPException, Query
+    from fastapi import Depends, FastAPI, HTTPException, Query, Request
     from fastapi.responses import FileResponse, PlainTextResponse
 
     FASTAPI_AVAILABLE = True
@@ -118,20 +139,29 @@ def create_app(cfg: Config | None = None) -> Any:
             conn.close()
             _STATS["closed"] += 1
 
-    @app.get("/ask", summary="问一答（带 ACL 下推检索与确定性数值工具）")
+    @app.get("/ask", summary="问一答（主体取自会话，不接受 as_emp 自报身份）")
     def ask(
+        request: Request,
         q: str = Query(..., min_length=1, description="自然语言提问"),
-        as_emp: str = Query(..., description="提问主体员工 id（决定可见范围）"),
         top_k: int | None = Query(None, ge=1, le=20),
         conn: sqlite3.Connection = Depends(get_conn),
     ) -> dict:
+        # GAP-05：基线这里是个可由调用方填的 as_emp 参数——等于任何人都能冒充他人。
+        # 现在身份只能来自会话；未登录直接 401，越权测试可以直连接口打回。
+        from .auth import resolve_session
+
+        user = resolve_session(conn, request.cookies.get("wca_session"))
+        if user is None:
+            raise HTTPException(status_code=401, detail="未登录或会话已过期：问答主体只取自会话")
         try:
             agent = ComplianceAgent(conn, cfg)
-            ans = agent.ask(q, actor_emp_id=as_emp, top_k=top_k)
+            ans = agent.ask(q, actor_emp_id=user.emp_id, top_k=top_k)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=f"主体不存在：{exc}") from exc
         return {
             "qid": ans.qid,
+            "actor_emp_id": user.emp_id,        # 主体只可能来自会话，便于举证与测试核对
+            "actor_username": user.username,
             "question": ans.question,
             "intent": ans.intent,
             "tier": ans.tier,
@@ -150,8 +180,16 @@ def create_app(cfg: Config | None = None) -> Any:
             "elapsed_us": ans.elapsed_us,
         }
 
-    @app.get("/evidence/{run_id}", summary="取举证包（zip：三元组 + findings + 审计链 + 质量报表）")
-    def evidence(run_id: str, conn: sqlite3.Connection = Depends(get_conn)) -> Any:
+    @app.get("/evidence/{run_id}", summary="取举证包（需会话；EM 无导出权）")
+    def evidence(run_id: str, request: Request,
+                 conn: sqlite3.Connection = Depends(get_conn)) -> Any:
+        from .auth import resolve_session
+
+        user = resolve_session(conn, request.cookies.get("wca_session"))
+        if user is None:
+            raise HTTPException(status_code=401, detail="未登录或会话已过期")
+        if not user.has("OP", "RV", "AD"):
+            raise HTTPException(status_code=403, detail="服务端拒绝：该角色无导出权")
         row = conn.execute("SELECT * FROM evidence_package WHERE package_id = ?",
                            (f"pkg-{run_id}",)).fetchone()
         if row is None:
@@ -177,6 +215,14 @@ def create_app(cfg: Config | None = None) -> Any:
         }
         return FileResponse(zip_path, media_type="application/zip",
                             filename=zip_path.name, headers=headers)
+
+    # 界面（P6）：3 视图 + 登录。路由白名单见 tests/test_api.py。
+    from fastapi.staticfiles import StaticFiles
+
+    from .web import STATIC_DIR, register_web_routes
+
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+    register_web_routes(app, cfg, get_conn)
 
     return app
 

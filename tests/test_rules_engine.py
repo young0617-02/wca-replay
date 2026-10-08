@@ -1,7 +1,9 @@
 """F-005/F-006 确定性校验引擎单测。
 
-金额与分钟数的期望值都写成手工推导式（基数取 3000 分/小时这种能手算的数），
+期望值一律写成**手工推导式**（分钟数能手算：480 分钟标准日 + 60 分钟延长 = 540），
 避免「引擎自己生成、引擎自己判分」的循环论证。
+需求 D-03 后引擎不再产出金额，因此断言落在**分钟数与法定倍数档位**上，
+并额外守一条：结论里不得再出现任何金额字段。
 """
 
 from __future__ import annotations
@@ -13,9 +15,7 @@ import pytest
 from conftest import find, load_ambiguous_holiday, load_night_shift, load_streak
 from src.engine import run_check
 from src.rules.findings import SEV_DEFENSIBLE, SEV_REVIEW, SEV_VIOLATION
-from src.rules.quantities import overtime_pay_cents
 
-BASE = 3000  # T-STD 正常工作时间小时工资（分）
 
 
 def _m(f) -> dict:
@@ -37,16 +37,16 @@ def test_extension_60min_is_defensible_and_pays_150_percent(checked):
     got = f[0]
     assert got.severity == SEV_DEFENSIBLE
     assert _m(got)["minutes_extension"] == 60
-    # 3000 分/小时 x 60 分钟 x 150% = 4500 分（45 元）
-    assert _m(got)["estimate_cents"] == overtime_pay_cents(BASE, 60, 1500) == 4500
-    assert _m(got)["authorized_final"] == 0
+    assert _m(got)["rate_permille"] == 1500          # 工作日延长 不低于 150%
+    assert "estimate_cents" not in _m(got), "引擎不得再输出金额（需求 D-03）"
 
 
 def test_extension_120min_requires_review(checked):
     conn, cfg, out = checked
     got = find(out.findings, "OT-D01", emp="T-STD", work_date="2025-09-03")[0]
     assert got.severity == SEV_REVIEW
-    assert _m(got)["estimate_cents"] == 9000  # 3000 x 2 小时 x 1.5
+    assert _m(got)["minutes_extension"] == 120
+    assert _m(got)["rate_permille"] == 1500
 
 
 def test_extension_180min_at_cap_does_not_trigger_daily_violation(checked):
@@ -61,7 +61,8 @@ def test_extension_beyond_3_hours_is_clear_violation(checked):
     assert len(cap) == 1 and cap[0].severity == SEV_VIOLATION
     assert _m(cap[0])["minutes_extension"] == 240
     ot = find(out.findings, "OT-D01", emp="T-STD", work_date="2025-09-05")[0]
-    assert _m(ot)["estimate_cents"] == 18000  # 3000 x 4 小时 x 1.5
+    assert _m(ot)["minutes_extension"] == 240
+    assert _m(ot)["rate_permille"] == 1500
     # 报酬类规则即便同日也不下违规结论
     assert ot.severity != SEV_VIOLATION
 
@@ -72,7 +73,8 @@ def test_rest_day_work_is_200_percent_and_needs_review(checked):
     got = find(out.findings, "OT-D02", emp="T-STD", work_date="2025-09-06")[0]
     assert got.severity == SEV_REVIEW
     assert _m(got)["minutes_restdays"] == 480
-    assert _m(got)["estimate_cents"] == 48000  # 3000 x 8 小时 x 2
+    assert _m(got)["minutes_restdays"] == 480   # 8 小时整
+    assert _m(got)["rate_permille"] == 2000
 
 
 def test_rest_day_with_comp_time_is_defensible(conn, cfg):
@@ -105,7 +107,8 @@ def test_statutory_holiday_work_is_300_percent(checked):
     got = find(out.findings, "OT-D03", emp="T-STD", work_date="2025-10-01")[0]
     assert _m(got)["minutes_holiday"] == 600
     assert _m(got)["rate_permille"] == 3000
-    assert _m(got)["estimate_cents"] == 90000  # 3000 x 10 小时 x 3
+    assert _m(got)["minutes_holiday"] == 600   # 10 小时整
+    assert _m(got)["rate_permille"] == 3000
     assert got.severity == SEV_REVIEW  # 是否足额支付需人工核对，报酬类不下判决
 
 
@@ -168,70 +171,56 @@ def test_monthly_overtime_over_36h_is_violation(checked):
     assert _m(got[0])["counting_scope"] == "weekday_only"
 
 
-def test_comprehensive_cycle_excess_pays_150_percent(checked):
+# ------------------------------------------------------------------ 特殊工时：本期不判，只标未覆盖
+# 需求 D-02（2026-10-08）：综合计算工时与不定时工时的周期超额/豁免/资质判定**退出范围**。
+# 这三条测试守的是"退出得干净"：不许再产出旧结论，也不许把非标准工时岗位偷偷按标准工时硬判。
+def test_comprehensive_regime_is_declared_uncovered_not_judged(checked):
     conn, cfg, out = checked
-    got = find(out.findings, "COMP-C01", emp="T-CMP", period="2025-11")
-    assert len(got) == 1
+    got = find(out.findings, "SCOPE-02", emp="T-CMP")
+    assert len(got) == 1, "综合工时岗位应当且只产出一条未覆盖结论"
+    assert got[0].severity == SEV_REVIEW
     m = _m(got[0])
-    assert m["expected_minutes"] == 9600   # 2025-11 法定工作日 20 天 x 480
-    assert m["minutes_worked"] == 10800    # 20 天 x 540
-    assert m["minutes_over"] == 1200
-    assert m["estimate_cents"] == 60000    # 2000 分/小时 x 20 小时 x 1.5
-    assert got[0].severity == SEV_REVIEW   # 是否足额支付需人工核对
-
-
-def test_partial_cycle_is_declared_out_of_scope_not_guessed(conn, cfg):
-    from conftest import load_base
-
-    load_base(conn, cfg)
-    # 只给 11 月前 5 天数据：周期被截断，不得按「超额」下结论
-    from conftest import punch, schedule
-    from src.ingest import import_rows
-
-    for day in ("2025-11-03", "2025-11-04", "2025-11-05"):
-        import_rows(conn, cfg, "schedule", [
-            schedule("T-CMP", day, f"{day}T09:00:00+08:00", f"{day}T22:00:00+08:00", rest=0)],
-            rel_path=f"inline://sched-{day}")
-        import_rows(conn, cfg, "punch", [punch("T-CMP", f"{day}T09:00:00+08:00", "in"),
-                                         punch("T-CMP", f"{day}T22:00:00+08:00", "out")],
-                    rel_path=f"inline://punch-{day}")
-    out = run_check(conn, cfg, start=date(2025, 11, 3), end=date(2025, 11, 5))
+    assert m["excluded_reason"] == "regime-out-of-scope"
+    assert m["declared_regime"] == "comprehensive_monthly"
+    # 退出范围 = 不再算周期超额，也不再套用标准工时判据
     assert not find(out.findings, "COMP-C01", emp="T-CMP")
-    assert find(out.findings, "SCOPE-01", emp="T-CMP")
+    assert not find(out.findings, "OT-D01", emp="T-CMP")
+    assert not find(out.findings, "CAP-M01", emp="T-CMP")
+    assert not find(out.findings, "WK-W02", emp="T-CMP")
 
 
-# ------------------------------------------------------------------ 特殊工时资质
-def test_flexible_regime_earns_holiday_premium_in_shenzhen(checked):
+def test_flexible_regime_is_declared_uncovered(checked):
     conn, cfg, out = checked
-    got = find(out.findings, "OT-D04", emp="T-FLX", work_date="2025-10-01")
-    assert len(got) == 1
-    m = _m(got[0])
-    assert m["rate_permille"] == 3000
-    assert m["estimate_cents"] == 120000  # 5000 分/小时 x 8 小时 x 3
-    assert m["region_divergence"] == "sz-stricter-than-national"
-
-
-def test_flexible_regime_exempt_from_daily_overtime(checked):
-    conn, cfg, out = checked
+    assert find(out.findings, "SCOPE-02", emp="T-FLX")
+    # 深圳不定时法定节假日 300% 口径（旧 OT-D04）随特殊工时一起退出本期
+    assert not find(out.findings, "OT-D04", emp="T-FLX")
+    assert not find(out.findings, "FX-F01", emp="T-FLX")
     assert not find(out.findings, "OT-D01", emp="T-FLX", work_date="2025-10-09")
-    assert not find(out.findings, "CAP-D05", emp="T-FLX", work_date="2025-10-09")
-    assert find(out.findings, "FX-F01", emp="T-FLX")
 
 
-def test_unapproved_regime_falls_back_to_standard_and_is_violation(checked):
+def test_unapproved_and_ineligible_special_regimes_fall_back_conservatively(checked):
+    """申报特殊工时但缺审批/岗位不符：按标准工时照常判（保守），但不下资质违规结论，只提示核实。"""
     conn, cfg, out = checked
-    got = find(out.findings, "COMP-C02", emp="T-NAPPR")
-    assert len(got) == 1 and got[0].severity == SEV_VIOLATION
-    # 回落后必须按标准工时校验，所以延长 60 分钟要出 OT-D01
+    for emp in ("T-NAPPR", "T-BADJOB"):
+        got = find(out.findings, "SCOPE-03", emp=emp)
+        assert len(got) == 1, f"{emp} 应记一条「按标准工时校验 + 资质待核实」"
+        assert got[0].severity == SEV_REVIEW
+        assert _m(got[0])["judged_as"] == "standard"
+        # 旧的特殊工时资质违规结论（COMP-C02/C03）已随范围退出
+        assert not find(out.findings, "COMP-C02", emp=emp)
+        assert not find(out.findings, "COMP-C03", emp=emp)
+        assert not find(out.findings, "SCOPE-02", emp=emp), "回落员工不是「未覆盖」，仍要判"
+    # 回落员工仍受 6 类标准工时判据约束——这才是保守方向（漏判比误判更贵）
     assert find(out.findings, "OT-D01", emp="T-NAPPR", work_date="2025-09-02")
 
 
-def test_job_not_eligible_for_special_regime_is_violation(conn, cfg):
-    from conftest import load_base
-
-    load_base(conn, cfg)
-    out = run_check(conn, cfg, start=date(2025, 9, 1), end=date(2025, 9, 1))
-    assert find(out.findings, "COMP-C03", emp="T-BADJOB")
+def test_uncovered_findings_carry_citations_and_are_enumerable(checked):
+    """未覆盖不是沉默：每条都要挂条文号，举证包的未覆盖清单才数得出来。"""
+    conn, cfg, out = checked
+    got = find(out.findings, "SCOPE-02", emp="T-CMP")[0]
+    assert got.citations, "未覆盖结论也必须可指向条文（503 号文第 3/5 条）"
+    ids = {f.rule_id for f in out.findings if f.emp_id == "T-CMP"}
+    assert ids == {"SCOPE-02"}, f"非标准工时岗位只应产出未覆盖结论，实际 {ids}"
 
 
 # ------------------------------------------------------------------ 跨零点与夜班
@@ -309,17 +298,20 @@ def test_recheck_is_deterministic(checked):
     assert again.input_fingerprint == out.input_fingerprint
 
 
-def test_money_math_uses_integers_only():
-    import pytest
+def test_rules_layer_contains_no_money_math():
+    """A1/D-03 的结构性证据：rules/ 与 agent/ evidence 里不存在任何金额字段与算钱函数。"""
+    import pathlib as _pl
 
-    from src.util import canonical_json
-
-    assert overtime_pay_cents(3000, 60, 1500) == 4500
-    assert overtime_pay_cents(1, 1, 1) == 0          # 3/60000 -> 0
-    assert overtime_pay_cents(1, 30, 1000) == 1      # 半进位：0.5 分 -> 1 分
-    assert overtime_pay_cents(2, 15, 1000) == 1      # 半进位：0.5 分 -> 1 分
-    with pytest.raises(TypeError):
-        canonical_json({"x": 0.5})
+    root = _pl.Path(__file__).resolve().parent.parent
+    banned = ("overtime_pay_cents", "estimate_cents", "authorized_final", "value_cents")
+    offenders = []
+    for f in list((root / "src" / "rules").rglob("*.py")) + [root / "src" / "agent.py",
+                                                             root / "src" / "evidence.py"]:
+        text = f.read_text(encoding="utf-8")
+        for token in banned:
+            if token in text:
+                offenders.append(f"{f.name}:{token}")
+    assert not offenders, f"判定链里出现了金额符号：{offenders}"
 
 
 def test_pay_rule_violation_is_structurally_demoted():
@@ -331,7 +323,7 @@ def test_pay_rule_violation_is_structurally_demoted():
     emp = EmpScope(
         emp_id="T-X", job_code="assembly_line", region_code="440300", org_id="ORG-A",
         decision=decide("T-X", "assembly_line", "standard", False),
-        hourly_normal_cents=1000, daily_std_minutes=480, weekly_std_minutes=2400,
+        daily_std_minutes=480, weekly_std_minutes=2400,
     )
     assert CATALOG_BY_ID["OT-D01"].severity_kind == "pay"
     got = _finding(emp, "OT-D01", SEV_VIOLATION, "x", {"minutes_extension": 60})

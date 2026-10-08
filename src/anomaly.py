@@ -169,10 +169,19 @@ def write_anomaly_report(conn: sqlite3.Connection, cfg: Config, run_id: str,
 
 
 def decide_review(conn: sqlite3.Connection, cfg: Config, review_id: int, reviewer: str,
-                  decision: str, note: str) -> dict:
-    """人工复核门禁。REVIEW/VIOLATION 结论必须有复核记录才算闭环（audit 追加，不改历史）。"""
+                  decision: str, note: str, *, amount_cents: int | None = None) -> dict:
+    """人工复核门禁。REVIEW/VIOLATION 结论必须有复核记录才算闭环（audit 追加，不改历史）。
+
+    `amount_cents` 是**人工录入**的应付金额（分）：引擎不产出金额（需求 D-03），
+    金额只能由具名的 HR 负责人录进复核单，并且永不进入问答链与送云上下文。
+    """
     if decision not in ("APPROVED", "REJECTED", "NEEDS_MORE_DATA"):
         raise ValueError(f"非法复核结论: {decision}")
+    if amount_cents is not None:
+        if isinstance(amount_cents, bool) or not isinstance(amount_cents, int):
+            raise ValueError("金额必须是整数分（int），不接受浮点或其它类型")
+        if amount_cents < 0:
+            raise ValueError("金额不得为负")
     row = conn.execute("SELECT * FROM review_item WHERE review_id = ?", (review_id,)).fetchone()
     if row is None:
         raise ValueError(f"未知 review_id: {review_id}")
@@ -180,16 +189,51 @@ def decide_review(conn: sqlite3.Connection, cfg: Config, review_id: int, reviewe
         raise ValueError(f"review_id={review_id} 已有复核结论，不得覆盖（只允许追加新单）")
     ts = datetime.now(CN_TZ).isoformat()
     conn.execute(
-        "UPDATE review_item SET status = ?, reviewer = ?, decided_at = ?, note = ? WHERE review_id = ?",
-        (decision, reviewer, ts, note, review_id),
+        "UPDATE review_item SET status = ?, reviewer = ?, decided_at = ?, note = ?, "
+        "amount_cents_input = ?, amount_entered_by = ?, amount_entered_at = ? WHERE review_id = ?",
+        (decision, reviewer, ts, note, amount_cents,
+         f"human:{reviewer}" if amount_cents is not None else None,
+         ts if amount_cents is not None else None, review_id),
     )
     seq, entry = append_audit(
         conn, run_id=row["run_id"], actor=f"human:{reviewer}", action="review.decision",
         payload={"review_id": review_id, "source_type": row["source_type"],
-                 "source_id": row["source_id"], "decision": decision, "note": note},
+                 "source_id": row["source_id"], "decision": decision, "note": note,
+                 # 金额进审计链是**人工录入**的记录（谁录的、何时），不是引擎输出
+                 "amount_cents_input": amount_cents},
         ts=ts, cfg=cfg,
     )
     return {"review_id": review_id, "decision": decision, "audit_seq": seq, "entry_hash": entry}
+
+
+def review_queue(conn: sqlite3.Connection, *, run_id: str | None = None,
+                 only_open: bool = True, limit: int = 200) -> list[dict]:
+    """复核台队列：结论 + 条文 + 行级来源 + 已有复核记录，一条查询取全（视图②的数据源）。"""
+    where = ["r.status = 'OPEN'"] if only_open else ["1=1"]
+    params: list = []
+    if run_id:
+        where.append("r.run_id = ?")
+        params.append(run_id)
+    params.append(int(limit))
+    rows = conn.execute(
+        f"""SELECT r.review_id, r.run_id, r.source_type, r.source_id, r.status, r.reviewer,
+                   r.decided_at, r.note, r.amount_cents_input, r.amount_entered_by,
+                   f.rule_id, f.rule_version, f.emp_id, f.work_date, f.period_key,
+                   f.severity, f.explanation, f.citation_ids, f.source_refs,
+                   f.metric_json,
+                   e.pseudonym, e.region_code
+            FROM review_item r
+            LEFT JOIN finding f
+                   ON f.run_id = r.run_id AND r.source_type = 'finding'
+                  AND (f.rule_id || ':' || f.emp_id || ':' ||
+                       COALESCE(f.work_date, f.period_key, 'None') = r.source_id
+                    OR f.rule_id || ':' || f.emp_id || ':' ||
+                       COALESCE(f.work_date, f.period_key, '') = r.source_id)
+            LEFT JOIN employee e ON e.emp_id = f.emp_id
+            WHERE {' AND '.join(where)}
+            ORDER BY r.review_id DESC LIMIT ?""",
+        params).fetchall()
+    return [dict(r) for r in rows]
 
 
 def review_backlog(conn: sqlite3.Connection) -> list[dict]:

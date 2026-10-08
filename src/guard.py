@@ -14,8 +14,9 @@ from .util import round_half_up
 
 # 重大事项：涉及钱、赔偿、违法定性的提问，一律不得由系统单方给最终结论
 MAJOR_MATTER_RE = re.compile(
-    r"(该付多少|应付多少|赔多少|赔偿|补偿|加付|最终|多少钱|是否违法|算不算违法|"
-    r"能不能只给|要不要发|要不要赔|该不该赔|能不能拒|合法吗|违规吗)"
+    r"(该付多少|应付多少|该拿多少|拿多少|给多少|发多少|赔多少|赔偿|补偿|加付|最终|多少钱|多少加班费|"
+    r"加班费多少|加班费怎么算|是否违法|算不算违法|能不能只给|要不要发|要不要赔|该不该赔|能不能拒|"
+    r"合法吗|违规吗)"
 )
 # 与 src/util.py 同口径：字母数字紧邻的数字串（如员工号 E012 里的 012）不算数值 token
 NUM_RE = re.compile(r"(?<![0-9A-Za-z.])\d[\d,]*(?:\.\d+)?(?![0-9A-Za-z])")
@@ -172,7 +173,7 @@ def _rule_lines(facts: list[dict]) -> str:
         elif f.get("kind") == "numeric":
             lines.append(
                 f"· 规则 {f.get('rule_id', '')}：{f.get('label', '')} {f.get('value_text', '')}，"
-                f"法定倍数 {f.get('rate_text', '')}；金额明细存于举证包（authorized_final=0），"
+                f"法定倍数 {f.get('rate_text', '')}；本系统不产出金额，"
                 "须复核后才可对外"
             )
         elif f.get("kind") == "acl_denied":

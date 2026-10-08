@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}导入与异常{% endblock %}
+{% block body %}
+<section>
+  <h2>① 导入打卡 / 排班 / 请假 / 出差 / 补卡</h2>
+  <div class="row">
+    <input type="file" id="csv" accept=".csv">
+    <button id="doImport">上传并导入</button>
+    <span id="importMsg" class="ai"></span>
+  </div>
+  <p class="ai">导入落盘到 <code>var/uploads/</code> 后调用与脚本同一个 <code>import_csv_file</code>：
+    每行保留来源文件名、行号与文件 sha256（A7）。脏数据整行拒收并汇成质量结论，不带脏数据进校验。</p>
+</section>
+
+<section>
+  <h2>发起校验（选城市档 + 规则版本）</h2>
+  <div class="row">
+    <label>城市档
+      <select id="region">
+        {% for code in cities %}<option value="{{ code }}">{{ code }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>起 <input id="start" type="date" value="2025-09-01"></label>
+    <label>止 <input id="end" type="date" value="2026-04-30"></label>
+    <button id="doCheck">跑校验</button>
+    <span id="checkMsg" class="ai"></span>
+  </div>
+  <p class="ai">规则版本由服务端配置决定（当前 <code>{{ rule_pack }}</code>），不由界面自选——
+    防止有人在现场换判据却仍说"同一套规则"。</p>
+</section>
+
+<section>
+  <h2>最近运行 <code>{{ run_id or '（尚无运行）' }}</code></h2>
+  <div class="cards">
+    <div class="card"><b>{{ rollup.get('VIOLATION', 0) }}</b>明显违规</div>
+    <div class="card"><b>{{ rollup.get('REVIEW', 0) }}</b>需复核</div>
+    <div class="card"><b>{{ rollup.get('DEFENSIBLE', 0) }}</b>可申辩</div>
+    <div class="card"><b>{{ reject_count }}</b>整行拒收（质量门禁）</div>
+  </div>
+</section>
+
+<section>
+  <h2>异常清单（可展开到原始行）</h2>
+  <table>
+    <thead><tr><th>员工</th><th>日期/周期</th><th>分级</th><th>规则 ID</th><th>条文</th>
+      <th>来源行</th><th>说明</th></tr></thead>
+    <tbody>
+    {% for a in anomalies %}
+      <tr>
+        <td>{{ a.emp_id }}</td>
+        <td>{{ a.work_date or a.period_key or '期间汇总' }}</td>
+        <td class="sev-{{ a.severity }}">{{ a.severity_label }}</td>
+        <td>{{ a.rule_ids|join(', ') }}</td>
+        <td>{{ a.citations|join(', ') }}</td>
+        <td>
+          {% for ref in a.source_refs[:4] %}
+            <span title="{{ ref.rel_path or '' }}">{{ ref.file_id }}:{{ ref.line_no }}</span>{% if not loop.last %} · {% endif %}
+          {% endfor %}
+          {% if a.source_refs|length > 4 %}…共 {{ a.source_refs|length }} 处{% endif %}
+        </td>
+        <td>{{ a.explanations|join(' / ')|truncate(140) }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="7">尚无结论</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2>质量记录（最近 40 条）</h2>
+  <table>
+    <thead><tr><th>原因码</th><th>严重级</th><th>字段</th><th>行号</th><th>文件</th><th>说明</th></tr></thead>
+    <tbody>
+    {% for i in issues %}
+      <tr><td>{{ i.rule_id }}</td><td>{{ i.severity }}</td><td>{{ i.field_name }}</td>
+          <td>{{ i.line_no }}</td><td>{{ i.file_id }}</td>
+          <td>{{ i.detail|truncate(120) }}</td></tr>
+    {% else %}<tr><td colspan="6">无质量问题</td></tr>{% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}
+
+{% block script %}
+<script>
+  wcaBindImport();
+  wcaBindCheck();
+</script>
+{% endblock %}

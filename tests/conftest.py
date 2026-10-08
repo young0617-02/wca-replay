@@ -18,7 +18,7 @@ from src.engine import run_check
 from src.ingest import import_rows
 from src.kb import build_kb
 
-RULE_PACK = "rp-2026.10.shenzhen-standard.v2"
+RULE_PACK = "rp-2026.10.gd-pilot-standard.v4"
 
 
 @pytest.fixture
@@ -29,6 +29,10 @@ def cfg(tmp_path: Path) -> Config:
         WCA_DATA_DIR=str(tmp_path / "data"),
         WCA_REPORTS_DIR=str(tmp_path / "reports"),
         WCA_PACKAGES_DIR=str(tmp_path / "packages"),
+        # 测试用账号写在自己的临时目录里：既不动仓库里的演示账号文件，
+        # 也保证"账号绑定的是夹具里的员工"这件事是显式的。
+        WCA_USERS_PATH=str(tmp_path / "users.json"),
+        WCA_UPLOAD_DIR=str(tmp_path / "uploads"),
         WCA_RULE_PACK=RULE_PACK,
         WCA_REGION_CODE="440300",
         WCA_LLM_PROVIDER="stub",
@@ -243,3 +247,22 @@ def find(findings, rule_id: str, emp: str | None = None, work_date: str | None =
             and (emp is None or f.emp_id == emp)
             and (work_date is None or f.work_date == work_date)
             and (period is None or f.period_key == period)]
+
+
+def seed_users(cfg, bindings) -> str:
+    """给界面/接口测试写一份临时账号文件：bindings = [(用户名, emp_id, [角色], 口令)]。
+
+    口令只以 scrypt 哈希落盘，与真实运行时的 `config/users.json` 同构，
+    因此测试覆盖到的是"真的那条校验路径"，不是为测试开的后门。
+    """
+    import json
+
+    from src.auth import hash_password
+
+    users = [{"username": u, "emp_id": e, "roles": list(r), "pw_hash": hash_password(p)}
+             for u, e, r, p in bindings]
+    path = Path(cfg.users_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"schema": "wca-users-v1", "users": users}, ensure_ascii=False),
+                    encoding="utf-8")
+    return str(path)

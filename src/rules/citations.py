@@ -38,6 +38,8 @@ SZ_WAGE_4 = "local.sz.wage-reg.4"     # 约定正常工作时间工资不得低�
 SZ_WAGE_18 = "local.sz.wage-reg.18"   # 150%/200%/300%，基数=本人正常工作时间工资
 SZ_WAGE_19 = "local.sz.wage-reg.19"   # 综合工时周期内超过正常工作时间部分按 150%
 SZ_WAGE_20 = "local.sz.wage-reg.20"   # 不定时工时员工法定节假日工作按 300%
+GD_WAGE_20 = "local.gd.wage-reg.20"   # 广东省工资支付条例：150%/200%/300%（广佛适用档）
+GD_WAGE_23 = "local.gd.wage-reg.23"   # 广东省：经批准不定时工时不适用第 20 条（本期不判，仅备查）
 GD_APPROVAL_2009 = "local.gd.approval-2009"      # 粤劳社发〔2009〕8号 审批管理
 SZ_APPROVAL_6 = "local.sz.approval-2009.6"       # 深圳市不定时工作制审批
 SZ_APPROVAL_8 = "local.sz.approval-2009.8"       # 深圳市综合计算工时审批
@@ -64,6 +66,7 @@ ALL_CITATIONS = [
     MOHRSS_503_3, MOHRSS_503_4, MOHRSS_503_5, MOHRSS_503_6, MOHRSS_503_7,
     WAGE_PAYMENT_13,
     SZ_WAGE_4, SZ_WAGE_18, SZ_WAGE_19, SZ_WAGE_20,
+    GD_WAGE_20, GD_WAGE_23,
     GD_APPROVAL_2009, SZ_APPROVAL_6, SZ_APPROVAL_8,
     HOLIDAY_NOTICE_2025, HOLIDAY_NOTICE_2026,
     POLICY_ATTENDANCE, POLICY_OT_APPROVAL, POLICY_PAY_BASE,

@@ -1,0 +1,39 @@
+{
+  "schema": "wca-not-covered-v1",
+  "note": "未覆盖清单：本期**明确不做**与**未验证**的东西。举证包与 README 都带这份清单，目的是让外部接收方不因缺项而误判为造假。条目应与 docs/口径声明.md 一致；不一致时以本文件为准（它进举证包，是证据的一部分）。",
+  "scope": {
+    "worktime_regimes_covered": ["standard"],
+    "worktime_regimes_excluded": [
+      "comprehensive_monthly",
+      "comprehensive_quarterly",
+      "comprehensive_yearly",
+      "flexible"
+    ],
+    "excluded_reason": "需求裁决 D-02：周期超额与豁免判定的分支不可控，本期只做 8 小时标准工时；命中即产出 SCOPE-02/03 未覆盖标记，不套用标准工时硬判",
+    "cities_covered_from": "config/region_profile.json",
+    "money_outputs": "引擎不产出任何应付金额（需求 D-03）；金额为 HR 负责人具名人工录入"
+  },
+  "rules_excluded": [
+    {"rule_id": "COMP-C01", "why": "综合计算工时周期超额：退出范围（D-02）"},
+    {"rule_id": "COMP-C02", "why": "未经审批按特殊工时执行：资质判定需审批台账，本期只出 SCOPE-03 提示复核"},
+    {"rule_id": "COMP-C03", "why": "岗位不在特殊工时适用范围：同上，需企业主数据与审批文件"},
+    {"rule_id": "FX-F01", "why": "不定时/综合工时豁免说明：退出范围（D-02）"},
+    {"rule_id": "OT-D04", "why": "深圳不定时工时法定节假日 300%（特区条例第 20 条）：属特殊工时判定，本期不产出结论，条文仅作出处备查"}
+  ],
+  "known_limitations": [
+    "一天只取首末卡，多段班次不拼接",
+    "夜班只统计分钟数，无夜班津贴判定依据（国家无统一标准）",
+    "跨零点班次归属无法规依据，参数 cross_day_cut_hour 为自设；无排班计划时该日结论降为需复核",
+    "出差期间是否计延长工时未找到公开依据，trip_record 只登记事实不参与倍数判定",
+    "字段语义取自公开资料、未经 HR 访谈核对；8 个字段为自定义建模"
+  ],
+  "not_tested": [
+    "云 API 轨的延迟、成功率、真实 token 用量与账单、结构化输出稳定性",
+    "公网/跨浏览器/移动端的界面表现；界面的人工可用性观察（本轮只做了服务端行为验证）",
+    "1,000 行档的举证包导出耗时（本轮样本 101 条结论）",
+    "v4 判据下的整轮校验耗时与 SQL 语句数",
+    "向量检索收益（未引入向量库）",
+    "第二人按演示脚本盲跑 30 分钟的用时"
+  ],
+  "citation_caveats_from": "docs/字段口径与条文依据.md 第五节（13 项存疑，含 flk.npc.gov.cn 取不到正文、489/503 号文现行性字段空白、区划代码为网站标识码反推）"
+}

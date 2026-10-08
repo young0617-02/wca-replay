@@ -119,16 +119,17 @@ def build_personnel_docs(conn: sqlite3.Connection) -> int:
         month_list = ",".join(r["m"] for r in months)
 
         att_body = (
-            f"员工 {e['emp_id']}（{e['pseudonym']}）考勤汇总：覆盖月份 {month_list or '无'}；"
+            f"员工 {e['emp_id']} 考勤汇总：覆盖月份 {month_list or '无'}；"
             f"有出勤记录 {int(agg['days'])} 天，累计工作 {int(agg['worked'])} 分钟，"
             f"其中认定加班 {int(agg['ot'])} 分钟，夜间时段 {int(agg['night'])} 分钟；"
             f"异常分级：{sev_txt}。工时制 {e['worktime_regime']}。"
         )
+        # NFR-18：薪酬类条目只索引「存在且受限」这件事，不索引任何金额数值——
+        # 一旦把基数/分位数写进正文，它就可能被召回并随上下文发往外部模型后端。
         pay_body = (
-            f"员工 {e['emp_id']}（{e['pseudonym']}）薪酬明细：正常工作时间小时工资 "
-            f"{int(e['normal_hourly_cents'])} 分，月计薪基数（按174小时折算）"
-            f"{int(e['normal_hourly_cents']) * 174} 分，加班工资计算基数同上；"
-            f"季度奖与专项补贴不计入加班基数。受控数据，仅本人与授权薪酬岗可见。"
+            f"员工 {e['emp_id']} 薪酬明细（受限条目）：本条**不含任何金额数值**；"
+            f"加班工资基数与个体薪酬的具体取值由 HR 负责人在复核台具名录入与确认，"
+            f"不经检索链路外发。可见性：仅本人与授权薪酬岗。"
         )
         conn.execute(
             "INSERT OR REPLACE INTO kb_doc(doc_id, doc_type, category, title, article_no, body, "
@@ -136,7 +137,7 @@ def build_personnel_docs(conn: sqlite3.Connection) -> int:
             "region_code, version, acl_scope, acl_org_ids, acl_emp_id, confidence_note, body_sha256) "
             "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (f"personnel.attendance.{e['emp_id']}", "personnel_data", "attendance_summary",
-             f"{e['pseudonym']} 考勤汇总", "", att_body,
+             f"考勤汇总 · {e['emp_id']}", "", att_body,
              f"系统内合成考勤数据（员工 {e['emp_id']}），生成种子见 data/generator",
              "", "合成数据", "", "", "", e["region_code"], "v1-合成", ACL_SELF,
              json.dumps([e["org_id"]], ensure_ascii=False), e["emp_id"],
@@ -148,7 +149,7 @@ def build_personnel_docs(conn: sqlite3.Connection) -> int:
             "region_code, version, acl_scope, acl_org_ids, acl_emp_id, confidence_note, body_sha256) "
             "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (f"personnel.payroll.{e['emp_id']}", "personnel_data", "payroll_detail",
-             f"{e['pseudonym']} 薪酬明细", "", pay_body,
+             f"薪酬明细（受限） · {e['emp_id']}", "", pay_body,
              f"系统内合成薪酬基数（员工 {e['emp_id']}）", "", "合成数据", "", "", "",
              e["region_code"], "v1-合成", ACL_SELF,
              json.dumps([e["org_id"]], ensure_ascii=False), e["emp_id"],

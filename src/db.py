@@ -38,6 +38,7 @@ def schema_digest() -> str:
 
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+    _migrate_review_amount(conn)
     set_meta(conn, "schema_version", SCHEMA_VERSION)
     set_meta(conn, "schema_digest", schema_digest())
 
@@ -102,3 +103,15 @@ def _assert_ident(name: str) -> None:
     """表名来自代码常量而非用户输入；仍做白名单校验，防注入也防手滑。"""
     if not name.replace("_", "").isalnum():
         raise ValueError(f"非法表名: {name!r}")
+
+
+def _migrate_review_amount(conn: sqlite3.Connection) -> None:
+    """给已存在的库补上"人工录入金额"列（需求 D-03：金额只能由人录入，不由引擎产出）。
+
+    只加列、不改任何既有行的判定值；老库的复核记录该列保持 NULL，表示"未录入"。
+    """
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(review_item)")}
+    if "amount_cents_input" not in cols:
+        conn.execute("ALTER TABLE review_item ADD COLUMN amount_cents_input INTEGER")
+        conn.execute("ALTER TABLE review_item ADD COLUMN amount_entered_by TEXT")
+        conn.execute("ALTER TABLE review_item ADD COLUMN amount_entered_at TEXT")

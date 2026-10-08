@@ -102,6 +102,7 @@ class ComplianceAgent:
         self.cfg = cfg
         self.provider = provider or build_provider(cfg)
         self._fallback = StubProvider("stub-offline-v1")
+        self._plan_degraded = False
 
     # ---------------------------------------------------------------- 主入口
     def ask(self, question: str, *, actor_emp_id: str, doc_types: list[str] | None = None,
@@ -161,6 +162,7 @@ class ComplianceAgent:
         with timer("compose"):
             text, provider_name, model, degraded, tok_in, tok_out = self._compose(
                 question, plan, facts, allowed)
+        degraded = degraded or self._plan_degraded
 
         numeric_ok = _numeric_backed(plan, facts)
         coverage = _coverage(facts)
@@ -206,6 +208,8 @@ class ComplianceAgent:
         try:
             return self.provider.plan(question, subject_emp_id=actor_emp_id)
         except LlmUnavailable:
+            # 意图分类阶段的降级也要留痕：只标成文阶段的降级会让"模型其实没参与路由"这件事被掩盖
+            self._plan_degraded = True
             return self._fallback.plan(question, subject_emp_id=actor_emp_id)
 
     def _compose(self, question: str, plan: QueryPlan, facts: list[dict],
@@ -279,7 +283,6 @@ class ComplianceAgent:
                 "minutes_ot_restdays": int(agg["ot_rest"]), "minutes_ot_holiday": int(agg["ot_holiday"]),
                 "days": int(agg["days"]), "period": period or "全部已入库区间",
                 "rule_id": "SQL:attendance_day", "rule_version": run["rule_pack_version"],
-                "value_cents": 0, "authorized_final": 0,
             })
         for r in rows:
             metric = json.loads(r["metric_json"])
@@ -289,8 +292,6 @@ class ComplianceAgent:
                 "value_text": _metric_text(metric),
                 "rule_id": r["rule_id"], "rule_version": run["rule_pack_version"],
                 "rate_permille": rate, "rate_text": RATE_TEXT.get(rate, ""),
-                "estimate_cents": int(metric.get("estimate_cents", 0)),
-                "authorized_final": int(metric.get("authorized_final", 0)),
                 "severity": r["severity"], "severity_label": SEV_LABEL_ZH[r["severity"]],
                 "minutes_extension": int(metric.get("minutes_extension",
                                                     metric.get("minutes_holiday",

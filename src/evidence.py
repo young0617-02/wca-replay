@@ -160,8 +160,142 @@ PACKAGE_README = (
     "本举证包由 worktime-compliance-agent 生成。\r\n"
     "三元组（规则版本 / 输入指纹 / 结论摘要）用于复核：在相同输入与相同规则版本下重跑，"
     "结论摘要必须逐字节一致。\r\n"
-    "包内所有金额均为「参考测算明细」，authorized_final=0，不构成最终应付数额承诺。\r\n"
+    "本包不含任何应付金额：引擎只输出小时数与法定倍数档位，金额由 HR 负责人在复核台具名录入。\r\n"
 )
+
+
+# ---------------------------------------------------------------- 责任与未覆盖（US-EX-02 / US-EX-03 / US-RV-01）
+NOT_COVERED_PATH = "config/not_covered.json"
+
+
+def not_covered_block(cfg: Config) -> dict:
+    """未覆盖清单：外部接收方最怕的是"缺项＝造假"，所以缺什么必须自己说清楚。
+
+    覆盖城市来自档位表（配置，不写死），其余来自 `config/not_covered.json`。
+    """
+    from pathlib import Path as _P
+
+    raw = _P(NOT_COVERED_PATH)
+    data = json.loads(raw.read_text(encoding="utf-8")) if raw.is_file() else {}
+    profile = getattr(cfg, "region_profile", None)
+    data["scope"]["cities_covered"] = profile.codes() if profile else [cfg.region_code]
+    data["scope"]["cities_covered_labels"] = ([profile.label(c) for c in profile.codes()]
+                                              if profile else [cfg.region_label])
+    data["generated_from"] = NOT_COVERED_PATH
+    return data
+
+
+def responsibility_block(conn: sqlite3.Connection, cfg: Config, run_id: str) -> dict:
+    """谁参与了什么：机器只做解释与检索，数值出自确定性引擎，对外结论必须有人签名。"""
+    rows = conn.execute(
+        "SELECT f.finding_id, f.rule_id, f.emp_id, f.work_date, f.period_key, f.severity, "
+        "       r.status, r.reviewer, r.decided_at, r.note, r.amount_cents_input, "
+        "       r.amount_entered_by, r.amount_entered_at "
+        "FROM finding f LEFT JOIN review_item r "
+        "  ON r.run_id = f.run_id AND r.source_type = 'finding' "
+        " AND (f.rule_id || ':' || f.emp_id || ':' || COALESCE(f.work_date, f.period_key, 'None') = r.source_id "
+        "      OR f.rule_id || ':' || f.emp_id || ':' || COALESCE(f.work_date, f.period_key, '') = r.source_id) "
+        "WHERE f.run_id = ? ORDER BY f.emp_id, f.work_date, f.rule_id", (run_id,)).fetchall()
+    confirmed, pending = [], []
+    for x in rows:
+        entry = {"rule_id": x["rule_id"], "emp_id": x["emp_id"],
+                 "work_date": x["work_date"], "period_key": x["period_key"],
+                 "severity": x["severity"]}
+        if x["status"] and x["status"] != "OPEN":
+            entry.update({"decision": x["status"], "confirmed_by": x["reviewer"],
+                          "confirmed_at": x["decided_at"], "note": x["note"],
+                          "amount_cents_input": x["amount_cents_input"],
+                          "amount_entered_by": x["amount_entered_by"]})
+            confirmed.append(entry)
+        else:
+            pending.append(entry)
+
+    ai_rows = conn.execute(
+        "SELECT qid, asked_at, actor_emp_id, question, intent, gate_decision, citation_ids, "
+        "       numeric_tokens, allowed_numbers, provider, model, needs_review "
+        "FROM question_log ORDER BY asked_at").fetchall() if _has_table(conn, "question_log") else []
+    # 问答留痕不按 run 过滤：它是"这台机器上 AI 参与过什么"的账，
+    # 与某一次校验结论没有一一对应关系，硬编成 per-run 反而是假的。
+    ai = [{"qid": a["qid"], "asked_at": a["asked_at"], "actor_emp_id": a["actor_emp_id"],
+           "intent": a["intent"], "provider": a["provider"], "model": a["model"],
+           "gate_decision": a["gate_decision"],
+           "citations": json.loads(a["citation_ids"] or "[]"),
+           "numeric_tokens": json.loads(a["numeric_tokens"] or "[]"),
+           "escalated_to_human": bool(int(a["needs_review"] or 0))}
+          for a in ai_rows]
+    signs = conn.execute(
+        "SELECT seq, actor, ts, payload_sha256 FROM audit_event "
+        "WHERE action = 'evidence.sign' AND run_id = ? ORDER BY seq", (run_id,)).fetchall()
+    return {
+        "principle": "数值一律由确定性规则引擎计算；AI 只做意图归类与已有事实的叙述，"
+                     "且出口有数字白名单与重大事项拒诺两道闸；对外结论必须由具名人工确认。",
+        "engine_only_outputs": ["分钟数", "法定倍数档位（千分位）", "规则 ID", "条文号", "原始行号"],
+        "never_output": ["应付金额", "赔偿数额", "违法定性"],
+        "ai_participation_scope_note": "问答留痕为全仓范围（question_log 不按 run 切分）",
+        "ai_participation": ai,
+        "ai_participation_count": len(ai),
+        "human_confirmations": confirmed,
+        "human_confirmed_findings": len(confirmed),
+        "unsigned_findings_excluded_from_conclusions": len(pending),
+        "pending_findings": [p["rule_id"] + ":" + p["emp_id"] for p in pending][:200],
+        "signed_by": [{"seq": int(x["seq"]), "actor": x["actor"], "ts": x["ts"]} for x in signs],
+        "signed": bool(signs),
+    }
+
+
+def _has_table(conn: sqlite3.Connection, name: str) -> bool:
+    return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
+                        (name,)).fetchone() is not None
+
+
+def sign_package(conn: sqlite3.Connection, cfg: Config, run_id: str, signed_by: str) -> dict:
+    """签发：把"谁为这份材料负责"追加进审计链（不改写历史）。CLI 与界面共用这一个入口。"""
+    if not signed_by.strip():
+        raise ValueError("签发人不能为空")
+    seq, entry_hash = append_audit(
+        conn, run_id=run_id, actor=f"human:{signed_by}", action="evidence.sign",
+        payload={"run_id": run_id, "signed_by": signed_by}, cfg=cfg)
+    return {"review_id": None, "audit_seq": seq, "entry_hash": entry_hash, "signed_by": signed_by}
+
+
+def _write_conclusions_csv(path: Path, rows: list[dict]) -> None:
+    """对外结论集：**只收已登记人工结论的条目**（US-RV-01★：无人工结论的异常不得进入）。"""
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        w = csv.writer(fh, lineterminator="\n")
+        w.writerow(["rule_id", "emp_id", "work_date", "period_key", "severity",
+                    "decision", "confirmed_by", "confirmed_at",
+                    "amount_cents_input", "amount_entered_by", "note"])
+        for x in rows:
+            w.writerow([x["rule_id"], x["emp_id"], x["work_date"], x["period_key"], x["severity"],
+                        x["decision"], x["confirmed_by"], x["confirmed_at"],
+                        x.get("amount_cents_input"), x.get("amount_entered_by"), x.get("note")])
+
+
+
+
+def _not_covered_markdown(nc: dict) -> str:
+    """把未覆盖清单渲染成给人读的 Markdown（数据来自 config/not_covered.json，不写死在代码里）。"""
+    NL = chr(10)
+    scope = nc["scope"]
+    out = [
+        "# 未覆盖清单（本期不做 / 未验证）",
+        "",
+        "- 覆盖工时制：" + str(scope["worktime_regimes_covered"]),
+        "- 不覆盖工时制：" + str(scope["worktime_regimes_excluded"]),
+        "  - 原因：" + str(scope["excluded_reason"]),
+        "- 覆盖城市：" + str(scope.get("cities_covered_labels") or scope.get("cities_covered"))
+        + "（清单见 config/region_profile.json）",
+        "- 金额：" + str(scope["money_outputs"]),
+        "",
+        "## 摘除的判据",
+        "",
+    ]
+    out += [f"- `{r['rule_id']}`：{r['why']}" for r in nc["rules_excluded"]]
+    out += ["", "## 已知局限", ""]
+    out += [f"- {x}" for x in nc["known_limitations"]]
+    out += ["", "## 未测项（不得当成已达成）", ""]
+    out += [f"- {x}" for x in nc["not_tested"]]
+    return NL.join(out) + NL
 
 
 def export_package(conn: sqlite3.Connection, cfg: Config, run_id: str) -> dict:
@@ -218,6 +352,23 @@ def export_package(conn: sqlite3.Connection, cfg: Config, run_id: str) -> dict:
             w.writerow([i["rel_path"], int(i["line_no"]), i["rule_id"], i["severity"],
                         i["field_name"], i["raw_value"], i["detail"]])
 
+    # 5) 对外结论集：只收"已登记人工结论"的条目（US-RV-01★）
+    resp = responsibility_block(conn, cfg, run_id)
+    conclusions_csv = work / "conclusions_final.csv"
+    _write_conclusions_csv(conclusions_csv, resp["human_confirmations"])
+
+    # 6) 责任区块（US-EX-02★）：机器做了什么、人确认了什么、谁签的字
+    resp_path = work / "responsibility.json"
+    resp_doc = dict(resp)
+    resp_path.write_text(canonical_json(resp_doc) + chr(10), encoding="utf-8")
+
+    # 7) 未覆盖清单（US-EX-03）：不覆盖什么，自己先说
+    nc = not_covered_block(cfg)
+    nc_path = work / "not_covered.json"
+    nc_path.write_text(canonical_json(nc) + chr(10), encoding="utf-8")
+    nc_md = work / "未覆盖清单.md"
+    nc_md.write_text(_not_covered_markdown(nc))
+
     verification = verify_chain(conn, cfg)
     triple = {
         "rule_pack_version": run["rule_pack_version"],
@@ -235,10 +386,23 @@ def export_package(conn: sqlite3.Connection, cfg: Config, run_id: str) -> dict:
             "input_files": len(files),
             "audit_events": len(chain),
             "quality_issues": len(issues),
+            # 对外结论集只含已人工确认的条目；未确认的仍留在 findings.csv 里等处置
+            "final_conclusions": len(resp["human_confirmations"]),
+            "unsigned_pending": resp["unsigned_findings_excluded_from_conclusions"],
+            "ai_answered_questions": resp["ai_participation_count"],
         },
         "chain_verification": verification.as_dict(),
-        "artifacts": [p.name for p in (findings_csv, manifest_files, chain_json, issues_csv)],
-        "disclaimer": "金额字段为参考测算明细（authorized_final=0），不构成最终应付数额承诺；"
+        "responsibility": {k: resp[k] for k in
+                           ("principle", "engine_only_outputs", "never_output", "signed",
+                            "signed_by", "human_confirmed_findings",
+                            "unsigned_findings_excluded_from_conclusions", "ai_participation_count")},
+        "not_covered": {"regimes_excluded": nc["scope"]["worktime_regimes_excluded"],
+                        "cities_covered": nc["scope"].get("cities_covered"),
+                        "rules_excluded": [r["rule_id"] for r in nc["rules_excluded"]],
+                        "not_tested_count": len(nc["not_tested"])},
+        "artifacts": [p.name for p in (findings_csv, manifest_files, chain_json, issues_csv,
+                                       conclusions_csv, resp_path, nc_path, nc_md)],
+        "disclaimer": "本包不产出应付金额（需求 D-03）；金额是 HR 负责人具名录入的人工结论，不属于引擎输出；"
                       "数据为合成数据，非任何真实个人信息。",
     }
     manifest_path = work / "manifest.json"
@@ -249,7 +413,8 @@ def export_package(conn: sqlite3.Connection, cfg: Config, run_id: str) -> dict:
     zip_path = cfg.packages_dir / f"{run_id}.zip"
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("README.txt", PACKAGE_README)
-        for p in (manifest_path, findings_csv, manifest_files, chain_json, issues_csv):
+        for p in (manifest_path, findings_csv, manifest_files, chain_json, issues_csv,
+                  conclusions_csv, resp_path, nc_path, nc_md):
             zf.write(p, arcname=p.name)
         zf.writestr("verify.py", VERIFY_SNIPPET)
 

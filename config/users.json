@@ -1,0 +1,40 @@
+{
+  "schema": "wca-users-v1",
+  "note": "界面账号来源（US-AD-02 / US-UI-05）。pw_hash 是 scrypt 摘要、不是口令；库里同样只存摘要。这些是本机演示账号，对应的人与数据都是合成的。改口令：python -m src.cli users add",
+  "demo_credentials_doc": "docs/演示脚本-30分钟.md",
+  "users": [
+    {
+      "username": "ad1",
+      "emp_id": "E002",
+      "roles": [
+        "AD"
+      ],
+      "pw_hash": "scrypt$16384,8,1$820466822acb2e885ee10862ac5f3512$afd87c25c3af368a512669db94e94755f00e0669bf0e4bf65314c4d4ef6c561e2c68d484a6e8e60e08ec454d6ab803add04e432f36c4aaba6531a906e81ad95b"
+    },
+    {
+      "username": "em1",
+      "emp_id": "E004",
+      "roles": [
+        "EM"
+      ],
+      "pw_hash": "scrypt$16384,8,1$bd999c0c84cbd9457eb813d7adaa46ad$720aed33b2c8e3788965a0ab2b60cf7e8e3d2507391eae2ff9766f9adc55233c6415b2b755f1d912912793a01a0dd43c516f76c21e656c75447c0be3b60faf87"
+    },
+    {
+      "username": "op1",
+      "emp_id": "E001",
+      "roles": [
+        "OP",
+        "EM"
+      ],
+      "pw_hash": "scrypt$16384,8,1$3b60f08e10f675ff97e4d13a51fcfab3$e367b52c76917b6aa37b6d45fc7db737c8eb7a61feb04306a6838352599548bf04928aeee033758b9b4160c67204fca719eee8de5b09ee1fdcdd61194f28154c"
+    },
+    {
+      "username": "rv1",
+      "emp_id": "E008",
+      "roles": [
+        "RV"
+      ],
+      "pw_hash": "scrypt$16384,8,1$cd8ca9c49c33ac8274a96e1dde713eb9$d535bfe07b002615a98576b67510f9ded1366033cb897b9ad8223332e65682a4349d42530b842a009ee37a42ecfe6f7fc4bf102d156ecd6c47b12e3f4b5a7a4f"
+    }
+  ]
+}

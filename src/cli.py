@@ -26,7 +26,7 @@ from .rules.rulepack import RULE_CATALOG
 INGEST_ORDER = ("org", "employee", "schedule", "punch", "leave", "trip", "correction")
 # 供演示脚本自洽性检查（A12）使用：命令名必须与 build_parser 中的注册保持一致
 SUBCOMMAND_NAMES = ("init", "gen", "ingest", "kb", "check", "report", "export", "ask",
-                    "verify", "covers", "start", "stop", "status", "all")
+                    "verify", "covers", "start", "stop", "status", "users", "all")
 KIND_BY_FILE = {
     "org.csv": "org",
     "employee.csv": "employee", "schedule.csv": "schedule", "punch.csv": "punch",
@@ -146,11 +146,65 @@ def cmd_export(args) -> int:
     if not run_id:
         print("尚无校验运行，请先 `python -m src.cli check`", file=sys.stderr)
         return 2
+    if args.sign_as:
+        from .evidence import sign_package
+        rec = sign_package(conn, cfg, run_id, signed_by=args.sign_as)
+        print(f"签发：{args.sign_as} 审计序号 {rec['audit_seq']} 链哈希 {rec['entry_hash'][:16]}…")
     manifest = export_package(conn, cfg, run_id)
     print(f"举证包：{manifest['package_zip']}")
+    print(f"  对外结论 {manifest['counts']['final_conclusions']} 条 / 未人工确认 {manifest['counts']['unsigned_pending']} 条"
+          f"（无人工结论的异常不进结论集）")
     print(f"  三元组 {json.dumps(manifest['triple'], ensure_ascii=False, sort_keys=True)}")
     print(f"  审计链 {manifest['chain_verification']}")
     print(f"  manifest sha256={manifest['manifest_sha256'][:20]}… 结论 {manifest['counts']['findings']} 条")
+    return 0
+
+
+def cmd_users(args) -> int:
+    """配置界面账号：口令只在本机换成 scrypt 哈希写进 users.json，仓库里不留明文。"""
+    from .auth import ROLES, AuthError, hash_password, sync_users
+    from .db import connect, init_db
+
+    cfg = _cfg(args)
+    path = Path(cfg.users_path)
+    if args.password is None:
+        print("用法：python -m src.cli users --username op1 --emp E001 --roles OP --password '<口令>'",
+              file=sys.stderr)
+        print(f"当前账号文件：{path}"
+              f"{'（不存在，登录会被拒绝）' if not path.is_file() else ''}")
+        return 2
+    if not args.emp:
+        print("--emp 必须是员工主数据里已有的 emp_id", file=sys.stderr)
+        return 2
+    conn = connect(cfg.db_path)
+    init_db(conn)
+    if conn.execute("SELECT 1 FROM employee WHERE emp_id = ?", (args.emp,)).fetchone() is None:
+        # 先挡住"账号绑定不存在的员工"：否则它会在校验时被 sync_users 静默跳过，
+        # 表现为"配了账号却登不进去"，排查成本高
+        print(f"员工主数据里没有 {args.emp}：先跑 python -m src.cli all 或 ingest", file=sys.stderr)
+        return 2
+    if not set(args.roles.split(",")) <= set(ROLES):
+        print(f"--roles 只能是 {list(ROLES)} 的组合", file=sys.stderr)
+        return 2
+    try:
+        entry = {"username": args.username, "emp_id": args.emp,
+                 "roles": [x for x in args.roles.split(",") if x],
+                 "pw_hash": hash_password(args.password)}
+    except AuthError as exc:
+        print(f"口令不合要求：{exc}", file=sys.stderr)
+        return 2
+    data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {"users": []}
+    users = [u for u in data.get("users", []) if u.get("username") != entry["username"]]
+    users.append(entry)
+    data["users"] = sorted(users, key=lambda u: u["username"])
+    data["note"] = ("界面账号来源。pw_hash 是 scrypt 摘要、不是口令；演示口令只写在 docs/演示脚本-30分钟.md，"
+                    "对应的人与数据都是合成的。")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + chr(10), encoding="utf-8")
+    res = sync_users(conn, cfg)
+    print(f"已写入 {path}：账号 {entry['username']} → {entry['emp_id']} "
+          f"角色 {entry['roles']}；入库 added={res['added']} updated={res['updated']} "
+          f"skipped={res['skipped']}")
     return 0
 
 
@@ -202,13 +256,13 @@ def cmd_covers(args) -> int:
 def cmd_start(args) -> int:
     from .service_cli import main_start
 
-    return main_start(_service_argv(args, restart_flags=True))
+    return main_start(_service_argv(args, restart=args.no_restart))
 
 
 def cmd_stop(args) -> int:
     from .service_cli import main_stop
 
-    return main_stop(_service_argv(args, force_flags=True))
+    return main_stop(_service_argv(args, force=args.force))
 
 
 def cmd_status(args) -> int:
@@ -217,41 +271,50 @@ def cmd_status(args) -> int:
     return main_stop(_service_argv(args) + ["--status"])
 
 
-def _service_argv(args, *, restart_flags: bool = False, force_flags: bool = False) -> list[str]:
+def _service_argv(args, *, restart: bool = False, force: bool = False) -> list[str]:
+    """把 CLI 参数翻成 service_cli 的 argv：只有真值才传，缺省一律交还给 service_cli 的默认。"""
     argv: list[str] = []
-    if getattr(args, "config", None):
+    if args.config:
         argv += ["--config", str(args.config)]
-    if getattr(args, "only", ""):
+    if args.only:
         argv += ["--only", str(args.only)]
-    if getattr(args, "json", False):
+    if args.json:
         argv.append("--json")
-    if restart_flags and getattr(args, "no_restart", False):
+    if restart:
         argv.append("--no-restart")
-    if force_flags and getattr(args, "force", False):
+    if force:
         argv.append("--force")
     return argv
 
 
+ALL_STEPS = ("init", "gen", "ingest", "kb", "check", "report", "export")
+
+
 def cmd_all(args) -> int:
-    ns = argparse.Namespace(env=args.env, seed=args.seed, dir="data/raw",
-                            imported_at="2026-10-06T09:00:00+08:00",
-                            start=args.start, end=args.end, emp="", notes="cli all",
-                            run="", question="", actor="", db="")
-    for fn, name in ((cmd_init, "init"), (cmd_gen, "gen"), (cmd_ingest, "ingest"),
-                     (cmd_kb, "kb"), (cmd_check, "check"), (cmd_report, "report"),
-                     (cmd_export, "export")):
+    ap = build_parser()
+    for name in ALL_STEPS:
+        # 用子命令自己的解析结果当参数包：新增开关不会再把 all 炸成 AttributeError
+        ns = ap.parse_args([name] + _step_argv(name, args))
+        ns.env = args.env          # --env 挂在根解析器上，子命令 argv 不接受它
         print(f"\n=== {name} ===")
-        if name == "init":
-            if fn(ns) != 0:
-                return 1
-        else:
-            if fn(ns) != 0:
-                return 1
+        if ns.fn(ns) != 0:
+            return 1
     print("\n=== 下一步 ===")
     print("  python -m src.cli ask \"国庆当天上班加班费怎么算\" --as E004")
     print("  python -m pytest tests/ -q")
     print("  python evals/judge.py --write-report")
     return 0
+
+
+def _step_argv(name: str, args) -> list[str]:
+    """`all` 只钉死三件可复现输入：数据种子、导入时刻、校验区间与备注。"""
+    if name == "gen":
+        return ["--seed", str(args.seed)]
+    if name == "ingest":
+        return ["--imported-at", "2026-10-06T09:00:00+08:00"]
+    if name == "check":
+        return ["--start", args.start, "--end", args.end, "--notes", "cli all"]
+    return []
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -274,13 +337,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--notes", default=""); p.set_defaults(fn=cmd_check)
     p = sub.add_parser("report", help="导出异常报表 CSV")
     p.add_argument("--run", default=""); p.set_defaults(fn=cmd_report)
-    p = sub.add_parser("export", help="导出举证包（三元组 + 审计链）")
-    p.add_argument("--run", default=""); p.set_defaults(fn=cmd_export)
+    p = sub.add_parser("export", help="导出举证包（三元组 + 审计链 + 责任区块 + 未覆盖清单）")
+    p.add_argument("--run", default="")
+    p.add_argument("--sign-as", default=None, help="以 HR 负责人身份签发（写入审计链）后再导出")
+    p.set_defaults(fn=cmd_export)
     p = sub.add_parser("ask", help="问一答（走同一条 API 链路）")
     p.add_argument("question"); p.add_argument("--as", dest="actor", default="E001")
     p.set_defaults(fn=cmd_ask)
     p = sub.add_parser("verify", help="校验审计 hash 链"); p.set_defaults(fn=cmd_verify)
     p = sub.add_parser("covers", help="规则命中覆盖表"); p.set_defaults(fn=cmd_covers)
+    p = sub.add_parser("users", help="配置界面账号（只写 scrypt 口令哈希，不存明文）")
+    p.add_argument("--username", default="op1")
+    p.add_argument("--emp", default="E001")
+    p.add_argument("--roles", default="OP")
+    p.add_argument("--password", default=None)
+    p.set_defaults(fn=cmd_users)
     for name, fn, needs in (("start", cmd_start, "restart"), ("stop", cmd_stop, "force"),
                             ("status", cmd_status, "")):
         q = sub.add_parser(name, help={

@@ -9,6 +9,7 @@ from datetime import date
 import pytest
 
 from conftest import load_base
+from src.anomaly import decide_review
 from src.db import get_meta
 from src.engine import run_check
 from src.ingest import import_rows
@@ -18,7 +19,10 @@ from src.evidence import (
     export_package,
     genesis_hash,
     input_fingerprint,
+    not_covered_block,
+    responsibility_block,
     set_genesis,
+    sign_package,
     verify_chain,
 )
 from src.rules.findings import Finding
@@ -143,3 +147,122 @@ def test_audit_append_requires_genesis(conn, cfg):
     set_genesis(other, cfg)
     seq, entry = append_audit(other, run_id=None, actor="t", action="x", payload={}, cfg=cfg)
     assert seq == 1 and len(entry) == 64
+
+
+def test_unsigned_findings_never_reach_the_conclusion_set(conn, cfg):
+    """US-RV-01（★）：没有人登记结论的异常，一条都不许进对外结论集。"""
+    _seed_facts(conn, cfg)
+    out = run_check(conn, cfg, start=date(2025, 9, 2), end=date(2025, 9, 2))
+
+    cold = export_package(conn, cfg, out.run_id)
+    assert cold["counts"]["findings"] > 0
+    assert cold["counts"]["final_conclusions"] == 0
+    assert cold["counts"]["unsigned_pending"] == cold["counts"]["findings"]
+    with zipfile.ZipFile(cfg.packages_dir / f"{out.run_id}.zip") as zf:
+        lines = zf.read("conclusions_final.csv").decode("utf-8").strip().split(chr(10))
+        assert len(lines) == 1, f"未复核时结论集只应有表头：{lines}"
+
+    rid = conn.execute("SELECT review_id FROM review_item WHERE run_id=? AND status='OPEN' "
+                       "ORDER BY review_id LIMIT 1", (out.run_id,)).fetchone()["review_id"]
+    decide_review(conn, cfg, rid, reviewer="rv1", decision="APPROVED",
+                  note="人工核对无误", amount_cents=4500)
+
+    warm = export_package(conn, cfg, out.run_id)
+    assert warm["counts"]["final_conclusions"] == 1, "登记了几条就进几条，不多不少"
+    assert warm["counts"]["unsigned_pending"] == warm["counts"]["findings"] - 1
+    with zipfile.ZipFile(cfg.packages_dir / f"{out.run_id}.zip") as zf:
+        body = zf.read("conclusions_final.csv").decode("utf-8")
+        assert body.strip().count(chr(10)) == 1, "结论集必须只有那一条已确认记录"
+        assert "rv1" in body and "4500" in body
+
+
+def test_signing_puts_a_named_actor_in_the_chain(conn, cfg):
+    """US-RV-04：签发只追加审计事件，签名人具名、可回看，链仍完整。"""
+    _seed_facts(conn, cfg)
+    out = run_check(conn, cfg, start=date(2025, 9, 2), end=date(2025, 9, 2))
+
+    rec = sign_package(conn, cfg, out.run_id, signed_by="rv1")
+    row = conn.execute("SELECT actor, action, run_id FROM audit_event WHERE seq = ?",
+                       (rec["audit_seq"],)).fetchone()
+    assert (row["actor"], row["action"], row["run_id"]) == ("human:rv1", "evidence.sign", out.run_id)
+
+    ver = verify_chain(conn, cfg)
+    assert ver.ok, ver.reason
+    resp = responsibility_block(conn, cfg, out.run_id)
+    assert resp["signed"] is True
+    assert [s["actor"] for s in resp["signed_by"]] == ["human:rv1"]
+
+    manifest = export_package(conn, cfg, out.run_id)
+    assert manifest["responsibility"]["signed"] is True
+    assert manifest["chain_verification"]["ok"] is True
+
+    with pytest.raises(ValueError):
+        sign_package(conn, cfg, out.run_id, signed_by="   ")
+
+
+def test_package_declares_what_it_does_not_cover(conn, cfg):
+    """US-EX-03：未覆盖范围随包给出，接收方不必先问才知道边界在哪。"""
+    nc = not_covered_block(cfg)
+    assert nc["rules_excluded"] and nc["not_tested"] and nc["known_limitations"]
+    assert nc["scope"]["worktime_regimes_excluded"]
+    assert len(nc["scope"]["cities_covered"]) == len(cfg.region_profile.codes())
+
+    _seed_facts(conn, cfg)
+    out = run_check(conn, cfg, start=date(2025, 9, 2), end=date(2025, 9, 2))
+    excluded = {r["rule_id"] for r in nc["rules_excluded"]}
+    assert not ({f.rule_id for f in out.findings} & excluded), "摘除的规则不能再产生结论"
+
+    manifest = export_package(conn, cfg, out.run_id)
+    assert manifest["not_covered"]["rules_excluded"] == [r["rule_id"] for r in nc["rules_excluded"]]
+    assert manifest["not_covered"]["not_tested_count"] == len(nc["not_tested"])
+    with zipfile.ZipFile(cfg.packages_dir / f"{out.run_id}.zip") as zf:
+        names = set(zf.namelist())
+        assert {"not_covered.json", "未覆盖清单.md"} <= names
+        md = zf.read("未覆盖清单.md").decode("utf-8")
+        assert "未测项" in md and "本期不做" in md
+        for rid in excluded:
+            assert rid in md, f"摘除的判据 {rid} 必须自己列出来"
+
+
+def test_responsibility_block_separates_machine_and_human(conn, cfg):
+    """US-EX-02（★）：机器算了什么、AI 碰过什么、人确认了什么、谁签的字，一份说清。"""
+    from src.agent import ComplianceAgent
+    from src.kb import build_kb
+
+    _seed_facts(conn, cfg)
+    build_kb(conn, include_personnel=True)
+    out = run_check(conn, cfg, start=date(2025, 9, 2), end=date(2025, 9, 2))
+    ComplianceAgent(conn, cfg).ask("我 2025-09 加班多少小时", actor_emp_id="T-STD")
+
+    rid = conn.execute("SELECT review_id FROM review_item WHERE run_id=? AND status='OPEN' "
+                       "ORDER BY review_id LIMIT 1", (out.run_id,)).fetchone()["review_id"]
+    decide_review(conn, cfg, rid, reviewer="rv1", decision="APPROVED",
+                  note="按省口径人工核额", amount_cents=8800)
+
+    resp = responsibility_block(conn, cfg, out.run_id)
+    assert resp["human_confirmed_findings"] == 1
+    one = resp["human_confirmations"][0]
+    assert one["confirmed_by"] == "rv1" and one["decision"] == "APPROVED"
+    assert one["amount_cents_input"] == 8800 and one["amount_entered_by"] == "human:rv1"
+    total = conn.execute("SELECT COUNT(*) AS n FROM finding WHERE run_id = ?",
+                         (out.run_id,)).fetchone()["n"]
+    assert resp["human_confirmed_findings"] + \
+        resp["unsigned_findings_excluded_from_conclusions"] == total, "两个桶必须盖住全部结论"
+
+    # 引擎只做数值档位，金额/定性一律不是它的输出
+    assert not any("金额" in x for x in resp["engine_only_outputs"])
+    assert "应付金额" in resp["never_output"] and "违法定性" in resp["never_output"]
+
+    assert resp["ai_participation_count"] == len(resp["ai_participation"]) == 1
+    q = resp["ai_participation"][0]
+    assert q["actor_emp_id"] == "T-STD" and q["provider"]
+    assert q["gate_decision"] in ("ANSWERED", "EXPLAIN_ONLY", "ESCALATED")
+    assert resp["ai_participation_scope_note"], "问答留痕不按 run 切分，必须如实标明"
+
+    assert resp["signed"] is False, "没签字就不能显示成已签发"
+    export_package(conn, cfg, out.run_id)
+    with zipfile.ZipFile(cfg.packages_dir / f"{out.run_id}.zip") as zf:
+        in_zip = json.loads(zf.read("responsibility.json").decode("utf-8"))
+        assert in_zip["human_confirmed_findings"] == 1
+        assert in_zip["ai_participation_count"] == 1
+        assert "8800" in json.dumps(in_zip, ensure_ascii=False), "人工金额要看得见是谁录的"

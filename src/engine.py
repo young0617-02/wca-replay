@@ -20,7 +20,13 @@ from .rules.dayfacts import DayFacts, compute_day_facts, load_employee_bundle, s
 from .rules.findings import (SEV_DEFENSIBLE, SEV_REVIEW, SEV_VIOLATION, Finding,
                              UNATTRIBUTED)
 from .rules.holidays import DAY_WORKDAY, HolidayCalendar
-from .rules.regime import CYCLE_DAYS, REGIME_COMPREHENSIVE, decide
+from .rules.regime import decide
+
+
+def profile_tiers(cfg: Config, region_code: str) -> list[str]:
+    """该城市档的地域层级（国家/省/市），供举证包与报表写明结论是按哪一级条文算的。"""
+    city = cfg.region_profile.city(region_code)
+    return list(city.tier) if city else []
 from .rules.rulepack import DAY_RULES, EmpScope, RULE_PACK_VERSION
 
 RULE_PACK_KEY = "rule_pack_version"
@@ -49,40 +55,6 @@ def new_run_id(started: datetime) -> str:
     return f"run-{started.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
 
 
-def _cycle_bounds(d: date, regime: str) -> tuple[date, date]:
-    if regime == "comprehensive_monthly":
-        s = d.replace(day=1)
-        e = (s + timedelta(days=31)).replace(day=1) - timedelta(days=1)
-        return s, e
-    if regime == "comprehensive_quarterly":
-        q = (d.month - 1) // 3
-        s = d.replace(month=q * 3 + 1, day=1)
-        e = s.replace(month=s.month + 2) 
-        e = (e + timedelta(days=1)).replace(day=1) - timedelta(days=1)
-        return s, e
-    return d.replace(month=1, day=1), d.replace(month=12, day=31)
-
-
-def _cycle_key(d: date, regime: str) -> str:
-    if regime == "comprehensive_monthly":
-        return f"{d.year:04d}-{d.month:02d}"
-    if regime == "comprehensive_quarterly":
-        return f"{d.year:04d}-Q{(d.month - 1) // 3 + 1}"
-    return f"{d.year:04d}"
-
-
-def _count_calendar_workdays(calendar: HolidayCalendar, start: date, end: date) -> int:
-    n = 0
-    cur = start
-    while cur <= end:
-        try:
-            if calendar.classify(cur).day_type == DAY_WORKDAY:
-                n += 1
-        except Exception:
-            return -1  # 日历未覆盖该年，周期标准无法确定
-        cur += timedelta(days=1)
-    return n
-
 
 def load_employees(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute(
@@ -100,13 +72,16 @@ def build_scope(conn: sqlite3.Connection, cfg: Config, calendar: HolidayCalendar
         declared_regime=emp["worktime_regime"],
         approved=bool(emp["contract_approved_flex"]),
     )
+    profile = getattr(cfg, "region_profile", None)
     scope = EmpScope(
         emp_id=emp["emp_id"],
         job_code=emp["job_code"],
         region_code=emp["region_code"],
+        local_citations=(profile.multiplier_citations(emp["region_code"]) if profile else []),
+        region_label=(profile.label(emp["region_code"]) if profile else ""),
+        region_known=(profile.known(emp["region_code"]) if profile else True),
         org_id=emp["org_id"],
         decision=decision,
-        hourly_normal_cents=int(emp["normal_hourly_cents"]),
         daily_std_minutes=cfg.daily_std_minutes,
         weekly_std_minutes=cfg.weekly_std_minutes,
     )
@@ -130,19 +105,6 @@ def build_scope(conn: sqlite3.Connection, cfg: Config, calendar: HolidayCalendar
             "raw_value": r["raw_value"], "file_id": r["file_id"], "line_no": r["line_no"],
         })
 
-    if decision.effective_regime in REGIME_COMPREHENSIVE:
-        seen: set[str] = set()
-        cur = start
-        while cur <= end:
-            key = _cycle_key(cur, decision.effective_regime)
-            if key not in seen:
-                seen.add(key)
-                cs, ce = _cycle_bounds(cur, decision.effective_regime)
-                if cs >= start and ce <= end:
-                    workdays = _count_calendar_workdays(calendar, cs, ce)
-                    if workdays >= 0:
-                        scope.cycle_expected_minutes[key] = workdays * cfg.daily_std_minutes
-            cur += timedelta(days=1)
     return scope
 
 
@@ -209,6 +171,12 @@ def run_check(conn: sqlite3.Connection, cfg: Config, *, start: date, end: date,
               notes: str = "", top_k: int | None = None) -> CheckOutcome:
     if start > end:
         raise ValueError(f"区间非法：start={start} > end={end}")
+    if cfg.rule_pack_id != RULE_PACK_VERSION:
+        # 结论元数据带的是代码里的版本，run 行带的是配置里的版本；两者不一致时
+        # 举证包会被贴上错误的可复现声明，必须挡住。
+        raise ValueError(
+            f"规则包版本不一致：代码 RULE_PACK_VERSION={RULE_PACK_VERSION}，"
+            f"配置 WCA_RULE_PACK={cfg.rule_pack_id}。改判据要升版本，配置必须跟着改。")
     timer = Timer()
     set_genesis(conn, cfg)
     started = datetime.now(cfg_tz())
@@ -219,6 +187,9 @@ def run_check(conn: sqlite3.Connection, cfg: Config, *, start: date, end: date,
         "start": start.isoformat(),
         "end": end.isoformat(),
         "region_code": cfg.region_code,
+        "region_label": getattr(cfg, "region_label", ""),
+        "region_tier": (profile_tiers(cfg, cfg.region_code) if getattr(cfg, "region_profile", None) else []),
+        "cities_configured": (cfg.region_profile.codes() if getattr(cfg, "region_profile", None) else []),
         "rule_pack_id": cfg.rule_pack_id,
         "ot_cap_scope": cfg.ot_cap_scope,
         "cross_day_cut_hour": cfg.cross_day_cut_hour,

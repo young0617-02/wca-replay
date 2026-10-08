@@ -94,6 +94,7 @@ class Config:
 
     llm_provider: str
     llm_model: str
+    llm_timeout_s: int
     ollama_base_url: str
     cloud_base_url: str
     cloud_api_key: str
@@ -117,10 +118,13 @@ class Config:
     pay_base_source: str
     ot_cap_scope: str  # weekday_only | weekday_plus_rest：36 小时月上限的统计口径
 
+    users_path: Path          # 界面账号来源（config/users.json），口令哈希不放仓库
+    upload_dir: Path          # 界面上传的 CSV 落盘处（var/uploads，产物不入库）
     export_row_budget: int
     sqlite_synchronous: str  # FULL（默认，审计写入落盘）| NORMAL | OFF（仅测试）
 
     raw: dict[str, str] = field(default_factory=dict, repr=False)
+    region_profile: object | None = None   # src.region_profile.RegionProfile；None 表示未启用
 
     @classmethod
     def load(cls, env_path: Path | str | None = None, **overrides: Any) -> "Config":
@@ -137,12 +141,13 @@ class Config:
             data_dir=path_of("WCA_DATA_DIR", "data"),
             reports_dir=path_of("WCA_REPORTS_DIR", "reports"),
             packages_dir=path_of("WCA_PACKAGES_DIR", "var/packages"),
-            region_code=_as_str(values, "WCA_REGION_CODE", "440300"),
-            region_label=_as_str(values, "WCA_REGION_LABEL", "深圳市"),
+            region_code=_as_str(values, "WCA_REGION_CODE", ""),
+            region_label="",   # 由城市档位表解析，代码里不写市名（需求 US-AD-06）
             locked_worktime_regime=_as_str(values, "WCA_WORKTIME_REGIME", "standard"),
-            rule_pack_id=_as_str(values, "WCA_RULE_PACK", "rp-2026.10.shenzhen-standard.v2"),
+            rule_pack_id=_as_str(values, "WCA_RULE_PACK", "rp-2026.10.gd-pilot-standard.v4"),
             llm_provider=_as_str(values, "WCA_LLM_PROVIDER", "stub"),
             llm_model=_as_str(values, "WCA_LLM_MODEL", "stub-offline-v1"),
+            llm_timeout_s=_as_int(values, "WCA_LLM_TIMEOUT_S", 25),
             ollama_base_url=_as_str(values, "WCA_OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
             cloud_base_url=_as_str(values, "WCA_CLOUD_BASE_URL", ""),
             cloud_api_key=_as_str(values, "WCA_CLOUD_API_KEY", ""),
@@ -165,13 +170,48 @@ class Config:
             night_window_end_hour=_as_int(values, "WCA_NIGHT_WINDOW_END_HOUR", 6),
             pay_base_source=_as_str(values, "WCA_PAY_BASE_SOURCE", "contract_normal_wage"),
             ot_cap_scope=_as_str(values, "WCA_OT_CAP_SCOPE", "weekday_only"),
+            users_path=path_of("WCA_USERS_PATH", "config/users.json"),
+            upload_dir=path_of("WCA_UPLOAD_DIR", "var/uploads"),
             export_row_budget=_as_int(values, "WCA_EXPORT_ROW_BUDGET", 1000),
             sqlite_synchronous=_as_str(values, "WCA_SQLITE_SYNCHRONOUS", "FULL"),
             raw=values,
         )
+        cfg = _attach_region_profile(cfg, values, path_of)
         return cfg
+
+    def with_region(self, region_code: str) -> "Config":
+        """换城市档：只接受档位表里有的代码，标签与条文集合随之变（不允许代码里猜市名）。"""
+        from dataclasses import replace
+
+        code = (region_code or "").strip()
+        profile = self.region_profile
+        if profile is None or not profile.known(code):
+            raise ValueError(
+                f"城市 {code!r} 不在档位表内（已建档：{profile.codes() if profile else '未加载档位表'}）。"
+                "扩城市请改 config/region_profile.json。")
+        return replace(self, region_code=code, region_label=profile.label(code))
 
     def ensure_dirs(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.packages_dir.mkdir(parents=True, exist_ok=True)
         self.reports_dir.mkdir(parents=True, exist_ok=True)
+        self.upload_dir.mkdir(parents=True, exist_ok=True)
+
+
+def _attach_region_profile(cfg: "Config", values: dict[str, str], path_of) -> "Config":
+    """加载城市档位表；市名、地域层级、适用条文全部来自配置。
+
+    缺表或城市不在表内时**直接报错**，不退回硬编码默认市名——否则三市分档会悄悄退化。
+    """
+    from .region_profile import RegionProfile
+
+    profile = RegionProfile.load(path_of("WCA_REGION_PROFILE", "config/region_profile.json"))
+    code = cfg.region_code or profile.default_city
+    if not profile.known(code):
+        raise ValueError(
+            f"WCA_REGION_CODE={cfg.region_code!r} 不在城市档位表内（已建档：{profile.codes()}）。"
+            "要扩城市请改 config/region_profile.json，不要在代码里加市名。")
+    cfg.region_code = code
+    cfg.region_label = profile.label(code)
+    cfg.region_profile = profile
+    return cfg

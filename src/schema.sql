@@ -309,3 +309,24 @@ CREATE TABLE IF NOT EXISTS eval_result (
     expected   TEXT NOT NULL,
     detail     TEXT NOT NULL DEFAULT ''
 );
+
+-- ---------------------------------------------------------------- 界面身份与会话（US-UI-05 / NFR-15 / NFR-16）
+-- 口令只存 scrypt 哈希；令牌只存 sha256，明文令牌既不落库也不落日志。
+CREATE TABLE IF NOT EXISTS app_user (
+    user_id    INTEGER PRIMARY KEY,
+    username   TEXT NOT NULL UNIQUE,
+    emp_id     TEXT NOT NULL REFERENCES employee(emp_id),
+    roles      TEXT NOT NULL,             -- JSON 数组，取值 OP/RV/EM/AD
+    pw_hash    TEXT NOT NULL CHECK (pw_hash LIKE 'scrypt$%'),
+    algo       TEXT NOT NULL DEFAULT 'scrypt',
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS app_session (
+    token_hash   TEXT PRIMARY KEY,        -- sha256(会话令牌)
+    username     TEXT NOT NULL REFERENCES app_user(username),
+    created_at   TEXT NOT NULL,
+    expires_at   TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_session_user ON app_session(username, expires_at);

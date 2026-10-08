@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}制度问答{% endblock %}
+{% block body %}
+<section>
+  <h2>③ 制度与工时问答</h2>
+  <form method="get" action="/qa">
+    <div class="row">
+      <input name="q" value="{{ q }}" size="64" placeholder="例：法定节假日上班按几倍算？">
+      <button type="submit">提问</button>
+    </div>
+  </form>
+  <p class="ai">身份取自当前会话（<code>{{ me.emp_id }}</code> / 角色 {{ me.roles|join('、') }}），
+    请求参数里没有"我要冒充谁"可填。问他人数据时，未授权条目在检索层就进不了候选集。</p>
+</section>
+
+{% if result %}
+<section>
+  <div class="cards">
+    <div class="card"><b>{{ result.gate_decision }}</b>门禁决策</div>
+    <div class="card"><b>{{ (result.evidence_coverage_permille / 10)|round(1) }}%</b>证据覆盖率</div>
+    <div class="card"><b>{{ (result.confidence_permille / 10)|round(1) }}%</b>置信度</div>
+    <div class="card"><b>{{ result.citations|length }}</b>可点开出处</div>
+    <div class="card"><b>{{ result.retrieval.elapsed_ms if result.retrieval else '—' }}</b>检索段耗时</div>
+  </div>
+  <pre>{{ result.answer }}</pre>
+  {% if result.amount_blocked_at_render %}
+    <p class="note">渲染层金额闸已触发：答案原文含金额形态，界面整段替换为人工确认提示。</p>
+  {% endif %}
+  {% if result.needs_review %}
+    <p class="note">该问题已进入人工待答队列（复核单 {{ result.review_id }}），
+      由 HR 负责人具名答复后才对外生效。</p>
+  {% endif %}
+  <p class="ai">{{ result.ai_generated_note }}
+    ｜ provider={{ result.provider }}{% if result.degraded %}（已降级为离线确定性模板成文）{% endif %}
+    ｜ 意图 {{ result.intent }} ｜ 工具调用 {{ result.tool_calls|length }} 次</p>
+</section>
+
+<section>
+  <h2>出处</h2>
+  <table>
+    <thead><tr><th>doc_id</th><th>条文</th><th>地域层级</th><th>生效日期</th><th>版本</th>
+      <th>原文/摘要</th></tr></thead>
+    <tbody>
+    {% for c in result.citations %}
+      <tr>
+        <td>{{ c.doc_id }}</td>
+        <td>{{ c.label }}<br><span class="ai">{{ c.title }}</span></td>
+        <td>{{ c.region_code }}</td>
+        <td>{{ c.effective_from }}</td>
+        <td>{{ c.version }}</td>
+        <td>
+          {% if c.source_url %}<a href="{{ c.source_url }}" target="_blank" rel="noreferrer">打开出处</a>
+          {% else %}（出处见登记页）{% endif %}
+        </td>
+      </tr>
+    {% else %}<tr><td colspan="6">本次没有可引用出处（已按门禁处理）</td></tr>{% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+{% endblock %}

@@ -47,6 +47,57 @@ class LlmUnavailable(RuntimeError):
     pass
 
 
+# ------------------------------------------------------------------ 外发最小化（NFR-18）
+# 发往云端的上下文**只允许**：制度条文（含出处标签）+ 经聚合的工时数值 + 拒答说明。
+# 用白名单而不是黑名单：以后新加的字段默认不外发，避免"多一个字段就多泄一类数据"。
+OUTBOUND_ALLOWED_KEYS: dict[str, set[str]] = {
+    "citation": {"kind", "doc_id", "citation", "region_code", "effective_from", "version", "text"},
+    "numeric": {"kind", "label", "value_text", "minutes_worked", "minutes_ot_weekday",
+                "minutes_ot_restdays", "minutes_ot_holiday", "days", "period", "rule_id",
+                "rule_version", "rate_permille", "rate_text", "severity_label",
+                "minutes_extension"},
+    "note": {"kind", "text"},
+    "acl_denied": {"kind", "text"},
+}
+# 金额一律以整数「分」存在于本地库，出现即视为薪酬数据出域
+_MONEY_OUT_RE = re.compile(r"\d+\s*分")
+# 员工化名以「（某某）」形式出现在标题/正文里；原始打卡行是 ISO 时间戳
+_ALIAS_OUT_RE = re.compile(r"（[^（）]{1,12}）")
+_PUNCH_TS_OUT_RE = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:[+\u2212-]\d{2}:?\d{2})?")
+_ID_LIKE_OUT_RE = re.compile(r"\b\d{15,18}[0-9Xx]?\b")   # 证件号形态
+
+
+def _redact(text: str) -> str:
+    out = _ALIAS_OUT_RE.sub("（已脱敏）", str(text))
+    out = _PUNCH_TS_OUT_RE.sub("[时间戳已脱敏]", out)
+    out = _ID_LIKE_OUT_RE.sub("[证件号已脱敏]", out)
+    return out
+
+
+def outbound_facts(facts: list[dict]) -> list[dict]:
+    """把本地 facts 收敛成可外发的最小视图；不在白名单里的键一律不带出去。"""
+    out: list[dict] = []
+    for f in facts:
+        kind = f.get("kind", "")
+        allow = OUTBOUND_ALLOWED_KEYS.get(kind)
+        if not allow:
+            continue                      # 未知形态不外发（默认拒绝）
+        view = {k: f[k] for k in allow if k in f}
+        if "text" in view:
+            view["text"] = _redact(view["text"])
+        if "value_text" in view:
+            view["value_text"] = _redact(view["value_text"])
+        if "label" in view:
+            view["label"] = _redact(view["label"])
+        # 条文正文里若残留金额（分），整段不外发——宁可少给上下文，也不带薪酬数据出域
+        blob = _MONEY_OUT_RE.search(json.dumps(view, ensure_ascii=False))
+        if blob:
+            view = {k: _MONEY_OUT_RE.sub("[金额已剔除]", v) if isinstance(v, str) else v
+                    for k, v in view.items()}
+        out.append(view)
+    return out
+
+
 @dataclass
 class Completion:
     text: str
@@ -68,7 +119,7 @@ class Provider(Protocol):
 
 
 # ------------------------------------------------------------------ 关键词表（stub 用）
-_PAY_RE = re.compile(r"(多少 ?钱|多少钱|金额|应付|该付|赔|补偿|加付|工资|基数|测算)")
+_PAY_RE = re.compile(r"(多少 ?钱|多少钱|金额|应付|该付|该拿|拿多少|给多少|发多少|赔|补偿|加付|工资|薪水|薪酬|加班费|绩效|奖金|基数|测算)")
 _OTHER_REF_RE = re.compile(r"(他的|她的|别人的|他人|同事|其他员工|某员工|某某|该名员工)")
 # 中文场景下 \b 失效（CJK 也算 \w），改用 ASCII 边界断言
 _EMP_ID_RE = re.compile(r"(?<![0-9A-Za-z])E\d{3,6}(?![0-9A-Za-z])")
@@ -251,19 +302,27 @@ class HttpProvider:
         try:
             with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            # 4xx/5xx 要带上状态码：无凭证（401）和限流（429）是两种完全不同的降级原因
+            raise LlmUnavailable(f"{self.name} HTTP {exc.code}") from exc
         except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
             raise LlmUnavailable(f"{self.name} 调用失败：{type(exc).__name__}: {exc}") from exc
         if self.name == PROVIDER_OLLAMA:
-            return str(payload.get("message", {}).get("content", "")).strip()
-        choices = payload.get("choices") or [{}]
-        return str(choices[0].get("message", {}).get("content", "")).strip()
+            text = str(payload.get("message", {}).get("content", "")).strip()
+        else:
+            choices = payload.get("choices") or [{}]
+            text = str(choices[0].get("message", {}).get("content", "")).strip()
+        if not text:
+            # 空返回当成功会让"降级"看起来像"模型真答了"，这条必须炸
+            raise LlmUnavailable(f"{self.name} 返回空内容，按不可达处理")
+        return text
 
     def plan(self, question: str, *, subject_emp_id: str) -> QueryPlan:
         enum = "|".join(INTENTS)
         prompt = (
             f"把下面的员工提问归类为 {enum} 之一，并抽取期间(YYYY-MM，没有则空)。"
             '只输出 JSON：{"intent":"","period":"","want_amount":true|false}\n'
-            f"提问：{question}"
+            f"提问：{_redact(question)}"
         )
         text = self._chat([{"role": "user", "content": prompt}])
         data = _extract_json(text)
@@ -279,11 +338,13 @@ class HttpProvider:
 
     def compose(self, question: str, plan: QueryPlan, facts: list[dict],
                 allowed_numbers: set[str]) -> Completion:
+        # NFR-18：真正出域的是最小视图，本地仍持有完整 facts（守卫与举证都用它）
+        sent = outbound_facts(facts)
         user = (
             EVIDENCE_ONLY_SYSTEM
-            + "\n【已算好的事实】" + json.dumps(facts, ensure_ascii=False)[:6000]
+            + "\n【已算好的事实】" + json.dumps(sent, ensure_ascii=False)[:6000]
             + "\n【只允许出现这些数字】" + json.dumps(sorted(allowed_numbers), ensure_ascii=False)
-            + f"\n提问：{question}\n请作答："
+            + f"\n提问：{_redact(question)}\n请作答："
         )
         text = self._chat([{"role": "user", "content": user}])
         return Completion(text=text, provider=self.name, model=self.model,
@@ -302,10 +363,21 @@ def _extract_json(text: str) -> dict:
 
 
 def build_provider(cfg: Config) -> Provider:
-    """按 .env 选择 provider。云 API 单价未取一手价，默认全本地（方案 §8-R6）。"""
-    if cfg.llm_provider == PROVIDER_OLLAMA:
-        return HttpProvider(base_url=cfg.ollama_base_url, model=cfg.llm_model, name=PROVIDER_OLLAMA)
-    if cfg.llm_provider == PROVIDER_CLOUD:
+    """按 .env 选择 provider。
+
+    未识别的取值**直接报错**，不静默退回 stub：静默退回会让配置看起来生效、
+    实际跑的是离线模板。降级只允许发生在"已连接的通道出问题"时，并由调用方标 degraded。
+    """
+    name = (cfg.llm_provider or "").strip().lower()
+    if name == PROVIDER_OLLAMA:
+        return HttpProvider(base_url=cfg.ollama_base_url, model=cfg.llm_model,
+                            name=PROVIDER_OLLAMA, timeout_s=cfg.llm_timeout_s)
+    if name in (PROVIDER_CLOUD, "openai"):      # openai 兼容协议，作别名接受
         return HttpProvider(base_url=cfg.cloud_base_url, model=cfg.llm_model,
-                            api_key=cfg.cloud_api_key, name=PROVIDER_CLOUD)
-    return StubProvider(cfg.llm_model)
+                            api_key=cfg.cloud_api_key, name=PROVIDER_CLOUD,
+                            timeout_s=cfg.llm_timeout_s)
+    if name in (PROVIDER_STUB, ""):
+        return StubProvider(cfg.llm_model)
+    raise LlmUnavailable(
+        f"WCA_LLM_PROVIDER={cfg.llm_provider!r} 不是可用取值（stub | ollama | cloud）。"
+        "要复现确定性链路就设 stub；填 base_url/api_key 后走 cloud。")

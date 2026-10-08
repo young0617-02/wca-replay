@@ -1,0 +1,47 @@
+{
+  "schema": "wca-region-profile-v1",
+  "note": "城市档位表：市名与条文集合的映射只写在这里，src/ 里不允许出现硬编码城市名（需求 US-AD-06）。核实依据与 URL 见 docs/字段口径与条文依据.md 第二节 2.1，核对日期 2026-10-08。",
+  "citation_sets": {
+    "national-only": {
+      "multiplier": ["law.labor.44", "rule.mohrss.1994-489.13", "reg.state-council.worktime.3"],
+      "basis": "只引国家层面：法律 + 行政法规 + 部门规章"
+    },
+    "guangdong-province": {
+      "multiplier": ["local.gd.wage-reg.20"],
+      "special_regime": ["local.gd.wage-reg.23", "local.gd.approval-2009"],
+      "basis": "《广东省工资支付条例》（2005 通过，2016-09-29 修正为现行）"
+    },
+    "shenzhen-sezone": {
+      "multiplier": ["local.sz.wage-reg.18"],
+      "special_regime": ["local.sz.wage-reg.19", "local.sz.wage-reg.20", "local.sz.approval-2009.6", "local.sz.approval-2009.8"],
+      "basis": "《深圳市员工工资支付条例》（经济特区立法，2025-12-05 第四次修正为现行）"
+    }
+  },
+  "cities": {
+    "440100": {
+      "label": "广州市",
+      "tier": ["CN", "440000"],
+      "sets": ["national-only", "guangdong-province"],
+      "confirmed_on": "2026-10-08",
+      "not_covered_note": "无市级工资支付/工时地方性法规；穗人社函〔2026〕431 号为指引性文件不设倍数，穗人社发〔2011〕65 号已标失效"
+    },
+    "440300": {
+      "label": "深圳市",
+      "tier": ["CN", "440000", "440300"],
+      "sets": ["national-only", "shenzhen-sezone"],
+      "confirmed_on": "2026-10-08",
+      "not_covered_note": "特区条例第 20 条（不定时工时法定节假日 300%）比全国更严，但该口径属特殊工时判定，本期不产出结论"
+    },
+    "440600": {
+      "label": "佛山市",
+      "tier": ["CN", "440000"],
+      "sets": ["national-only", "guangdong-province"],
+      "confirmed_on": "2026-10-08",
+      "code_caution": "区划码由佛山市人社局政府网站标识码 4406000020 前 6 位反推，国家统计局区划栏目当前 404，非 GB/T 2260 直引",
+      "not_covered_note": "2025/2026 未见市级工时、高温、夜间劳动规范性文件（未见不等于没有）"
+    }
+  },
+  "default_city": "440300",
+  "unlisted_policy": "reject-to-scope",
+  "unlisted_note": "员工 region_code 不在此表时：只出国家层面结论，并产出 SCOPE-04 城市未建档标记，不得默认套用深圳档"
+}

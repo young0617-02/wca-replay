@@ -6,6 +6,7 @@ __pycache__/
 *.pyo
 .pytest_cache/
 var/
+var/uploads/
 reports/*.csv
 reports/变异测试-现场/
 .env

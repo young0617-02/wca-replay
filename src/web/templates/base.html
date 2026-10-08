@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ app_name }} · {% block title %}{% endblock %}</title>
+  <style>
+    body { font: 14px/1.6 system-ui, "Microsoft YaHei", sans-serif; margin: 0; color: #1b1b1b; }
+    header { display: flex; gap: 12px; align-items: center; padding: 10px 16px;
+             border-bottom: 1px solid #ddd; background: #fafafa; flex-wrap: wrap; }
+    header a { color: #0645ad; text-decoration: none; }
+    header .meta { margin-left: auto; color: #666; font-size: 12px; }
+    main { padding: 16px; max-width: 1180px; }
+    section { margin-bottom: 22px; }
+    h2 { font-size: 16px; margin: 0 0 8px; }
+    table { border-collapse: collapse; width: 100%; font-size: 13px; }
+    th, td { border-bottom: 1px solid #eee; padding: 5px 7px; text-align: left; vertical-align: top; }
+    th { background: #f4f4f4; font-weight: 600; }
+    .sev-VIOLATION { color: #b00020; font-weight: 600; }
+    .sev-REVIEW { color: #a05000; }
+    .sev-DEFENSIBLE { color: #33691e; }
+    input, select, button, textarea { font: inherit; padding: 5px 7px; border: 1px solid #bbb;
+                                      border-radius: 3px; }
+    button { cursor: pointer; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .note { background: #fff8e1; border-left: 3px solid #f9a825; padding: 8px 10px; }
+    .ai { font-size: 12px; color: #7a5900; }
+    pre { white-space: pre-wrap; word-break: break-all; background: #f7f7f7; padding: 8px;
+          font-size: 12px; }
+    .cards { display: flex; gap: 12px; flex-wrap: wrap; }
+    .card { border: 1px solid #ddd; border-radius: 4px; padding: 8px 12px; min-width: 120px; }
+    .card b { font-size: 20px; display: block; }
+  </style>
+</head>
+<body>
+<header>
+  <strong>{{ app_name }}</strong>
+  <nav>
+    <a href="/">① 导入与异常</a> ·
+    <a href="/review">② 复核台</a> ·
+    <a href="/qa">③ 制度问答</a>
+  </nav>
+  {% if me is defined and me %}
+    <form method="post" action="/logout" style="margin:0">
+      <button type="submit">退出（{{ me.username }} / {{ me.roles|join('、') }}）</button>
+    </form>
+  {% endif %}
+  <span class="meta">规则包 {{ rule_pack }} ｜ 城市档 {{ region_label }} ｜
+    数据为合成样本，字段语义取自公开资料、未经 HR 访谈核对</span>
+</header>
+<main>{% block body %}{% endblock %}</main>
+<script src="/static/app.js"></script>
+{% block script %}{% endblock %}
+</body>
+</html>

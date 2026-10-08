@@ -25,7 +25,7 @@ class Principal:
     emp_id: str
     org_id: str
     is_manager: bool = False
-    region_code: str = "440300"
+    region_code: str = ""   # 空=未知主体城市，由检索层退回本次校验档
     roles: tuple[str, ...] = field(default_factory=tuple)
 
     @classmethod

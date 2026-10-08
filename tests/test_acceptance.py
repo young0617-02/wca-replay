@@ -20,11 +20,28 @@ FORBIDDEN_LITERALS = [
     "部署" + "完成",
     "验证" + "通过",
 ]
+# A11（2026-10-08 需求 D-01 新增）：本项目不做 HR 访谈，任何成果性文本都不得出现
+# 「已与 HR 核对」这类表述。基线扫描器原本没有这一条，在这里补上。
+FORBIDDEN_HR_PATTERNS = [
+    re.compile(r"(已与|已经|和|同|与)\s*HR\s*(访谈过|核对|确认|对过)"),
+    re.compile(r"HR\s*(访谈|核对)\s*(过|完成|无误)"),
+]
 FORBIDDEN_PATTERNS = [re.compile(r"支持\s*\d+\s*人"), re.compile(r"\bSLA\s*99\.")]
 # 本检查覆盖 README、docs、src、evals、data、tools、config，以及根目录的方案文档；
 # tests 目录排除在外：那里是「写断言的地方」，禁词字面量必须能出现在扫查逻辑里
 SCANNED_DIRS = ["README.md", "docs", "src", "evals", "data", "tools", "config"]
 SCANNED_ROOT_GLOBS = ["项目方案-*.md", "项目汇报-*.md"]
+# DEC-01（2026-10-08 用户拍板）：规范性文档的职责就是**列出**禁用词，因此对它们跳过
+# 字面量与 HR 表述检查；但「支持 N 人」「SLA 99.x」这类量化宣称**照扫**。
+# 新增豁免文件必须显式登记到这里，不允许按目录通配。
+NORMATIVE_EXEMPT = {
+    "docs/需求文档-用户故事.md",
+    "docs/项目定义-一页.md",
+}
+
+
+def _is_exempt(rel: Path) -> bool:
+    return rel.as_posix() in NORMATIVE_EXEMPT
 
 
 def _scan_targets() -> list[Path]:
@@ -42,20 +59,34 @@ def _scan_targets() -> list[Path]:
 
 
 def test_no_false_claims_in_docs_and_code():
-    """A10：宣称类禁词命中数必须为 0。"""
+    """A10 + A11：宣称类表述与 HR 核对类表述的命中数必须为 0（规范性文档仅跳字面量）。"""
     hits = []
     for f in _scan_targets():
+        rel = f.relative_to(ROOT)
+        exempt = _is_exempt(rel)
         text = f.read_text(encoding="utf-8", errors="replace")
-        for word in FORBIDDEN_LITERALS:
-            if word in text:
+        if not exempt:
+            for word in FORBIDDEN_LITERALS:
+                if word in text:
+                    for n, line in enumerate(text.splitlines(), start=1):
+                        if word in line:
+                            hits.append(f"{rel}:{n} 命中 {word}")
+            for pat in FORBIDDEN_HR_PATTERNS:
                 for n, line in enumerate(text.splitlines(), start=1):
-                    if word in line:
-                        hits.append(f"{f.relative_to(ROOT)}:{n} 命中 {word}")
+                    if pat.search(line):
+                        hits.append(f"{rel}:{n} 命中 HR 核对类表述")
         for pat in FORBIDDEN_PATTERNS:
             for n, line in enumerate(text.splitlines(), start=1):
                 if pat.search(line):
-                    hits.append(f"{f.relative_to(ROOT)}:{n} 命中模式 {pat.pattern}")
+                    hits.append(f"{rel}:{n} 命中模式 {pat.pattern}")
     assert not hits, "发现不可举证的宣称表述：\n" + "\n".join(hits[:20])
+
+
+def test_normative_exempt_list_is_minimal():
+    """豁免面必须保持最小：只允许两份规范性文档，且文件必须真实存在。"""
+    assert NORMATIVE_EXEMPT == {"docs/需求文档-用户故事.md", "docs/项目定义-一页.md"}
+    for rel in NORMATIVE_EXEMPT:
+        assert (ROOT / rel).is_file(), f"豁免清单指向不存在的文件：{rel}"
 
 
 def test_readme_separates_measured_from_design_values():

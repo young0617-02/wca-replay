@@ -119,10 +119,20 @@ def _acl_sql(conn: sqlite3.Connection, cfg: Config, principal: Principal,
     if doc_types:
         base += f" AND d.doc_type IN ({','.join('?' * len(doc_types))})"
         params += list(doc_types)
-    if cfg.region_code and cfg.region_code != "CN":
-        # 地域过滤同样下推：地方口径条目只在本地域可见（CN 为全国通用）
-        base += " AND (d.region_code IN (?, 'CN') OR d.region_code = '')"
-        params.append(cfg.region_code)
+    # 地域过滤同样下推。按**查询主体自己的城市档**展开层级，而不是按本次校验选的档位：
+    # 否则一个广州员工问自己的条目，会被"当前跑的是深圳档"误伤（权限实现错误，不是地域隔离）。
+    # 本级 + 上级层级 + 全国通用条目都可见；只放行本级会把省级条文挡在候选集外。
+    profile = getattr(cfg, "region_profile", None)
+    subject_code = getattr(principal, "region_code", "") or cfg.region_code
+    if subject_code and subject_code != "CN":
+        tiers: list[str] = []
+        if profile and profile.known(subject_code):
+            tiers = [x for x in profile.city(subject_code).tier if x != "CN"]
+        # 主体**永远**看得见自己那一城的条目（含自己的薪酬/考勤条目）；
+        # 层级只决定还能看见哪一级的上位法规条文，不能反过来把本人条目挡在门外。
+        visible = [subject_code] + [x for x in tiers if x != subject_code]
+        base += f" AND (d.region_code IN ({','.join('?' * len(visible))}, 'CN') OR d.region_code = '')"
+        params += visible
     return base, pred, params
 
 

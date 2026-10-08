@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}登录{% endblock %}
+{% block body %}
+<section>
+  <h2>最小登录</h2>
+  {% if error %}<p class="note">{{ error }}</p>{% endif %}
+  {% if user_count == 0 %}
+    <p class="note">库里还没有账号：先在 <code>config/users.json</code> 配置用户（口令为 scrypt 哈希），
+      或运行 <code>python -m src.cli users add</code>。界面不会内置任何默认口令。</p>
+  {% endif %}
+  <form method="post" action="/login">
+    <div class="row">
+      <label>用户名 <input name="username" autocomplete="username" required></label>
+      <label>口令 <input name="password" type="password" autocomplete="current-password" required></label>
+      <button type="submit">登录</button>
+    </div>
+  </form>
+  <p class="ai">会话为 HttpOnly + SameSite=Strict Cookie，库里只存令牌哈希；
+    口令只存 scrypt 哈希，不存明文。权限由服务端按会话角色判定，隐藏按钮不等于权限。</p>
+</section>
+{% endblock %}

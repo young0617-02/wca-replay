@@ -201,10 +201,13 @@ def build(seed: int) -> dict[str, list[list]]:
     rng = random.Random(seed)
     punch_rows, sched_rows, leave_rows, trip_rows, corr_rows = [], [], [], [], []
     org_rows = [["org_id", "org_name", "parent_id"]] + [[o[0], o[1], "ORG-ROOT"] for o in ORGS]
+    cities = _load_city_codes(out_dir.parent.parent if False else None)
     emp_rows = [["emp_id", "pseudonym", "job_code", "org_id", "region_code", "worktime_regime",
                  "contract_approved_flex", "normal_hourly_cents"]]
-    for e in EMPLOYEES:
-        emp_rows.append([e[0], e[1], e[2], e[3], "440300", e[4], e[5], e[6]])
+    for i, e in enumerate(EMPLOYEES):
+        # 城市代码来自 config/region_profile.json（生成器不写死市名/代码），
+        # 按员工顺序轮转分配，保证同一 seed 下分布可复现（US-OW-03 覆盖三市）。
+        emp_rows.append([e[0], e[1], e[2], e[3], cities[i % len(cities)], e[4], e[5], e[6]])
 
     for emp in EMPLOYEES:
         emp_id, _, job, _org, regime, _appr, _wage = emp
@@ -321,6 +324,21 @@ EXPECT = {
     "NO-PUNCH": "QUAL-01 当日无任何打卡",
     "AMBIG-HOLIDAY": "OT-D03/OT-D02 之间待核对 -> 只能需复核",
 }
+
+
+def _load_city_codes(_unused=None) -> list[str]:
+    """城市清单只从 config/region_profile.json 读；读不到就报错，不退回单城硬编码。"""
+    import json
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent.parent
+    path = root / "config" / "region_profile.json"
+    if not path.is_file():
+        raise FileNotFoundError(f"城市档位表缺失：{path}")
+    cities = sorted((json.loads(path.read_text(encoding="utf-8")).get("cities") or {}).keys())
+    if not cities:
+        raise ValueError("城市档位表里没有城市")
+    return cities
 
 
 if __name__ == "__main__":

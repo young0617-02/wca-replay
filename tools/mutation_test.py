@@ -157,6 +157,18 @@ MUTANTS: list[Mutant] = [
         "CREATE INDEX IF NOT EXISTS idx_punch_dedup ON punch(emp_id, event_ts, punch_type,",
         "tests/test_optimization_regressions.py::test_o3_same_content_reimported_under_new_name_is_not_double_counted",
         "改名重传即重复入账，工时与打卡次数虚增——看起来像「数据变多了」的好事"),
+    Mutant(
+        "M18", "无人工结论的异常也进对外结论集（US-RV-01★）", "src/evidence.py",
+        '        if x["status"] and x["status"] != "OPEN":',
+        '        if True:  # 变异：不再区分是否有人登记过结论',
+        "tests/test_evidence_chain.py::test_unsigned_findings_never_reach_the_conclusion_set",
+        "举证包最容易在这里造假：把「机器发现的可疑」写成「人已确认的结论」，接收方完全看不出差别"),
+    Mutant(
+        "M19", "签发人不再带 human: 前缀（责任无法归到具体的人）", "src/evidence.py",
+        '        conn, run_id=run_id, actor=f"human:{signed_by}", action="evidence.sign",',
+        '        conn, run_id=run_id, actor=signed_by, action="evidence.sign",',
+        "tests/test_evidence_chain.py::test_signing_puts_a_named_actor_in_the_chain",
+        "审计链里机器动作与人的动作必须一眼可分；去掉前缀后签发看起来像系统自己签的"),
 ]
 
 

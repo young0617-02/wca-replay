@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %}复核台{% endblock %}
+{% block body %}
+<section>
+  <h2>② 复核台（待处置 {{ queue|length }} 条 / 已登记结论 {{ decided }} 条）</h2>
+  <p class="note">这里登记的是**人工结论**：规则引擎与 AI 的判断不会自动成为对外结论。
+    每条结论记录操作人与时间，并追加进审计链；已有结论不许覆盖，只能追加新单。
+    金额一律由人在这里录入（引擎不产出金额，需求 D-03）。</p>
+</section>
+
+<section>
+  <table>
+    <thead><tr><th>复核单</th><th>员工 / 城市档</th><th>日期</th><th>分级</th><th>规则</th>
+      <th>条文</th><th>来源行</th><th>结论与录入</th></tr></thead>
+    <tbody>
+    {% for q in queue %}
+      <tr>
+        <td>#{{ q.review_id }}</td>
+        <td>{{ q.emp_id }}<br><span class="ai">{{ q.region_code }}</span></td>
+        <td>{{ q.work_date or q.period_key or '期间' }}</td>
+        <td class="sev-{{ q.severity }}">{{ q.severity }}</td>
+        <td>{{ q.rule_id }}</td>
+        <td>{{ q.citations|join(', ') if q.citations else q.source_id }}</td>
+        <td>{{ q.line_refs or '—' }}</td>
+        <td>
+          {% if q.status == 'OPEN' %}
+            <div class="row">
+              <select id="d{{ q.review_id }}">
+                <option value="APPROVED">通过</option>
+                <option value="REJECTED">更正</option>
+                <option value="NEEDS_MORE_DATA">存疑</option>
+              </select>
+              <input id="n{{ q.review_id }}" placeholder="结论说明（会进审计链）" size="26">
+              <input id="a{{ q.review_id }}" placeholder="金额（分，人工录入）" size="14" inputmode="numeric">
+              <button data-rid="{{ q.review_id }}">登记</button>
+            </div>
+            <span id="r{{ q.review_id }}" class="ai"></span>
+          {% else %}
+            {{ q.status }} / {{ q.reviewer or '—' }}
+            <span class="ai">{{ q.decided_at }}</span>
+            {% if q.amount_cents_input is not none %}
+              <div class="ai">人工录入金额：{{ q.amount_cents_input }} 分
+                （由 {{ q.amount_entered_by }} 于 {{ q.amount_entered_at }} 录入，非引擎输出）</div>
+            {% endif %}
+          {% endif %}
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="8">没有待处置的复核单</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2>已登记结论（最近 {{ decided_rows|length }} 条，只读）</h2>
+  <table>
+    <thead><tr><th>复核单</th><th>员工</th><th>结论</th><th>操作人</th><th>时间</th>
+      <th>人工录入金额</th><th>说明</th></tr></thead>
+    <tbody>
+    {% for q in decided_rows %}
+      <tr><td>#{{ q.review_id }}</td><td>{{ q.emp_id }}</td>
+          <td>{{ q.status }}</td><td>{{ q.reviewer or '—' }}</td>
+          <td><span class="ai">{{ q.decided_at }}</span></td>
+          <td>{% if q.amount_cents_input is not none %}
+                {{ q.amount_cents_input }} 分
+                <div class="ai">由 {{ q.amount_entered_by }} 于 {{ q.amount_entered_at }} 录入
+                  （人工录入，非引擎输出）</div>
+              {% else %}—{% endif %}</td>
+          <td>{{ q.note|truncate(90) if q.note else '—' }}</td></tr>
+    {% else %}<tr><td colspan="7">尚无已登记结论</td></tr>{% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2>导出举证包</h2>
+  <div class="row">
+    <button id="doExport">签发并导出（当前运行 {{ run_id or '—' }}）</button>
+    <span id="exportMsg" class="ai"></span>
+  </div>
+  <p class="ai">该按钮调用与 <code>python -m src.cli export</code> 同一个 <code>export_package</code>，
+    不是第二套导出实现；包内含审计链、三元组与独立 <code>verify.py</code>。</p>
+</section>
+{% endblock %}
+
+{% block script %}
+<script>wcaBindReview();</script>
+{% endblock %}
