@@ -242,10 +242,11 @@ def run_check(conn: sqlite3.Connection, cfg: Config, *, start: date, end: date,
     with transaction(conn):
         conn.execute(
             "INSERT INTO run(run_id, started_at, finished_at, engine_version, rule_pack_version, "
-            "input_fingerprint, conclusion_digest, scope_json, notes) VALUES(?,?,?,?,?,?,?,?,?)",
+            "input_fingerprint, conclusion_digest, scope_json, notes, referenced_file_ids) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
             (run_id, started.isoformat(), datetime.now(cfg_tz()).isoformat(), ENGINE_VERSION,
              cfg.rule_pack_id, fingerprint, digest, json.dumps(scope, sort_keys=True, ensure_ascii=False),
-             notes),
+             notes, json.dumps(sorted(referenced_files))),
         )
         for f in findings:
             conn.execute(

@@ -150,6 +150,55 @@ def test_field_and_article_doc_exists():
     assert "未完成" in text or "尚未取得" in text, "P0 闸门状态必须如实写明（是否拿到 HR 口径）"
 
 
+MD_REF = re.compile(r"\]\(([^)\s]+\.md)(?:#[^)]*)?\)")            # markdown 链接
+MD_TICK = re.compile(r"`((?:docs|reports|src|config|evals|tools)/[^`\s]+\.md)`")  # 行内代码里的路径
+TREE_MD = re.compile(r"^\s*[│├└\s]*[├└]──\s*([^\s#]+\.md)")      # README 目录树里的文件名
+
+
+def _resolve(ref: str, base: Path) -> Path:
+    p = Path(ref)
+    if p.is_absolute() or re.match(r"^[A-Za-z]:", ref):
+        return p
+    return (base / p).resolve() if str(base) != str(ROOT) else (ROOT / p).resolve()
+
+
+def test_doc_links_resolve_to_real_files():
+    """文档里指向本地 .md 的每一条链接都必须真存在（悬空链接＝交付完整性缺陷）。"""
+    dead = []
+    for path in _scan_targets():
+        if path.suffix != ".md":
+            continue
+        base = path.parent if path.parent != ROOT else ROOT
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            for ref in MD_REF.findall(line) + MD_TICK.findall(line):
+                if ref.startswith(("http", "mailto")) or "<" in ref or "*" in ref:
+                    continue
+                if "{" in ref or "}" in ref:      # `reports/{A,B}.md` 这类简写不是真实路径
+                    continue
+                target = _resolve(ref, base)
+                if not target.is_file() and not (ROOT / ref).is_file():
+                    dead.append(f"{path.relative_to(ROOT)}: {ref}")
+    assert not dead, "以下 .md 链接指向不存在的文件：" + " | ".join(dead[:12])
+
+
+def test_readme_tree_lists_only_files_that_exist():
+    """README 的目录结构是**对仓库现状的陈述**，不是计划：列了就必须存在。"""
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+    missing = []
+    for line in text.splitlines():
+        m = TREE_MD.match(line)
+        if not m:
+            continue
+        name = m.group(1)
+        if "*" in name or "<" in name:
+            continue
+        hits = list(ROOT.glob(name)) + list((ROOT / "docs").glob(name)) + \
+            list((ROOT / "reports").glob(name))
+        if not hits:
+            missing.append(name)
+    assert not missing, f"README 目录树里列了不存在的文件：{missing}"
+
+
 
 def test_demo_script_commands_are_real():
     """A12 的一半：演示脚本里的每条命令都必须在 CLI 中存在。"""

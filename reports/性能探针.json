@@ -1,26 +1,35 @@
 {
   "measured_at": "2026-10-08",
   "environment": {
-    "kind": "干净环境复跑（A6/EV-01）",
-    "venv": "D:/project/wca-clean-room/venv-clean（python -m venv 新建，pip install -r requirements.txt 锁定版本）",
+    "kind": "干净环境复跑（A6/EV-01/EV-06）第二轮",
+    "venv": "D:/project/wca-clean2/venv（新建，pip install -r requirements.txt）",
     "python": "3.12.8",
-    "env_file": "无 .env（仓库副本里不放 .env），进程环境无 WCA_* 与任何 API Key",
+    "env_file": "无 .env；进程环境无 WCA_* 与任何 API Key",
     "provider": "stub",
     "embedding_backend": "bm25",
     "network_calls": 0,
-    "note": "数据库与 CSV 全部由 python -m src.cli all 现场生成；性能在库副本上测量"
+    "note": "数据库与 CSV 全部由 python -m src.cli all 现场生成；耗时在库副本上测，synchronous=FULL"
   },
   "commands": [
-    "python -m src.cli all",
-    "python -m pytest tests/ -q -m \"not llm\"  ->  167 passed / 1 deselected",
-    "python evals/judge.py  ->  7 项全绿（n=70 封闭样本）",
-    "python tools/perf_probe.py --start .. --end .. --export --amplify .. --repeat 3"
+    "python -m src.cli all  -> rc=0",
+    "python -m pytest tests/ -q -m \"not llm\"  ->  175 passed / 1 deselected (51.2s)",
+    "python -m src.cli export --sign-as rv1  ->  链 11 条 ok，自含输入 7 个 / 301,586 字节",
+    "python -m src.cli replay <包>  ->  三元组逐项一致，rc=0，墙钟 1.04-1.26s（本机 3 次）",
+    "python evals/judge.py  ->  七项全绿（n=70）",
+    "python tools/perf_probe.py --export --amplify 1000 --repeat 3"
   ],
   "reproducibility": {
     "input_fingerprint_full": "f502111929c55c027d73afc7e3887ed1a0d52c814004c5a00eda653829d12bc0",
     "conclusion_digest_full": "95f01ab2a9df725a085f3fab32a004eefb64bf86d1b98e0aa62af7023af1c090",
     "matches_main_repo_demo_db": true,
-    "note": "与本机演示库 run-20261008T175421-729b25b7 的三元组逐字符一致（同种子、同规则包 v4）"
+    "note": "与本机演示库 run-20261008T202231-e999f5fc 的三元组逐字符一致（同种子、同规则包 v4）"
+  },
+  "wall_clock_drift_note": "同一条 perf_probe 全档命令，19:35 测得中位 119.8 ms、20:30 测得 347.4 ms；两份不同库同步变慢，SQL 语句数与结论摘要完全一致。耗时数字只用于相对比较。",
+  "package_inputs": {
+    "files": 7,
+    "total_bytes": 301586,
+    "selection_rule": "主数据(org/employee) ∪ 引用集合 ∪ 结论溯源引用 ∪ 未归属质量问题所在文件",
+    "standalone_verify": "CHAIN OK / INPUTS OK checked=7 packed=7（用系统 python，不导入本项目代码）"
   },
   "tiers": {
     "small_12_findings": {
@@ -39,23 +48,26 @@
         "REVIEW": 9,
         "VIOLATION": 0
       },
-      "check_median_ms": 25.3,
+      "conclusion_digest": "831548aa5fee7a9100c5701f5a70237c820e77631d9fb7e9fb6650e565f70356",
+      "input_fingerprint": "493ac4937e97aaa30564dcb0bbb9ca2c507227638e4463629d0a694afe6bcfba",
+      "check_median_ms": 59.8,
       "check_samples_ms": [
-        30.2,
-        25.3,
-        24.6
+        134.5,
+        59.5,
+        59.8
       ],
       "spans_ms": {
-        "engine.build_facts": 16.6,
-        "engine.dedupe": 0.1,
-        "engine.rules": 0.2,
+        "engine.build_facts": 42.7,
+        "engine.dedupe": 0.8,
+        "engine.rules": 0.6,
         "engine.unattributed": 0.0
       },
-      "export_median_ms": 43.8,
+      "export_rows": 12,
+      "export_median_ms": 183.5,
       "export_samples_ms": [
-        43.8,
-        45.8,
-        42.0
+        183.5,
+        197.9,
+        128.3
       ],
       "export_rows_amplified": null,
       "export_amplified_median_ms": null,
@@ -78,36 +90,39 @@
         "REVIEW": 80,
         "VIOLATION": 7
       },
-      "check_median_ms": 119.8,
+      "conclusion_digest": "95f01ab2a9df725a085f3fab32a004eefb64bf86d1b98e0aa62af7023af1c090",
+      "input_fingerprint": "f502111929c55c027d73afc7e3887ed1a0d52c814004c5a00eda653829d12bc0",
+      "check_median_ms": 347.4,
       "check_samples_ms": [
-        119.6,
-        285.3,
-        119.8
+        439.5,
+        347.4,
+        338.1
       ],
       "spans_ms": {
-        "engine.build_facts": 101.7,
-        "engine.dedupe": 0.9,
-        "engine.rules": 4.0,
-        "engine.unattributed": 0.0
+        "engine.build_facts": 312.5,
+        "engine.dedupe": 1.4,
+        "engine.rules": 9.7,
+        "engine.unattributed": 0.1
       },
-      "export_median_ms": 66.9,
+      "export_rows": 101,
+      "export_median_ms": 185.2,
       "export_samples_ms": [
-        122.4,
-        61.9,
-        66.9
+        265.3,
+        143.3,
+        185.2
       ],
       "export_rows_amplified": 1000,
-      "export_amplified_median_ms": 184.3,
+      "export_amplified_median_ms": 396.0,
       "export_amplified_samples_ms": [
-        186.1,
-        176.7,
-        184.3
+        396.0,
+        527.8,
+        388.6
       ],
       "amplify_note": "复制行仅用于测导出耗时，不代表真实员工规模"
     }
   },
   "latency_segments_ms": {
-    "sample": "70 题评测（fresh DB，封闭样本）",
+    "sample": "70 题评测（fresh 库单次评测，样本封闭；第一轮 19:38 采集）",
     "retrieve": {
       "p50": 1.9,
       "p95": 4.8,
@@ -121,6 +136,6 @@
       "max": 8.1
     },
     "n": 70,
-    "note": "stub 轨、无网络；engine.build_facts/rules 的 n=5 来自评测器内的整轮校验，不是每问一次"
+    "note": "第二轮未重取，因为同一库上再跑 n 会变 140（span 表按库累计）；结合墙钟漂移，这组只按量级引用"
   }
 }

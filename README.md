@@ -18,13 +18,15 @@ python -m venv .venv && source .venv/bin/activate        # Windows: .venv\Script
 pip install -r requirements.txt
 cp .env.example .env                                     # 不填也能跑：默认全离线
 python -m src.cli all                                    # 生成→导入→建库→校验→报表→举证包
-python -m pytest tests/ -q -m "not llm"                   # 143 项，约 50 秒，无网络、无云凭证
+python -m pytest tests/ -q -m "not llm"                   # 180 项，约 50 秒，无网络、无云凭证
 python evals/judge.py --write-report                     # 70 条评测集打分
-python tools/mutation_test.py                            # 注入 19 个缺陷，看测试抓不抓得住
-python tools/perf_probe.py --reference --repeat 5        # 性能前后对照（在库副本上测）
+python tools/mutation_test.py                            # 注入 20 个缺陷，看测试抓不抓得住
+python tools/perf_probe.py --export --amplify 1000       # 规模与导出耗时（在库副本上测）
+python -m src.cli replay var/packages/<run_id>.zip        # 拿包自己重放：重导输入→重跑引擎→比三元组
 ```
 
-核心校验链路只依赖 **Python 标准库 + pytest**；只有 2 个只读 HTTP 接口需要 FastAPI。
+核心校验链路只依赖 **Python 标准库 + pytest**；只有 Web 界面与只读接口需要 FastAPI（没装时界面测试如实 skip，
+`python -m src.cli ask` 走的是同一条链路）。
 向量检索默认**不启用**（未下载 embedding 模型），启用不了时代码会如实降级成 BM25 并在结果里标注。
 
 演示路径与讲解词：`docs/演示脚本-30分钟.md`。
@@ -33,21 +35,23 @@ python tools/perf_probe.py --reference --repeat 5        # 性能前后对照（
 
 | 指标 | 实测 |
 |---|---|
-| 测试 | `167 passed / 1 deselected`（`-m "not llm"`，离线；唯一被筛掉的用例需要真实云凭证） |
-| 干净环境复跑 | 新建 venv + **无 `.env`** + 数据现场生成：`python -m src.cli all` rc=0，`pytest -m "not llm"` **167 passed / 1 deselected**（`reports/干净环境复跑.md`） |
+| 测试 | `180 passed / 1 deselected`（`-m "not llm"`，离线；唯一被筛掉的用例需要真实云凭证） |
+| 干净环境复跑 | 新建 venv + **无 `.env`** + 数据现场生成：`cli all` rc=0、`pytest -m "not llm"` **175 passed / 1 deselected**，并跑通 `export --sign-as → replay → 独立 verify.py` 整条复核链（`reports/干净环境复跑.md`） |
 | 三元组跨环境一致 | 干净环境重跑得同一 `输入指纹 f5021119…` / `结论摘要 95f01ab2…`（与本机演示库逐字符一致） |
-| 变异测试 | 注入 19 个缺陷，**捕获 19**，还原 MD5 全部一致（v4 + 界面 + 举证包收口后重跑；M18/M19 是本轮新加的「无人工结论混进结论集」「签发人不具名」两个变异体） |
+| 变异测试 | 注入 20 个缺陷，**捕获 20**，还原 MD5 全部一致（M18 无人工结论混进结论集、M19 签发人不具名、M20 包漏主数据） |
 | 意图 Top-1 / Hit@5 / MRR | 70/70 · 37/37 · 0.664（含三市分档题与跨城隔离回归题）|
 | 数值工具首次成功率 / 引用忠实率 | 30/30 · 70/70 |
 | **错承诺条数（红线）** | **0** |
 | **越权召回条数（红线）** | **0** |
 | 检索段 P95 / 端到端 P95 | 4.8 ms / 5.6 ms（干净环境 fresh 库、单次 70 题评测、n=70 封闭样本，**离线 stub 轨**；云轨未测） |
-| 整轮校验（12 员工 × 2,904 员工日 / 3,215 条 SQL） | **119.8 ms** 中位（样本 119.6 / 119.8 / 285.3）；小档 12 人日×60 = **25.3 ms** |
-| 举证包导出 | 101 行 **66.9 ms**；1,000 行（复制行，仅测代码形状）**184.3 ms**（预算 ≤3 s 达成）；真实 1,000 员工规模**未测** |
+| 整轮校验（12 员工 × 2,904 员工日 / 3,215 条 SQL） | **347.4 ms** 中位（样本 338.1 / 347.4 / 439.5）；小档 60 人日 = **59.8 ms**。**同一条命令一小时内曾测得 119.8 ms**，本机跨时段可差 2.9 倍 → 耗时只作相对比较，不当 SLA |
+| 举证包导出（含自含输入 7 个文件 / 301,586 字节） | 101 行 **185.2 ms**；1,000 行（复制行，仅测代码形状）**396.0 ms**（预算 ≤3 s 达成）；真实 1,000 员工规模**未测** |
+| 重放一份举证包 | `python -m src.cli replay <包>` 全流程 **1.04–1.26 s**（3 次取样）：解包 → 临时库重导输入 → 重跑引擎 → 三元组逐项一致；只用系统 Python 跑包内 `verify.py` 也能验掉链与输入哈希 |
 | 界面首屏 TTFB | 复核台 30.8–33.4 ms、问答页 28.7 ms、未登录 401 6.5–7.7 ms（本机 loopback + 真实服务） |
 | 结论条数与对账 | v2 110 条 → v3/v4 **101 条**，差值逐条可解释（`reports/判据修订.md`） |
+| 外部重放（US-EX-01） | 包内自带 `inputs/` 原始 CSV；`replay` 把输入喂回引擎重比三元组；改一个打卡时间必须报 `≠`（`tests/test_replay.py` 7 项 + 变异体 M20） |
 | 对外结论集 | 演示库 101 条异常里**只有 2 条**有人工结论进了对外结论集，其余 99 条留在 `findings.csv` 等处置——这是纪律，不是漏数 |
-| 服务启停 | 启动到就绪 1.40 / 1.42 s；优雅停止 0.78 / 0.89 s（两轮各测一次，v2 时点） |
+| 服务启停 | 一键开关六条路径实跑通过：启动就绪 1450–1539 ms、优雅停止 764–862 ms、强杀 784 ms、`在跑→先停后起` 总 3051 ms、`--no-restart` 不动进程（rc=1 并给处置建议） |
 
 以上数字的前提条件、以及**哪些是设计值、哪些根本没测**，全部写在
 [`docs/口径声明.md`](docs/口径声明.md)。云端延迟、token 账单、向量检索收益、真实字段口径：**未测**。
@@ -83,7 +87,10 @@ V1 → V1.1 优化的前后对照（含没达成的目标）在 [`reports/优化
    审计 hash 链 + 一次导出生成「规则版本 + 输入指纹 + 结论摘要」三元组；包内含独立 `verify.py`，
    复核方不需要相信我——自己重算链即可，改一条就会在第一个断点报错。
    包内另附**对外结论集**（只收已登记具名人工结论的条目）、**责任区块**（机器算了什么、AI 碰过什么、
-   人确认了什么、谁签的字）与**未覆盖清单**（本期不判什么、哪些没测，自己先说）。
+   人确认了什么、谁签的字）、**未覆盖清单**（本期不判什么、哪些没测，自己先说），
+   以及**本次结论真正依赖的原始 CSV**（`inputs/`）。
+   所以复核方拿着包就能自己走完两步：`verify.py` 独立重算链与输入哈希（只用标准库），
+   `python -m src.cli replay <包>` 把包内输入喂回引擎、比对三元组——**不必回头向我索要数据**。
 3. **带 ACL 的制度问答**
    权限谓词在检索层下推（SQL 的 WHERE/JOIN），未授权条目**进不了候选集**；
    答案必须带可点开出处、证据覆盖率与置信度门禁；「该付多少加班费」这类重大事项**只解释规则、
@@ -111,19 +118,17 @@ worktime-compliance-agent/
 ├── pytest.ini                    # 标记注册：llm / slow（`-m "not llm"` 真能筛掉东西）
 ├── requirements.txt              # 锁版本，必含 pytest；界面无任何前端构建依赖
 ├── .env.example                  # 全部待填项集中在这里，带 TODO
-├── 项目方案-*.md                  # 方案与优化方案（受禁词扫描覆盖）
-├── 项目汇报-*.md                  # 成本收益与方向判断（同受扫描覆盖）
 ├── docs/
+│   ├── 需求文档-用户故事.md        # 唯一目标依据（F-001~F-014 / A1~A12 / 边界与异常）
+│   ├── 项目定义-一页.md            # 一页版范围与非目标
+│   ├── 技术方案-架构选型与实现路径.md   # 分层选型 TECH-01~05 + 落差清单 GAP-01~11
+│   ├── MVP实施方案-范围里程碑与验收.md  # 33 项 Must 对照、S1~S7 排期、V-01~15 验收对账
 │   ├── 字段口径与条文依据.md      # F-001 F-002（本项目合法性的根，含 P0 闸门状态）
 │   ├── 口径声明.md                # 实测 / 设计值 / 未测 三态
-│   ├── 架构图.md                  # 模块边界 + 数据结构 + 异常处理策略
-│   ├── 待确认清单.md              # 17 条需要人回答的问题，我不猜
-│   ├── 服务启停.md                # 一键启动/停止的行为边界与恢复建议
-│   ├── 需求文档.md                # 用户故事 + 验收标准 + 边界与异常（从代码逆向整理）
-│   ├── 技术文档.md                # 技术栈、分层架构、调用关系、数据流、异常矩阵
-│   ├── 架构图-Python版.md         # 分层骨架不变，Java 系技术逐层换成本仓库 Python 方案
-│   ├── 简历-AI应用开发工程师.md   # 以本项目为核心的简历（量化项只用实测数字）
-│   └── 演示脚本-30分钟.md
+│   ├── 待确认清单.md              # 需要人回答的问题，我不猜
+│   ├── 服务启停.md                # 一键启动/停止的字段含义、行为边界与恢复建议
+│   ├── 演示脚本-30分钟.md
+│   └── 交付总结-本轮.md            # 本轮做了什么、验到哪一步、哪些没做
 ├── config/
 │   ├── services.json              # 服务清单（启停工具读它，加服务不改代码）
 │   ├── region_profile.json         # 城市档位表：市名、地域层级、适用条文只写在这里
@@ -156,7 +161,7 @@ worktime-compliance-agent/
 │   ├── stop_services.py          # 一键优雅停止（含 --status）
 │   ├── mutation_test.py          # F-012 变异测试（MD5 基线校验 + 字节码缓存清理）
 │   └── perf_probe.py             # 性能探针：SQL 计数 + 多次采样中位耗时（在库副本上测）
-├── tests/                        # 143 项：判据/质量门禁/ACL/守卫/接口/界面权限/城市档/启停/回归/验收
+├── tests/                        # 180 项：判据/质量门禁/ACL/守卫/接口/界面权限/城市档/启停/CLI 表面/重放/验收（含文档链接自检）
 └── reports/                      # 评测结果.md、变异测试.md、优化验证.md、判据修订.md、
                                   # 性能探针.json、P0-闸门.md、异常报表 CSV
 ```
@@ -167,7 +172,7 @@ worktime-compliance-agent/
 |---|---|---|
 | 导入 | `data/raw/*.csv` 或程序化 `list[dict]` | 事实表（每行带 `file_id+line_no`+文件 sha256）+ 质量问题表 + 审计事件 |
 | 校验 | 事实 + 员工主数据 + 节假日日历 + 规则包版本 | `run` 三元组、`finding`（分级/整数指标/条文/行级来源）、复核单、异常报表 CSV |
-| 举证 | 一个 `run` | zip：`manifest.json` + `findings.csv` + **`conclusions_final.csv`（只收已人工确认的条目）** + `input_files.csv` + `audit_chain.jsonl` + `quality_issues.csv` + **`responsibility.json`（责任区块）** + **`not_covered.json` / `未覆盖清单.md`** + 独立 `verify.py` |
+| 举证 | 一个 `run` | zip：`manifest.json` + `findings.csv` + **`conclusions_final.csv`（只收已人工确认的条目）** + `input_files.csv` + `audit_chain.jsonl` + `quality_issues.csv` + **`responsibility.json`（责任区块）** + **`not_covered.json` / `未覆盖清单.md`** + **`inputs/`（本次结论真正依赖的原始 CSV + `inputs/manifest.json`）** + 独立 `verify.py`；重放：`python -m src.cli replay <包>` |
 | 问答 | 一句自然语言 + 提问主体 `emp_id` | 答案 + 门禁决策（ANSWERED/EXPLAIN_ONLY/ESCALATED/REFUSED_ACL/REFUSED_NO_EVIDENCE）+ 可点开出处 + 置信/覆盖率 + 分段耗时 |
 | HTTP | 会话 Cookie（**没有** `as_emp` 这类可自报身份的参数）：`GET /ask?q=…`、`GET /evidence/{run_id}`；界面 `POST /api/import` `/api/check` `/api/review/{id}/decision` `/api/export` `/api/ask` | JSON；zip 下载（响应头带三元组与链校验结果）；权限一律在服务端判 |
 
@@ -248,10 +253,11 @@ python tools/start_services.py --json     # 机器可读结果（退出码 0/1/2
 | A2 ★ 标准答案有可复核条文 | **已达成** | `tests/test_acceptance.py::test_golden_set_citations_resolve_to_corpus`；条文号在 `docs/字段口径与条文依据.md` 第三节 |
 | A3 ★ ACL 越权召回 0 | **已达成（离线实测）** | `tests/test_acl_retrieval.py` 断言打在候选集；评测 `acl_leak=0`；变异测试 M5（改成先召回再过滤）被捕获 |
 | A4 ★ 错承诺 0 | **已达成（离线实测）** | `tests/test_agent_guard.py`；评测 `wrong_commitment=0`；变异测试 M11 被捕获 |
-| A5 ★ 测试有鉴别力 | **已达成** | `python tools/mutation_test.py`：注入 19 捕获 19，还原 MD5 一致（工装自身的一处假漏网已在 `reports/优化验证.md` §5 记录并修掉） |
-| A6 测试可跑且可复现 | **已达成** | 全新 venv + **无 `.env`** 的仓库副本：`pip install -r requirements.txt` → `python -m src.cli all`（rc=0）→ `python -m pytest tests/ -q -m "not llm"` = **167 passed / 1 deselected**；三元组与本机库逐字符一致（`reports/干净环境复跑.md`） |
+| A5 ★ 测试有鉴别力 | **已达成** | `python tools/mutation_test.py`：注入 20 捕获 20，还原 MD5 一致（工装自身曾报出一条**不存在的漏网**，修法与记录见 `reports/优化验证.md` 第四节的 `tools/mutation_test.py` 出处） |
+| A6 测试可跑且可复现 | **已达成** | 全新 venv + **无 `.env`** 的仓库副本：`pip install -r requirements.txt` → `python -m src.cli all`（rc=0）→ `python -m pytest tests/ -q -m "not llm"` = **175 passed**（那一趟的实测计数）；三元组与本机库逐字符一致，
+  且 `export --sign-as → replay → 独立 verify.py` 整条复核链同一趟跑通（`reports/干净环境复跑.md`） |
 | A7 行级可追溯 | **已达成** | `tests/test_ingest_quality.py` + 举证包 `findings.csv` 的 `source_rel_path/source_line_no` |
-| A8 举证包可复核 | **已达成** | `tests/test_evidence_chain.py::test_exported_package_reproduces_same_triple`；同文件另 4 项守住对外结论集（无人工结论不进集）、签发人入链、责任区块与未覆盖清单随包给出 |
+| A8 举证包可复核 | **已达成** | `test_exported_package_reproduces_same_triple`（同输入重跑）+ `tests/test_replay.py`（**把包内输入喂回引擎逐项比三元组**，改输入必须报不一致）；另 4 项守住结论集纪律、签发人入链、责任区块与未覆盖清单随包给出 |
 | A9 性能口径诚实 | **已达成** | `docs/口径声明.md` 每个数字标实测/设计值/未测；`tests/test_acceptance.py` 检查 |
 | A10 ★ 无虚假宣称 | **已达成** | `tests/test_acceptance.py::test_no_false_claims_in_docs_and_code` 扫 README/docs/src/evals/data，禁词命中数=0 |
 | A11 合成数据如实标注 | **部分** | 生成器与 README 已明示合成+seed；**「字段语义取得人事部门口径确认」这句不成立**（F-001 未完成，见下） |
@@ -273,7 +279,8 @@ python tools/start_services.py --json     # 机器可读结果（退出码 0/1/2
   **Web 界面 3 视图 + 最小登录**（`src/web/`：服务端判权、scrypt 口令、HttpOnly 会话、身份取自会话）、
   **举证包收口**：新增对外结论集 `conclusions_final.csv`（只收已登记具名人工结论）、责任区块
   `responsibility.json`（机器/AI/人/签发人各做了什么）、`not_covered.json` + `未覆盖清单.md`，
-  签发入口 CLI 与界面共用同一个 `sign_package`。
+  签发入口 CLI 与界面共用同一个 `sign_package`；**举证包再自含本次结论依赖的原始 CSV（`inputs/`）**，
+  新增 `python -m src.cli replay <包>` 把输入喂回引擎重比三元组（US-EX-01 由「要别人做」变成「我已自验」）。
 - **干净环境复跑已做**（`reports/干净环境复跑.md`）：新建 venv、仓库副本里**不放 `.env`**、数据现场生成，
   两条命令跑通且三元组与本机库一致。这一趟还挖出并修掉一个真实缺陷：`src.cli all` 因手工拼参数包
   在导出步 `AttributeError`（测试全绿但 README 第一条命令跑不通），现改为逐步复用子命令自己的解析结果，

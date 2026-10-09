@@ -39,6 +39,7 @@ def schema_digest() -> str:
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
     _migrate_review_amount(conn)
+    _migrate_run_referenced_files(conn)
     set_meta(conn, "schema_version", SCHEMA_VERSION)
     set_meta(conn, "schema_digest", schema_digest())
 
@@ -103,6 +104,17 @@ def _assert_ident(name: str) -> None:
     """表名来自代码常量而非用户输入；仍做白名单校验，防注入也防手滑。"""
     if not name.replace("_", "").isalnum():
         raise ValueError(f"非法表名: {name!r}")
+
+
+def _migrate_run_referenced_files(conn: sqlite3.Connection) -> None:
+    """老库补 `run.referenced_file_ids`：只加列，既有行的判定值与三元组一律不动。
+
+    老库里的旧 run 该列为 NULL，含义是「当时没记录引用集合」——导出时如实跳过输入打包并写明原因，
+    不去猜它引用过哪些文件。
+    """
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(run)")}
+    if "referenced_file_ids" not in cols:
+        conn.execute("ALTER TABLE run ADD COLUMN referenced_file_ids TEXT")
 
 
 def _migrate_review_amount(conn: sqlite3.Connection) -> None:

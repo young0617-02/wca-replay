@@ -169,6 +169,15 @@ MUTANTS: list[Mutant] = [
         '        conn, run_id=run_id, actor=signed_by, action="evidence.sign",',
         "tests/test_evidence_chain.py::test_signing_puts_a_named_actor_in_the_chain",
         "审计链里机器动作与人的动作必须一眼可分；去掉前缀后签发看起来像系统自己签的"),
+    Mutant(
+        "M20", "举证包漏掉主数据（org/employee）", "src/evidence.py",
+        '    for r in conn.execute("SELECT file_id FROM raw_file WHERE kind IN (\'org\',\'employee\')"\n'
+        '                          " ORDER BY file_id").fetchall():',
+        '    for r in conn.execute("SELECT file_id FROM raw_file WHERE kind IN (\'__none__\')"\n'
+        '                          " ORDER BY file_id").fetchall():',
+        "tests/test_replay.py::test_replay_reproduces_the_triple_from_the_package_alone",
+        "主数据不出现在 source_refs 里，最容易被当成「不属于本次结论」漏打包——"
+        "接收方重放时一个员工都查不到，结论全空却看不出问题出在包上"),
 ]
 
 

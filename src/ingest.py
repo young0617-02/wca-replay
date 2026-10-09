@@ -135,14 +135,18 @@ def _ts_of(value: str, *, field_name: str, line_no: int) -> tuple[str, list[Issu
 # ------------------------------------------------------------------ 文件入口
 def import_csv_file(conn: sqlite3.Connection, cfg: Config, path: Path | str, *,
                     kind: str | None = None, actor: str = "system:ingest",
-                    created_at: str | None = None) -> ImportResult:
+                    created_at: str | None = None,
+                    rel_path: str | None = None) -> ImportResult:
+    """导入一个 CSV。`rel_path` 只在**外部重放**时显式给：包里的文件落在临时目录，
+    但输入指纹按原始 `rel_path` 计算，不复现就比不回来。默认仍按当前工作目录推导。
+    """
     p = Path(path)
     if not p.is_file():
         raise FileNotFoundError(f"待导入文件不存在: {p}")
     raw = p.read_bytes()
     text = raw.decode("utf-8-sig", errors="replace")
     digest = sha256_hex(raw)
-    rel = _rel_path(p, cfg)
+    rel = rel_path if rel_path else _rel_path(p, cfg)
     kind = kind or _guess_kind(rel)
     if kind not in KINDS:
         raise ValueError(f"未知数据类型 kind={kind!r}，可选 {KINDS}")

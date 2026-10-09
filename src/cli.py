@@ -25,7 +25,7 @@ from .rules.rulepack import RULE_CATALOG
 
 INGEST_ORDER = ("org", "employee", "schedule", "punch", "leave", "trip", "correction")
 # 供演示脚本自洽性检查（A12）使用：命令名必须与 build_parser 中的注册保持一致
-SUBCOMMAND_NAMES = ("init", "gen", "ingest", "kb", "check", "report", "export", "ask",
+SUBCOMMAND_NAMES = ("init", "gen", "ingest", "kb", "check", "report", "export", "replay", "ask",
                     "verify", "covers", "start", "stop", "status", "users", "all")
 KIND_BY_FILE = {
     "org.csv": "org",
@@ -150,14 +150,48 @@ def cmd_export(args) -> int:
         from .evidence import sign_package
         rec = sign_package(conn, cfg, run_id, signed_by=args.sign_as)
         print(f"签发：{args.sign_as} 审计序号 {rec['audit_seq']} 链哈希 {rec['entry_hash'][:16]}…")
-    manifest = export_package(conn, cfg, run_id)
+    manifest = export_package(conn, cfg, run_id, include_inputs=not args.no_inputs)
+    inputs = manifest["inputs"]
     print(f"举证包：{manifest['package_zip']}")
     print(f"  对外结论 {manifest['counts']['final_conclusions']} 条 / 未人工确认 {manifest['counts']['unsigned_pending']} 条"
           f"（无人工结论的异常不进结论集）")
+    print(f"  自含输入 {inputs['packed']} 个 / {inputs['total_bytes']:,} 字节"
+          + (f"；缺项 {len(inputs['missing'])}：{inputs['missing']}" if inputs["missing"] else "")
+          + (f"；{inputs['reason']}" if inputs["reason"] else ""))
     print(f"  三元组 {json.dumps(manifest['triple'], ensure_ascii=False, sort_keys=True)}")
     print(f"  审计链 {manifest['chain_verification']}")
     print(f"  manifest sha256={manifest['manifest_sha256'][:20]}… 结论 {manifest['counts']['findings']} 条")
+    print("  复核方重放：unzip 后 python verify.py（链+输入哈希），"
+          "或 python -m src.cli replay <包>（把输入喂回引擎比三元组）")
     return 0
+
+
+def cmd_replay(args) -> int:
+    from .replay import replay
+
+    res = replay(args.package)
+    if args.json:
+        print(json.dumps(res, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0 if res["ok"] else 1
+    print(f"重放举证包 {res['package']}（run {res['run_id']}）")
+    print(f"  审计链：{'完整' if res['chain']['ok'] else '断裂'}，{res['chain']['length']} 条"
+          + (f"（seq={res['chain']['broken_at_seq']} {res['chain']['reason']}）"
+             if not res["chain"]["ok"] else ""))
+    print(f"  包内输入 {res['inputs_packed']} 个"
+          + (f"，导出时缺项 {res['inputs_missing']}" if res["inputs_missing"] else ""))
+    print(f"  钉回口径参数 {json.dumps(res['pinned_params'], ensure_ascii=False, sort_keys=True)}")
+    print(f"  {res['inherited_params_note']}")
+    if "actual_triple" not in res:
+        print(f"  结论：{'通过' if res['ok'] else '无法重放'} —— {res['reason']}")
+        return 0 if res["ok"] else 1
+    for key in ("rule_pack_version", "input_fingerprint", "conclusion_digest"):
+        same = res["expected_triple"][key] == res["actual_triple"][key]
+        print(f"  {'=' if same else '≠'} {key}: 期望 {str(res['expected_triple'][key])[:20]}… "
+              f"实得 {str(res['actual_triple'][key])[:20]}…")
+    print(f"  结论条数 期望 {res['findings_expected']} / 实得 {res['findings_actual']} "
+          f"分级 {res['counts_actual']}")
+    print(f"  重放结果：{'一致' if res['ok'] else '不一致'} —— {res['reason']}")
+    return 0 if res["ok"] else 1
 
 
 def cmd_users(args) -> int:
@@ -337,10 +371,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--notes", default=""); p.set_defaults(fn=cmd_check)
     p = sub.add_parser("report", help="导出异常报表 CSV")
     p.add_argument("--run", default=""); p.set_defaults(fn=cmd_report)
-    p = sub.add_parser("export", help="导出举证包（三元组 + 审计链 + 责任区块 + 未覆盖清单）")
+    p = sub.add_parser("export", help="导出举证包（三元组 + 审计链 + 责任区块 + 未覆盖清单 + 自含输入）")
     p.add_argument("--run", default="")
     p.add_argument("--sign-as", default=None, help="以 HR 负责人身份签发（写入审计链）后再导出")
+    p.add_argument("--no-inputs", dest="no_inputs", action="store_true",
+                   help="不打包原始输入 CSV（包会因此无法离线重放）")
     p.set_defaults(fn=cmd_export)
+    p = sub.add_parser("replay", help="拿举证包自己重放：解包 -> 重导输入 -> 重跑引擎 -> 比三元组")
+    p.add_argument("package", help="包 zip 或已解压的目录")
+    p.add_argument("--json", action="store_true", help="输出机器可比的完整结果")
+    p.set_defaults(fn=cmd_replay)
     p = sub.add_parser("ask", help="问一答（走同一条 API 链路）")
     p.add_argument("question"); p.add_argument("--as", dest="actor", default="E001")
     p.set_defaults(fn=cmd_ask)

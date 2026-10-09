@@ -444,7 +444,7 @@ class ServiceManager:
         rep = Report(op="start", started_at=now_iso())
         targets = self._select(self.services.by_start_order(), only)
 
-        precheck = self._precheck(targets)
+        precheck = self._precheck(targets, restart_if_running=restart_if_running)
         rep.outcomes += precheck
         blocking = [o for o in precheck if not o.ok]
         if blocking:
@@ -474,7 +474,8 @@ class ServiceManager:
         rep.elapsed_ms = self._ms(t0)
         return rep
 
-    def _precheck(self, specs: list[ServiceSpec]) -> list[ServiceOutcome]:
+    def _precheck(self, specs: list[ServiceSpec], *,
+                  restart_if_running: bool = True) -> list[ServiceOutcome]:
         probes = list(specs)   # 无端口的服务也要探活，否则 precheck 报不出「已在运行」
         states: dict[str, ServiceState] = {}
         if probes:
@@ -510,8 +511,12 @@ class ServiceManager:
                     hint=f"确认那个进程是什么：Windows `tasklist /FI \"PID eq {st.foreign_pid}\"`；"
                          f"确认可以结束它再结束，或改 config/services.json 里的 port"))
             elif st and st.alive:
-                out.append(ServiceOutcome(s.name, "precheck", True, "running",
-                                          pid=st.pid, port=s.port, message="已在运行，将先停后起"))
+                out.append(ServiceOutcome(
+                    s.name, "precheck", True, "running", pid=st.pid, port=s.port,
+                    # 措辞必须与 --no-restart 一致：曾经在这里无条件写「将先停后起」，
+                    # 而 --no-restart 随后就拒绝启动，同一屏上前后矛盾
+                    message="已在运行，将先停后起" if restart_if_running
+                    else "已在运行（按要求不重启，稍后会拒绝对它动手）"))
             else:
                 out.append(ServiceOutcome(s.name, "precheck", True, "free", port=s.port,
                                           message="端口空闲" if s.port else "无端口，直接启动"))

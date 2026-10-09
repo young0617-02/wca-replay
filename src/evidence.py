@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import csv
 import json
+import shutil
 import sqlite3
 import zipfile
 from dataclasses import dataclass
@@ -19,7 +20,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import ENGINE_VERSION
-from .config import Config
+from .config import Config, PROJECT_ROOT
 from .db import get_meta, set_meta
 from .util import CN_TZ, canonical_json, digest_of, sha256_hex
 
@@ -161,6 +162,9 @@ PACKAGE_README = (
     "三元组（规则版本 / 输入指纹 / 结论摘要）用于复核：在相同输入与相同规则版本下重跑，"
     "结论摘要必须逐字节一致。\r\n"
     "本包不含任何应付金额：引擎只输出小时数与法定倍数档位，金额由 HR 负责人在复核台具名录入。\r\n"
+    "包内 inputs/ 带本次结论真正依赖的原始 CSV（选择规则见 manifest.inputs.selection_rule），"
+    "所以复核不必再回头索要数据：verify.py 独立重算审计链与输入文件哈希；"
+    "有本项目代码时用 `python -m src.cli replay <包>` 重放引擎并比对三元组。\r\n"
 )
 
 
@@ -248,6 +252,11 @@ def _has_table(conn: sqlite3.Connection, name: str) -> bool:
                         (name,)).fetchone() is not None
 
 
+def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    return conn.execute("SELECT 1 FROM pragma_table_info(?) WHERE name = ?",
+                        (table, column)).fetchone() is not None
+
+
 def sign_package(conn: sqlite3.Connection, cfg: Config, run_id: str, signed_by: str) -> dict:
     """签发：把"谁为这份材料负责"追加进审计链（不改写历史）。CLI 与界面共用这一个入口。"""
     if not signed_by.strip():
@@ -298,7 +307,99 @@ def _not_covered_markdown(nc: dict) -> str:
     return NL.join(out) + NL
 
 
-def export_package(conn: sqlite3.Connection, cfg: Config, run_id: str) -> dict:
+# ------------------------------------------------- 输入自含与外部重放（US-EX-01 / A8）
+EXPORT_INPUTS_MAX_BYTES = 8 * 1024 * 1024
+INPUTS_DIRNAME = "inputs"
+INPUTS_MANIFEST_NAME = f"{INPUTS_DIRNAME}/manifest.json"
+
+
+def _run_input_file_ids(conn: sqlite3.Connection, run_id: str) -> set[int]:
+    """本次结论**实际依赖**的输入文件 = 主数据 ∪ 引用集合 ∪ 结论溯源里的文件 ∪ 未归属质量问题的文件。
+
+    三个并集都必要：
+      * 主数据（org/employee）不出现在 `source_refs` 里，但没有它连"这个员工存在"都不成立；
+      * 只取输入指纹的引用集合也不够——`QUAL-02` 那类"归属不到人"的质量结论扫的是全库
+        `ingest_issue`，产生它的文件可能不在引用集合里，却确实改变了结论摘要。
+    漏掉任何一个，重放摘要就对不上，而那会被误读成"引擎不可复现"。
+    """
+    ids: set[int] = set()
+    for r in conn.execute("SELECT file_id FROM raw_file WHERE kind IN ('org','employee')"
+                          " ORDER BY file_id").fetchall():
+        ids.add(int(r["file_id"]))
+    if _has_column(conn, "run", "referenced_file_ids"):
+        row = conn.execute("SELECT referenced_file_ids FROM run WHERE run_id = ?",
+                           (run_id,)).fetchone()
+        if row is not None and row["referenced_file_ids"]:
+            ids |= {int(x) for x in json.loads(row["referenced_file_ids"])}
+    for f in conn.execute("SELECT source_refs FROM finding WHERE run_id = ?",
+                          (run_id,)).fetchall():
+        for ref in json.loads(f["source_refs"] or "[]"):
+            if isinstance(ref, dict) and ref.get("file_id") is not None:
+                ids.add(int(ref["file_id"]))
+    for r in conn.execute(
+        "SELECT DISTINCT file_id FROM ingest_issue "
+        "WHERE emp_id = '' OR emp_id NOT IN (SELECT emp_id FROM employee)"
+    ).fetchall():
+        ids.add(int(r["file_id"]))
+    return ids
+
+
+def _resolve_input_path(rel_path: str, cfg: Config) -> Path | None:
+    """按几个常见落点找原始文件；找不到就返回 None，由调用方如实记成缺项，不猜。"""
+    if rel_path.startswith("inline://"):
+        return None
+    p = Path(rel_path)
+    candidates = [p if p.is_absolute() else PROJECT_ROOT / p, Path.cwd() / p,
+                  cfg.data_dir / p.name]
+    for c in candidates:
+        if c.is_file():
+            return c
+    return None
+
+
+def collect_package_inputs(conn: sqlite3.Connection, cfg: Config, run_id: str) -> dict:
+    """挑出可打包的输入文件，并按字节预算把关（超预算直接报错，不静默截断）。"""
+    entries: list[dict] = []
+    missing: list[str] = []
+    ids = _run_input_file_ids(conn, run_id)
+    if not ids:
+        return {"entries": [], "missing": [], "total_bytes": 0,
+                "reason": "本次运行没有记录引用文件（旧库或空引用），包内不含 inputs/"}
+    placeholders = ",".join("?" * len(ids))
+    rows = conn.execute(
+        f"SELECT file_id, rel_path, sha256, kind, row_count FROM raw_file "
+        f"WHERE file_id IN ({placeholders}) ORDER BY file_id", tuple(sorted(ids))).fetchall()
+    for r in rows:
+        src = _resolve_input_path(r["rel_path"], cfg)
+        if src is None:
+            missing.append(r["rel_path"])
+            continue
+        data = src.read_bytes()
+        if sha256_hex(data) != r["sha256"]:
+            # 库里登记的指纹与磁盘现状不一致：说明文件在导入后被改过，必须让接收方看得见
+            missing.append(f"{r['rel_path']}（磁盘内容已与登记 sha256 不一致，拒绝打包）")
+            continue
+        entries.append({"file_id": int(r["file_id"]), "rel_path": r["rel_path"],
+                        "kind": r["kind"], "sha256": r["sha256"], "bytes": len(data),
+                        "arcname": f"{INPUTS_DIRNAME}/{int(r['file_id']):03d}-{src.name}",
+                        "source": str(src)})
+    total = sum(e["bytes"] for e in entries)
+    if total > EXPORT_INPUTS_MAX_BYTES:
+        raise ValueError(
+            f"待打包输入 {total:,} 字节，超过预算 {EXPORT_INPUTS_MAX_BYTES:,} 字节；"
+            f"确认没必要自含时可用 --no-inputs 导出不带原始数据的包")
+    note = ""
+    if not _has_column(conn, "run", "referenced_file_ids"):
+        note = ("旧库没有 run.referenced_file_ids 列（本次运行当时未记录引用集合），"
+                "已按主数据 + 结论溯源 + 未归属质量问题文件打包")
+    elif not conn.execute("SELECT referenced_file_ids FROM run WHERE run_id = ?",
+                          (run_id,)).fetchone()["referenced_file_ids"]:
+        note = "该 run 未记录引用文件集合（升级前的旧 run），已按主数据 + 溯源引用打包"
+    return {"entries": entries, "missing": missing, "total_bytes": total, "reason": note}
+
+
+def export_package(conn: sqlite3.Connection, cfg: Config, run_id: str, *,
+                   include_inputs: bool = True) -> dict:
     """导出举证包（zip + manifest），返回清单字典。1000 行内应控制在数秒级（设计值）。"""
     run = conn.execute("SELECT * FROM run WHERE run_id = ?", (run_id,)).fetchone()
     if run is None:
@@ -369,6 +470,29 @@ def export_package(conn: sqlite3.Connection, cfg: Config, run_id: str) -> dict:
     nc_md = work / "未覆盖清单.md"
     nc_md.write_text(_not_covered_markdown(nc))
 
+    # 8) 输入自含（US-EX-01）：把本次结论真正依赖的原始 CSV 一起打包，让重放不需要另外索要数据
+    inputs_dir = work / INPUTS_DIRNAME
+    inputs_dir.mkdir(exist_ok=True)
+    for stale in inputs_dir.glob("*"):
+        if stale.name != "manifest.json":
+            stale.unlink()
+    if include_inputs:
+        collected = collect_package_inputs(conn, cfg, run_id)
+    else:
+        collected = {"entries": [], "missing": [], "total_bytes": 0,
+                     "reason": "调用方指定 --no-inputs：本包不含原始输入，接收方无法离线重放"}
+    inputs_manifest = work / INPUTS_MANIFEST_NAME
+    inputs_doc = {"schema": "wca-package-inputs-v1", "run_id": run_id,
+                  "cap_bytes": EXPORT_INPUTS_MAX_BYTES,
+                  "selection_rule": "主数据(org/employee) ∪ 引用集合 ∪ 结论溯源引用 ∪ 未归属质量问题所在文件",
+                  "total_bytes": collected["total_bytes"], "missing": collected["missing"],
+                  "reason": collected["reason"],
+                  "entries": [{k: e[k] for k in ("file_id", "rel_path", "kind", "sha256",
+                                                 "bytes", "arcname")} for e in collected["entries"]]}
+    inputs_manifest.write_text(canonical_json(inputs_doc) + chr(10), encoding="utf-8")
+    for e in collected["entries"]:
+        shutil.copyfile(e["source"], work / e["arcname"])
+
     verification = verify_chain(conn, cfg)
     triple = {
         "rule_pack_version": run["rule_pack_version"],
@@ -400,8 +524,17 @@ def export_package(conn: sqlite3.Connection, cfg: Config, run_id: str) -> dict:
                         "cities_covered": nc["scope"].get("cities_covered"),
                         "rules_excluded": [r["rule_id"] for r in nc["rules_excluded"]],
                         "not_tested_count": len(nc["not_tested"])},
+        # 输入自含（US-EX-01）：接收方拿着这个包就能自己重跑，不必再回头索要原始数据
+        "inputs": {"packed": len(collected["entries"]),
+                   "total_bytes": collected["total_bytes"],
+                   "cap_bytes": EXPORT_INPUTS_MAX_BYTES,
+                   "selection_rule": inputs_doc["selection_rule"],
+                   "missing": collected["missing"],
+                   "reason": collected["reason"],
+                   "replay_command": "python -m src.cli replay <本包.zip 或解包目录>"},
         "artifacts": [p.name for p in (findings_csv, manifest_files, chain_json, issues_csv,
-                                       conclusions_csv, resp_path, nc_path, nc_md)],
+                                       conclusions_csv, resp_path, nc_path, nc_md)]
+                      + [INPUTS_MANIFEST_NAME] + [e["arcname"] for e in collected["entries"]],
         "disclaimer": "本包不产出应付金额（需求 D-03）；金额是 HR 负责人具名录入的人工结论，不属于引擎输出；"
                       "数据为合成数据，非任何真实个人信息。",
     }
@@ -416,6 +549,9 @@ def export_package(conn: sqlite3.Connection, cfg: Config, run_id: str) -> dict:
         for p in (manifest_path, findings_csv, manifest_files, chain_json, issues_csv,
                   conclusions_csv, resp_path, nc_path, nc_md):
             zf.write(p, arcname=p.name)
+        zf.write(inputs_manifest, arcname=INPUTS_MANIFEST_NAME)
+        for e in collected["entries"]:
+            zf.write(work / e["arcname"], arcname=e["arcname"])
         zf.writestr("verify.py", VERIFY_SNIPPET)
 
     conn.execute(
@@ -476,10 +612,11 @@ def _sev_label(sev: str) -> str:
     return {"DEFENSIBLE": "可申辩", "REVIEW": "需复核", "VIOLATION": "明显违规"}.get(sev, sev)
 
 
-VERIFY_SNIPPET = '''"""独立复核脚本：不依赖本项目代码，只用标准库重算 hash 链。
+VERIFY_SNIPPET = '''"""独立复核脚本：不依赖本项目代码，只用标准库重算 hash 链并校验包内原始输入的哈希。
 
 用法：unzip pkg-<run_id>.zip && python verify.py
-期望输出：CHAIN OK + 三元组，与 manifest.json 一致即说明举证包未被改写。
+期望输出：CHAIN OK + INPUTS OK + 三元组。链与输入哈希一致说明**包没被改写**；
+结论是否一致要重跑引擎（`python -m src.cli replay <包>`），本脚本不假装自己能算结论。
 """
 import hashlib
 import json
@@ -507,5 +644,30 @@ for line in open("audit_chain.jsonl", encoding="utf-8"):
     n += 1
 print("CHAIN", "OK" if ok else "FAIL", "events=", n)
 print("TRIPLE", json.dumps(manifest["triple"], sort_keys=True))
+
+# 包内原始输入：逐个按登记 sha256 复算。这一步不需要本项目代码，
+# 但它只证明「数据没被换过」；结论要重跑才可比，见 manifest.inputs.replay_command。
+import os
+
+inputs_manifest = "inputs/manifest.json"
+if os.path.isfile(inputs_manifest):
+    im = json.load(open(inputs_manifest, encoding="utf-8"))
+    bad, checked = [], 0
+    for entry in im["entries"]:
+        if not os.path.isfile(entry["arcname"].replace("/", os.sep)):
+            bad.append(entry["arcname"] + " (缺失)")
+            continue
+        with open(entry["arcname"].replace("/", os.sep), "rb") as fh:
+            digest = hashlib.sha256(fh.read()).hexdigest()
+        checked += 1
+        if digest != entry["sha256"]:
+            bad.append(entry["rel_path"] + " (哈希不一致)")
+    print("INPUTS", "OK" if not bad else "FAIL", "checked=", checked,
+          "packed=", len(im["entries"]), "missing_at_export=", len(im["missing"]))
+    for b in bad:
+        print("  BAD", b)
+    print("INPUT_BYTES", im["total_bytes"], "SELECTION", im["selection_rule"])
+else:
+    print("INPUTS NONE（本包未自含原始数据，无法离线重放）")
 
 '''

@@ -413,3 +413,83 @@ def test_cli_json_output_is_parseable(env, capsys):
     payload = json.loads(out[out.index("{"):])
     assert payload["op"] == "start" and "outcomes" in payload
     main_stop(["--config", str(path), "--json"])
+
+
+# ------------------------------------------------------------------ status 参数与措辞（2026-10-09 实跑查出）
+# 这一类缺陷的特点是：**静态对账看不见**（参数确实被上游"读过"，只是下游把它丢了），
+# 所以测试必须打在真实输出上，而不是打在"函数有没有引用这个变量"上。
+
+
+def two_services(env):
+    script = env / "fake_service.py"
+    script.write_text(FAKE_SERVICE, encoding="utf-8")
+    return make_config(env, services=[
+        fake_spec(env, script, "alpha", start_order=10, stop_order=10),
+        fake_spec(env, script, "beta", start_order=20, stop_order=20),
+    ])
+
+
+def test_status_json_is_machine_readable(env, capsys):
+    """`status --json` 曾经输出人读表格：现在必须是可解析的结构，且整体判定不被无关服务带偏。"""
+    from src.service_cli import EXIT_OK, main_stop
+
+    script = env / "fake_service.py"
+    script.write_text(FAKE_SERVICE, encoding="utf-8")
+    path = make_config(env, services=[
+        fake_spec(env, script, "alpha", start_order=10, stop_order=10),
+        {"name": "outside", "managed": False, "port": 1, "host": "127.0.0.1",
+         "probe": "port", "start_order": 5, "stop_order": 5,
+         "required_when": {"env": "WCA_LLM_PROVIDER", "equals": "ollama"}},
+    ])
+    assert main_stop(["--config", str(path), "--status", "--json"]) == EXIT_OK
+    out = capsys.readouterr().out
+    payload = json.loads(out[out.index("{"):])
+    assert {"as_of", "services", "filter", "judged", "all_ok"} <= set(payload)
+    assert payload["filter"] == "all"
+    by_name = {s["name"]: s for s in payload["services"]}
+    assert sorted(by_name) == ["alpha", "outside"]
+    assert by_name["alpha"]["origin"] == "none" and by_name["alpha"]["pid"] is None, \
+        "没起过的服务不能报成在跑"
+    # 外部依赖按当前配置不需要 → 不该把它算进"整体是否健康"的判断集合
+    assert by_name["outside"]["required"] is False
+    assert payload["judged"] == ["alpha"]
+    assert payload["all_ok"] is True
+
+
+def test_status_only_actually_filters(env, capsys):
+    """`--only` 以前完全不生效；现在既真裁剪，也要对乱写的名字报错而不是静默忽略。"""
+    from src.service_cli import EXIT_CONFIG, EXIT_OK, main_stop
+
+    path = two_services(env)
+    assert main_stop(["--config", str(path), "--status", "--only", "beta"]) == EXIT_OK
+    text = capsys.readouterr().out
+    assert "beta" in text and "alpha" not in text, f"--only 没起作用：{text}"
+    assert "只看 beta" in text, "输出必须说明这是过滤后的结果，否则会被读成全量"
+
+    assert main_stop(["--config", str(path), "--status", "--only", "nope"]) == EXIT_CONFIG
+    bad = capsys.readouterr()
+    assert "nope" in (bad.out + bad.err), "写错服务名要指名道姓，不能静默返回空表"
+
+
+def test_precheck_wording_follows_restart_policy(env):
+    """`--no-restart` 时不能先说「将先停后起」再拒绝重启（同屏自相矛盾）。"""
+    path = make_config(env)
+    mgr = ServiceManager(load_services_config(path), env_snapshot={})
+    try:
+        mgr.start_all()
+        polite = mgr.start_all(restart_if_running=False)
+        pre = outcome(polite, "alpha", "precheck")
+        assert pre.status == "running"
+        assert "先停后起" not in pre.message, pre.message
+        assert "不重启" in pre.message, pre.message
+
+        forceful = mgr.start_all(restart_if_running=True)
+        pre2 = outcome(forceful, "alpha", "precheck")
+        assert "先停后起" in pre2.message, pre2.message
+    finally:
+        stopper = ServiceManager(load_services_config(path), env_snapshot={})
+        try:
+            stopper.stop_all()
+        finally:
+            stopper.close()
+        mgr.close()

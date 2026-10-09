@@ -161,7 +161,10 @@ CREATE TABLE IF NOT EXISTS run (
     input_fingerprint   TEXT NOT NULL,
     conclusion_digest   TEXT,
     scope_json          TEXT NOT NULL,
-    notes               TEXT
+    notes               TEXT,
+    -- 本次校验**真正引用到**的输入文件 id（JSON 数组，升序）。
+    -- 存在这里是为了让举证包能自含输入并支持外部重放；不进 scope，因此不影响输入指纹。
+    referenced_file_ids TEXT
 );
 
 CREATE TABLE IF NOT EXISTS finding (

@@ -17,6 +17,7 @@ from .db import connect
 from .service_manager import (
     Report,
     ServiceManager,
+    is_required,
     load_services_config,
     now_iso,
     port_open,
@@ -78,36 +79,62 @@ def render_report(rep: Report, log_files: list[Path], as_json: bool) -> str:
 
 
 def status_text(args: argparse.Namespace) -> tuple[str, int]:
-    """一眼看清：谁在跑、pid 多少、端口通不通、状态文件是不是陈年的。"""
+    """一眼看清：谁在跑、pid 多少、端口通不通、状态文件是不是陈年的。
+
+    `--only` 与 `--json` 过去在这里是**被接收但被忽略**的（`_service_argv` 确实把它们转了进来，
+    下游没读）——"转发了但没人用"这类缺陷静态对账看不见，所以两个都补上实现。
+    """
     app_cfg = _app_cfg(getattr(args, "env", None))
     try:
         services = load_services_config(args.config, app_cfg)
     except (FileNotFoundError, ValueError) as exc:
         print(f"配置错误：{exc}", file=sys.stderr)
         raise ConfigError(str(exc)) from exc
+    only = [x.strip() for x in str(getattr(args, "only", "") or "").split(",") if x.strip()]
+    names = {s.name for s in services.specs}
+    if only:
+        missing = sorted(set(only) - names)
+        if missing:
+            raise ConfigError(f"配置里没有这些服务：{missing}；可选：{sorted(names)}")
     mgr = ServiceManager(services, env_snapshot=app_cfg.raw)
-    rows = []
+    verdict_map = {
+        "ours": "运行中（本工具启动）",
+        "foreign": "端口被外部进程占用",
+        "stale": "状态残留（进程已不在）",
+        "ready": "外部依赖在线",
+        "absent": "外部依赖不在线",
+        "none": "未运行",
+    }
+    rows: list[dict] = []
     try:
         by_name = {s.name: s for s in services.specs}
         for st in mgr.status():
+            if only and st.name not in only:
+                continue
             spec = by_name[st.name]
-            verdict = {
-                "ours": "运行中（本工具启动）",
-                "foreign": "端口被外部进程占用",
-                "stale": "状态残留（进程已不在）",
-                "ready": "外部依赖在线",
-                "absent": "外部依赖不在线",
-                "none": "未运行",
-            }[st.origin]
-            rows.append(
-                f"  {st.name:10s} managed={int(spec.managed)} "
-                f"{verdict:22s} pid={st.pid or '-'} "
-                f"addr={spec.host}:{spec.port or '-'} "
-                f"{'端口通' if st.port_open else '端口不通'}  started_at={st.started_at or '-'}")
+            rows.append({"name": st.name, "managed": bool(spec.managed), "origin": st.origin,
+                         "state": verdict_map[st.origin], "pid": st.pid, "host": spec.host,
+                         "port": spec.port, "port_open": bool(st.port_open),
+                         "required": bool(spec.managed or is_required(spec, app_cfg.raw)),
+                         "started_at": st.started_at})
     finally:
         mgr.close()
-    body = "\n".join(rows)
-    return f"服务状态（{now_iso()}）：\n{body}", EXIT_OK
+    as_of = now_iso()
+    code = EXIT_OK
+    if getattr(args, "json", False):
+        # 一个"按配置根本不需要"的外部依赖不该把整体判成不健康
+        judged = [r for r in rows if r["required"]]
+        payload = {"as_of": as_of, "services": rows,
+                   "filter": only or "all", "judged": [r["name"] for r in judged],
+                   "all_ok": all(r["origin"] in ("ours", "ready", "none") for r in judged)}
+        return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), code
+    body = "\n".join(
+        f"  {r['name']:10s} managed={int(r['managed'])} {r['state']:22s} "
+        f"pid={r['pid'] or '-'} addr={r['host']}:{r['port'] or '-'} "
+        f"{'端口通' if r['port_open'] else '端口不通'}  started_at={r['started_at'] or '-'}"
+        for r in rows)
+    scope = "" if not only else f"（只看 {','.join(only)}）"
+    return f"服务状态（{as_of}）{scope}：\n{body}", code
 
 
 def main_start(argv: list[str] | None = None) -> int:
@@ -165,7 +192,9 @@ def main_stop(argv: list[str] | None = None) -> int:
     if args.status:
         try:
             text, code = status_text(args)
-        except ConfigError:
+        except ConfigError as exc:
+            # 光返回退出码不说话，用户只会看到"什么都没发生"——配置错误必须把原因打印出来
+            print(f"状态查询失败：{exc}", file=sys.stderr)
             return EXIT_CONFIG
         print(text)
         return code

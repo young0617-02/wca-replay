@@ -17,7 +17,7 @@ from src import cli
 READS_RES = (re.compile(r"args\.([a-z_][a-z0-9_]*)"),
              re.compile(r"""getattr\(\s*args\s*,\s*["']([a-z_][a-z0-9_]*)["']"""))
 # 只有位置参数是"必须给"的：给它一个占位值，其余一律走默认值
-MIN_ARGV = {"ask": ["加班怎么算"]}
+MIN_ARGV = {"ask": ["加班怎么算"], "replay": ["var/packages/dummy.zip"]}
 
 
 def _module_funcs() -> dict[str, object]:
