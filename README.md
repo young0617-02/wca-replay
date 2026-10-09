@@ -14,15 +14,18 @@
 ## 30 秒跑起来
 
 ```bash
-python -m venv .venv && source .venv/bin/activate        # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
+uv sync                                                  # 唯一的依赖通道：按 uv.lock 精确重建 .venv（校验 sha256）
+uv run python -m src.cli status                          # 用 `uv run` 就不用记 .venv 的路径
+# 依赖只走 uv（2026-10-09 决定）。`uv sync` 建的 .venv 里没有 pip；
+# 需求文档已同步修订到 v2.1：US-EV-01 / NFR-07 的验收命令就是上面这条（裁决 D-07）。
+# 下面所有命令都等价于先 `source .venv/bin/activate` 再 `python -m …`。
 cp .env.example .env                                     # 不填也能跑：默认全离线
-python -m src.cli all                                    # 生成→导入→建库→校验→报表→举证包
-python -m pytest tests/ -q -m "not llm"                   # 180 项，约 50 秒，无网络、无云凭证
-python evals/judge.py --write-report                     # 70 条评测集打分
-python tools/mutation_test.py                            # 注入 20 个缺陷，看测试抓不抓得住
-python tools/perf_probe.py --export --amplify 1000       # 规模与导出耗时（在库副本上测）
-python -m src.cli replay var/packages/<run_id>.zip        # 拿包自己重放：重导输入→重跑引擎→比三元组
+uv run python -m src.cli all                             # 生成→导入→建库→校验→报表→举证包
+uv run python -m pytest tests/ -q -m "not llm"           # 193 项，约 45 秒，无网络、无云凭证
+uv run python evals/judge.py --write-report              # 70 条评测集打分
+uv run python tools/mutation_test.py                     # 注入 20 个缺陷，看测试抓不抓得住
+uv run python tools/perf_probe.py --export --amplify 1000  # 规模与导出耗时（在库副本上测）
+uv run python -m src.cli replay var/packages/<run_id>.zip  # 拿包自己重放：重导输入→重跑引擎→比三元组
 ```
 
 核心校验链路只依赖 **Python 标准库 + pytest**；只有 Web 界面与只读接口需要 FastAPI（没装时界面测试如实 skip，
@@ -35,8 +38,8 @@ python -m src.cli replay var/packages/<run_id>.zip        # 拿包自己重放�
 
 | 指标 | 实测 |
 |---|---|
-| 测试 | `180 passed / 1 deselected`（`-m "not llm"`，离线；唯一被筛掉的用例需要真实云凭证） |
-| 干净环境复跑 | 新建 venv + **无 `.env`** + 数据现场生成：`cli all` rc=0、`pytest -m "not llm"` **175 passed / 1 deselected**，并跑通 `export --sign-as → replay → 独立 verify.py` 整条复核链（`reports/干净环境复跑.md`） |
+| 测试 | `193 passed / 1 deselected`（`-m "not llm"`，离线；唯一被筛掉的用例需要真实云凭证） |
+| 干净环境复跑 | 三轮，全部在**无 `.env`** 的仓库副本里跑：前两轮走 pip（175 passed），第三轮起**只走 uv**（`uv sync` → **193 passed / 1 deselected**，43.9 s），`cli all` rc=0、三元组与本机库逐字符一致，`export --sign-as → replay → 独立 verify.py` 整条复核链同样在新环境跑通（`reports/干净环境复跑.md`） |
 | 三元组跨环境一致 | 干净环境重跑得同一 `输入指纹 f5021119…` / `结论摘要 95f01ab2…`（与本机演示库逐字符一致） |
 | 变异测试 | 注入 20 个缺陷，**捕获 20**，还原 MD5 全部一致（M18 无人工结论混进结论集、M19 签发人不具名、M20 包漏主数据） |
 | 意图 Top-1 / Hit@5 / MRR | 70/70 · 37/37 · 0.664（含三市分档题与跨城隔离回归题）|
@@ -116,7 +119,8 @@ V1 → V1.1 优化的前后对照（含没达成的目标）在 [`reports/优化
 worktime-compliance-agent/
 ├── README.md
 ├── pytest.ini                    # 标记注册：llm / slow（`-m "not llm"` 真能筛掉东西）
-├── requirements.txt              # 锁版本，必含 pytest；界面无任何前端构建依赖
+├── pyproject.toml                # 唯一的依赖声明：直接依赖 + 传递依赖约束（测试配置只在 pytest.ini）
+├── uv.lock                       # 唯一的锁：25 包版本闭包 + 248 条 sha256（`uv sync` 按它装）
 ├── .env.example                  # 全部待填项集中在这里，带 TODO
 ├── docs/
 │   ├── 需求文档-用户故事.md        # 唯一目标依据（F-001~F-014 / A1~A12 / 边界与异常）
@@ -161,7 +165,7 @@ worktime-compliance-agent/
 │   ├── stop_services.py          # 一键优雅停止（含 --status）
 │   ├── mutation_test.py          # F-012 变异测试（MD5 基线校验 + 字节码缓存清理）
 │   └── perf_probe.py             # 性能探针：SQL 计数 + 多次采样中位耗时（在库副本上测）
-├── tests/                        # 180 项：判据/质量门禁/ACL/守卫/接口/界面权限/城市档/启停/CLI 表面/重放/验收（含文档链接自检）
+├── tests/                        # 193 项：判据/质量门禁/ACL/守卫/接口/界面权限/城市档/启停/CLI 表面/重放/依赖口径/验收（含文档链接自检）
 └── reports/                      # 评测结果.md、变异测试.md、优化验证.md、判据修订.md、
                                   # 性能探针.json、P0-闸门.md、异常报表 CSV
 ```
@@ -254,7 +258,7 @@ python tools/start_services.py --json     # 机器可读结果（退出码 0/1/2
 | A3 ★ ACL 越权召回 0 | **已达成（离线实测）** | `tests/test_acl_retrieval.py` 断言打在候选集；评测 `acl_leak=0`；变异测试 M5（改成先召回再过滤）被捕获 |
 | A4 ★ 错承诺 0 | **已达成（离线实测）** | `tests/test_agent_guard.py`；评测 `wrong_commitment=0`；变异测试 M11 被捕获 |
 | A5 ★ 测试有鉴别力 | **已达成** | `python tools/mutation_test.py`：注入 20 捕获 20，还原 MD5 一致（工装自身曾报出一条**不存在的漏网**，修法与记录见 `reports/优化验证.md` 第四节的 `tools/mutation_test.py` 出处） |
-| A6 测试可跑且可复现 | **已达成** | 全新 venv + **无 `.env`** 的仓库副本：`pip install -r requirements.txt` → `python -m src.cli all`（rc=0）→ `python -m pytest tests/ -q -m "not llm"` = **175 passed**（那一趟的实测计数）；三元组与本机库逐字符一致，
+| A6 测试可跑且可复现 | **已达成** | 仓库副本 + **无 `.env`**，依赖走 `uv sync`：`uv run python -m src.cli all`（rc=0）→ `uv run python -m pytest tests/ -q -m "not llm"` = **193 passed / 1 deselected**；三元组与本机库逐字符一致。需求文档已同步修订到 **v2.1**（US-EV-01/NFR-07 的验收命令改为 uv，裁决 D-07），所以这不是「实现偏离需求」，是需求本身按决定改了；换 uv 之前那一趟走的是 `pip install -r requirements.txt`，那段历史保留在 `reports/干净环境复跑.md`；
   且 `export --sign-as → replay → 独立 verify.py` 整条复核链同一趟跑通（`reports/干净环境复跑.md`） |
 | A7 行级可追溯 | **已达成** | `tests/test_ingest_quality.py` + 举证包 `findings.csv` 的 `source_rel_path/source_line_no` |
 | A8 举证包可复核 | **已达成** | `test_exported_package_reproduces_same_triple`（同输入重跑）+ `tests/test_replay.py`（**把包内输入喂回引擎逐项比三元组**，改输入必须报不一致）；另 4 项守住结论集纪律、签发人入链、责任区块与未覆盖清单随包给出 |

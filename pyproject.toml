@@ -1,0 +1,53 @@
+[project]
+name = "worktime-compliance-agent"
+version = "0.2.0"
+description = "举证级工时合规校验与带 ACL 的制度问答 Agent（合成数据 + 公开法条基准）"
+requires-python = ">=3.12"
+
+# 直接依赖只写本项目真正 import 的东西；传递依赖交给 uv.lock 固定。
+# 版本与 requirements.txt 一致，且由 tests/test_dependencies.py 机械对账，防两边漂移。
+dependencies = [
+    "fastapi==0.142.2",
+    "starlette==1.7.0",
+    "uvicorn==0.54.0",
+    "httpx==0.28.1",
+    "jinja2==3.1.6",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+]
+
+[tool.uv]
+# 本项目不是可安装包（代码走 `python -m src.cli`），不要尝试构建。
+package = false
+
+# 传递依赖也钉死：不是洁癖，是**测量基线的可比性**。
+# 只声明直接依赖时 uv 会把 pydantic 解到 2.14.0（本项目所有耗时/评测数字都在 2.13.5 上测的），
+# 换包管理工具顺手改掉解释器之外的变量，正是这个项目最反对的事。
+# 下面这份清单与旧环境 `pip freeze` 逐项一致，由 tests/test_dependencies.py 机械对账。
+constraint-dependencies = [
+    "MarkupSafe==3.0.4",
+    "Pygments==2.21.0",
+    "annotated-doc==0.0.5",
+    "annotated-types==0.8.0",
+    "anyio==4.15.1",
+    "certifi==2026.7.22",
+    "click==8.5.0",
+    "colorama==0.4.6",
+    "h11==0.16.0",
+    "httpcore==1.0.9",
+    "idna==3.20",
+    "iniconfig==2.3.0",
+    "opentelemetry-api==1.45.0",
+    "packaging==26.3",
+    "pluggy==1.6.0",
+    "pydantic==2.13.5",
+    "pydantic-core==2.46.5",
+    "typing-extensions==4.16.0",
+    "typing-inspection==0.4.4",
+]
+
+# 测试配置只写在 pytest.ini（llm / slow 标记注册）。这里故意不放 [tool.pytest.ini_options]：
+# 两处各写一份测试配置，等于让评审者猜哪份是真的。

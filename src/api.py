@@ -105,7 +105,7 @@ def create_app(cfg: Config | None = None) -> Any:
     if not FASTAPI_AVAILABLE:
         raise RuntimeError(
             f"FastAPI 不可用（{IMPORT_ERROR}）。核心功能不依赖它：命令行 `python -m src.cli ask ...` "
-            "走的是同一条链路。要起 API 请先 `pip install -r requirements.txt`。"
+            "走的是同一条链路。要起 API 请先 `uv sync`（本仓库依赖只走 uv 通道）。"
         )
     cfg = cfg or Config.load()
 
@@ -241,4 +241,5 @@ app = create_app() if FASTAPI_AVAILABLE else None
 
 if not FASTAPI_AVAILABLE:  # pragma: no cover - 便于 CLI 给出可执行的下一步
     def serve(*_a: Any, **_k: Any) -> None:  # type: ignore[misc]
-        raise RuntimeError(f"FastAPI/uvicorn 未安装：{IMPORT_ERROR}；请 pip install -r requirements.txt")
+        raise RuntimeError(
+            f"FastAPI/uvicorn 未安装：{IMPORT_ERROR}；请先 `uv sync`（本仓库依赖只走 uv 通道）")
