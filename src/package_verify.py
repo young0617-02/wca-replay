@@ -18,6 +18,7 @@ from pathlib import Path
 
 from . import producer, signing
 from .evidence_digest import evidence_digest as compute_evidence_digest
+from .package_inputs import input_arcnames
 from .util import (anchor_schema_version, canonical_json, csv_unescape_cell, digest_of,
                    evidence_schema_version, manifest_checksum, sha256_hex)
 
@@ -26,8 +27,8 @@ MANIFEST_FILE = "manifest.json"
 VERIFY_SCRIPT = "verify.py"
 VERIFY_REQUIREMENTS = "verify-requirements.txt"
 README_FILE = "README.txt"
-# 0.4.2 起新包必须有 evidence_digest；更早的包按旧包兼容路径记 NOT CHECKED。
-EVIDENCE_DIGEST_MIN_PRODUCER = (0, 4, 2)
+# 0.4.3 起新包必须有 evidence_digest；更早的包按旧包兼容路径记 NOT CHECKED。
+EVIDENCE_DIGEST_MIN_PRODUCER = (0, 4, 3)
 REQUIRED_ARTIFACTS = (
     "findings.csv", "input_files.csv", "quality_issues.csv",
     "conclusions_final.csv", "responsibility.json", "not_covered.json", "未覆盖清单.md",
@@ -156,12 +157,15 @@ def check_artifacts(root: Path, manifest: dict, schema_ver: int) -> dict:
             entries = doc.get("entries")
             if not isinstance(entries, list):
                 raise ValueError("inputs/manifest.json entries 不是数组")
-            for entry in entries:
-                arc = str(entry.get("arcname") or "")
+            derived_names = input_arcnames(entries)
+            for entry, derived in zip(entries, derived_names):
+                arc = str(entry.get("arcname") or derived)
                 normalized_arc = _normalize_artifact_path(arc)
                 allowed_inputs.add(normalized_arc)
-        except ValueError:
-            raise
+        except ValueError as exc:
+            result.update(ok=False, files_status="FAIL",
+                          reason=f"ARTIFACT FAIL 输入路径非法：{exc}")
+            return result
         except Exception as exc:
             result.update(ok=False, extras_status="FAIL",
                           reason="ARTIFACT FAIL 无法读取 inputs/manifest.json："
@@ -329,9 +333,9 @@ def check_evidence(root: Path, manifest: dict) -> dict:
 
     分档（写死，避免“缺字段也能过”）：
       * manifest 有 evidence_digest：必须能重算且一致；缺列/解析失败/不一致 → FAIL；
-      * 缺失且 producer.version >= 0.4.2：新版本包失败关闭 → FAIL；
-      * 缺失且无 producer 或 producer.version < 0.4.2：旧包兼容路径 → NOT CHECKED，
-        不参与 RESULT OK；这是历史包没有该字段的事实，不是“检查通过”。
+      * 缺失且 producer.version >= 0.4.3：新版本包失败关闭 → FAIL；
+      * 缺失且无 producer 或 producer.version < 0.4.3：旧包兼容路径 → NOT CHECKED，
+        不能给 RESULT OK；这是历史包没有该字段的事实，不是“检查通过”。
     """
     declared = manifest.get("evidence_digest")
     version = _producer_version(manifest)
@@ -342,9 +346,9 @@ def check_evidence(root: Path, manifest: dict) -> dict:
                                + ".".join(str(part) for part in version)
                                + "）缺少 manifest.evidence_digest")}
         return {"ok": True, "legacy": True, "actual_digest": "", "rows": 0,
-                "reason": ("旧包（producer.version < 0.4.2 或无 producer）无 "
+                "reason": ("旧包（producer.version < 0.4.3 或无 producer）无 "
                            "manifest.evidence_digest；EVIDENCE DIGEST NOT CHECKED，"
-                           "不参与 RESULT OK")}
+                           "不能算完整验收")}
     if not isinstance(declared, str) or not declared.strip():
         return {"ok": False, "legacy": False, "actual_digest": "", "rows": 0,
                 "reason": "EVIDENCE DIGEST FAIL manifest.evidence_digest 为空或不是字符串"}
@@ -392,7 +396,7 @@ def load_anchor_record(path: Path | str) -> dict:
     """读取单包 anchor 文件，作为显式参数的兜底。
 
     支持扁平格式：`anchor`（四/五段字符串或 `anchor_segments` 数组）、
-    `package_sha256`、`artifacts_digest`。组合式 `anchor.json` 含多个包时，
+    `package_sha256`、`artifacts_digest`、`evidence_digest`。组合式 `anchor.json` 含多个包时，
     不能直接用于单包验算，避免把 A 包的哈希套到 B 包。
     """
     p = Path(path)
@@ -407,7 +411,7 @@ def load_anchor_record(path: Path | str) -> dict:
     if "packages" in doc:
         raise ValueError("组合式 anchor.json 含多个包；请使用单包 anchor 文件，"
                          "或显式传 --expect-anchor/--expect-package-sha256/"
-                         "--expect-artifacts-digest")
+                         "--expect-artifacts-digest/--expect-evidence-digest")
     anchor = doc.get("anchor") or doc.get("expect_anchor")
     segments = doc.get("anchor_segments") or doc.get("expected_anchor")
     if not anchor and isinstance(segments, list):
@@ -418,6 +422,8 @@ def load_anchor_record(path: Path | str) -> dict:
                               or doc.get("expect_package_sha256") or "").strip() or None,
         "artifacts_digest": str(doc.get("artifacts_digest")
                                 or doc.get("expect_artifacts_digest") or "").strip() or None,
+        "evidence_digest": str(doc.get("evidence_digest")
+                               or doc.get("expect_evidence_digest") or "").strip() or None,
     }
 
 
@@ -466,18 +472,19 @@ def verify_package(package: Path | str, *, public_keys: list[str] | tuple[str, .
                    expect_triple: str | tuple[str, ...] | None = None,
                    expect_package_sha256: str | None = None,
                    expect_artifacts_digest: str | None = None,
+                   expect_evidence_digest: str | None = None,
                    require_signature: bool = False) -> dict:
     """独立验算入口；返回 ok/partial/reason 与各检查状态。不执行包内代码。
 
     RESULT OK 的门禁：内容检查全通过 + 签名 pin 命中 + 外部锚点通过 +
-    外部包 SHA 通过 + 外部 artifacts_digest 通过。
+    外部包 SHA 通过 + 外部 artifacts_digest 通过 + 外部 evidence_digest 通过。
     任一外部项缺失/未通过 → PARTIAL（内容检查失败 → FAIL）。
     """
     p = Path(package)
     check_names = ("manifest", "producer", "artifacts", "verify_script",
                    "artifacts_digest_internal", "extras", "findings", "evidence", "chain",
                    "inputs", "signature", "signature_pinned", "anchor", "package_sha",
-                   "artifacts_digest_external")
+                   "artifacts_digest_external", "evidence_digest_external")
     result = {
         "package": str(p), "schema": "", "manifest_schema_version": None, "run_id": "",
         "producer": {}, "producer_ok": True, "producer_reason": "",
@@ -494,6 +501,8 @@ def verify_package(package: Path | str, *, public_keys: list[str] | tuple[str, .
         "package_sha256_expected": "",
         "artifacts_digest": "", "artifacts_digest_checked": False, "artifacts_digest_ok": None,
         "artifacts_digest_expected": "",
+        "evidence_digest": "", "evidence_digest_checked": False, "evidence_digest_ok": None,
+        "evidence_digest_expected": "",
         "checks": {k: "NOT CHECKED" for k in check_names},
         "partial": False, "ok": False, "reason": "",
     }
@@ -586,6 +595,27 @@ def verify_package(package: Path | str, *, public_keys: list[str] | tuple[str, .
             if not evidence["ok"]:
                 result["reason"] = evidence["reason"]
                 return result
+            result["evidence_digest"] = str(manifest.get("evidence_digest") or "")
+            if expect_evidence_digest:
+                result["evidence_digest_checked"] = True
+                result["evidence_digest_expected"] = str(
+                    expect_evidence_digest).strip().lower()
+                declared_evidence = result["evidence_digest"]
+                if evidence.get("legacy") or not declared_evidence:
+                    checks["evidence_digest_external"] = "FAIL"
+                    result.update(evidence_digest_ok=False, ok=False, partial=False,
+                                  reason="EVIDENCE DIGEST FAIL 包内无 evidence_digest，"
+                                         "无法与外部期望值比对")
+                    return result
+                if result["evidence_digest_expected"] != declared_evidence.lower():
+                    checks["evidence_digest_external"] = "FAIL"
+                    result.update(evidence_digest_ok=False, ok=False, partial=False,
+                                  reason="EVIDENCE DIGEST FAIL "
+                                         f"expected={result['evidence_digest_expected']} "
+                                         f"actual={declared_evidence}")
+                    return result
+                checks["evidence_digest_external"] = "OK"
+                result["evidence_digest_ok"] = True
             result["artifacts_digest"] = artifact["artifacts_digest"]
             checks["artifacts_digest_internal"] = artifact["digest_status"]
             if expect_artifacts_digest:
@@ -683,7 +713,8 @@ def verify_package(package: Path | str, *, public_keys: list[str] | tuple[str, .
             external_ok = (checks["signature_pinned"] == "OK"
                            and checks["anchor"] == "OK"
                            and checks["package_sha"] == "OK"
-                           and checks["artifacts_digest_external"] == "OK")
+                           and checks["artifacts_digest_external"] == "OK"
+                           and checks["evidence_digest_external"] == "OK")
             result["partial"] = content_ok and not external_ok
             result["ok"] = content_ok and external_ok
             missing_external = []
@@ -695,9 +726,12 @@ def verify_package(package: Path | str, *, public_keys: list[str] | tuple[str, .
                 missing_external.append("外部包 SHA-256")
             if checks["artifacts_digest_external"] != "OK":
                 missing_external.append("外部 artifacts_digest")
+            if checks["evidence_digest_external"] != "OK":
+                missing_external.append("外部 evidence_digest")
             if result["ok"]:
                 result["reason"] = ("工件、发现摘要、证据定位摘要、链、输入与签名均一致；"
-                                    "外部 pin、锚点、包 SHA 与 artifacts_digest 均通过")
+                                    "外部 pin、锚点、包 SHA、artifacts_digest 与 "
+                                    "evidence_digest 均通过")
             elif result["partial"]:
                 result["reason"] = ("RESULT PARTIAL：内容检查通过，但缺少/未通过 "
                                     + "、".join(missing_external))

@@ -102,7 +102,7 @@ def test_replay_catches_a_swapped_input_file(packed, tmp_path):
     target = next(e for e in json.loads((d / "inputs" / "manifest.json")
                                         .read_text(encoding="utf-8"))["entries"]
                   if e["kind"] == "punch")
-    path = d / target["arcname"]
+    path = d / ("inputs/" + target["rel_path"])
     text = path.read_text(encoding="utf-8").replace("2025-09-02T19:00:00+08:00",
                                                     "2025-09-02T22:00:00+08:00")
     path.write_text(text, encoding="utf-8")

@@ -150,10 +150,13 @@ def test_handoff_package_has_7_violations_and_24_aggregate_scopes():
     """交接包实测：7 条 VIOLATION，24 条带 evidence 定位元数据（6/17/1）。"""
     import pytest
 
+    fifth = ROOT / "handoff" / "20261104-第五轮整改"
     fourth = ROOT / "handoff" / "20261104-第四轮整改"
-    confirmed = next((fourth.glob("package/confirmed-*.zip")), None)
+    confirmed = next((fifth.glob("package/confirmed-*.zip")), None)
     if confirmed is None:
-        pytest.skip("本工作区没有第四轮交接包，跳过 24 条证据定位实测")
+        confirmed = next((fourth.glob("package/confirmed-*.zip")), None)
+    if confirmed is None:
+        pytest.skip("本工作区没有第四/五轮交接包，跳过 24 条证据定位实测")
     manifest, _confidence, not_covered, findings = _package_docs(confirmed)
     violations = [f for f in findings if f["severity"] == "VIOLATION"]
     assert len(violations) == 7

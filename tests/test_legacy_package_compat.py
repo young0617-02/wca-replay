@@ -107,7 +107,7 @@ def test_legacy_manifest_without_marker_replays_same_triple(conn, cfg, tmp_path)
     def mutate(files):
         im = json.loads(files["inputs/manifest.json"])
         im.pop("csv_formula_escape", None)
-        escaped_text = files["inputs/000-approval.csv"].decode("utf-8")
+        escaped_text = files["inputs/approval_ledger.csv"].decode("utf-8")
         rows = list(csv.DictReader(escaped_text.splitlines()))
         raw_rows = [{k: csv_unescape_cell(v) for k, v in row.items()} for row in rows]
         buf = io.StringIO()
@@ -115,7 +115,7 @@ def test_legacy_manifest_without_marker_replays_same_triple(conn, cfg, tmp_path)
         writer.writeheader()
         writer.writerows(raw_rows)
         data = buf.getvalue().encode("utf-8")
-        files["inputs/000-approval.csv"] = data
+        files["inputs/approval_ledger.csv"] = data
         for entry in im["entries"]:
             if entry["kind"] == "approval":
                 entry["sha256"] = sha256_hex(data)
@@ -138,7 +138,7 @@ def test_legacy_manifest_without_marker_replays_same_triple(conn, cfg, tmp_path)
     legacy = _rezip(src, tmp_path / "legacy.zip", mutate)
     with zipfile.ZipFile(legacy) as zf:
         im = json.loads(zf.read("inputs/manifest.json"))
-        text = zf.read("inputs/000-approval.csv").decode("utf-8")
+        text = zf.read("inputs/approval_ledger.csv").decode("utf-8")
     assert "csv_formula_escape" not in im
     assert "'=cmd" not in text and "=cmd" in text, "旧包 CSV 必须是未转义的原值"
 

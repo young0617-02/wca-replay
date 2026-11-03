@@ -289,12 +289,16 @@ def cmd_replay(args) -> int:
         or record.get("package_sha256")
     artifacts_digest = getattr(args, "expect_artifacts_digest", None) \
         or record.get("artifacts_digest")
+    evidence_digest = getattr(args, "expect_evidence_digest", None) \
+        or os.environ.get("WCA_EXPECT_EVIDENCE_DIGEST") \
+        or record.get("evidence_digest")
     res = replay(args.package, expect_triple=getattr(args, "expect_triple", None),
                  expect_anchor=anchor,
                  public_keys=getattr(args, "public_key", None),
                  require_signature=bool(getattr(args, "require_signature", False)),
                  expect_package_sha256=package_sha,
-                 expect_artifacts_digest=artifacts_digest)
+                 expect_artifacts_digest=artifacts_digest,
+                 expect_evidence_digest=evidence_digest)
     if args.json:
         print(json.dumps(res, ensure_ascii=False, indent=2, sort_keys=True))
         if res.get("partial"):
@@ -371,17 +375,28 @@ def cmd_replay(args) -> int:
               f"反算 {str(findings_binding.get('actual_digest', ''))[:16]}…）")
     evidence_binding = res.get("evidence_binding") or {}
     if res.get("evidence_legacy"):
-        print("  EVIDENCE DIGEST NOT CHECKED（旧包 producer.version < 0.4.2，无 "
-              "evidence_digest；不参与 RESULT OK）")
+        print("  EVIDENCE DIGEST NOT CHECKED（旧包无 evidence_digest；"
+              "不能据此给完整通过）")
     elif evidence_binding:
-        if not evidence_binding.get("ok"):
-            print(f"  EVIDENCE DIGEST FAIL —— {evidence_binding.get('reason', '')}")
-        elif res.get("evidence_replay_ok") is False:
-            print("  EVIDENCE DIGEST FAIL —— 重放实得 "
-                  f"{str(res.get('evidence_actual_digest', ''))[:16]}… 与 manifest "
-                  f"{str(res.get('evidence_digest', ''))[:16]}… 不一致")
+        external = ("OK" if res.get("evidence_digest_ok") else "FAIL") \
+            if res.get("evidence_digest_checked") else "NOT CHECKED"
+        if not evidence_binding.get("ok") or res.get("evidence_replay_ok") is False:
+            line_text = ("  EVIDENCE DIGEST FAIL —— "
+                         + (str(evidence_binding.get("reason") or "")
+                            if not evidence_binding.get("ok") else
+                            ("重放实得 " + str(res.get("evidence_actual_digest", ""))[:16]
+                             + "… 与 manifest "
+                             + str(res.get("evidence_digest", ""))[:16] + "… 不一致")))
         else:
-            print(f"  EVIDENCE DIGEST OK {res.get('evidence_digest', '')}")
+            line_text = (f"  EVIDENCE DIGEST OK {res.get('evidence_digest', '')} / "
+                         f"external={external}")
+        if external == "FAIL":
+            line_text += (f" expected={res.get('evidence_digest_expected')} "
+                          f"actual={res.get('evidence_digest')}")
+        elif external == "NOT CHECKED":
+            line_text += ("（早退，尚未走到摘要比对；非缺失）" if early
+                          else "（未传外部期望值；不能算完整验收）")
+        print(line_text)
     elif early:
         print("  EVIDENCE DIGEST NOT CHECKED（早退，尚未走到证据定位摘要校验）")
     sha_status = ("NOT CHECKED" if not res.get("package_sha256_checked")
@@ -853,9 +868,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="包外记录的 zip 文件 SHA-256；目录形态无法比较")
     p.add_argument("--expect-artifacts-digest", dest="expect_artifacts_digest", default=None,
                    help="包外记录的 manifest.artifacts_digest（包根工件清单摘要）")
+    p.add_argument("--expect-evidence-digest", dest="expect_evidence_digest", default=None,
+                   help="包外记录的 manifest.evidence_digest（证据定位摘要；"
+                        "也可用环境变量 WCA_EXPECT_EVIDENCE_DIGEST）")
     p.add_argument("--anchor-file", dest="anchor_file", default=None,
-                   help="单包 anchor JSON（anchor/package_sha256/artifacts_digest）；"
-                        "显式参数优先，文件兜底")
+                   help="单包 anchor JSON（anchor/package_sha256/artifacts_digest/"
+                        "evidence_digest）；显式参数优先，文件兜底")
     p.add_argument("--public-key", action="append", default=None, dest="public_key",
                    help="外部固定公钥（文件路径或 Base64），可重复传入以支持轮换；"
                         "pin 只表示与供给公钥匹配，来源身份需独立渠道核验 key_id")

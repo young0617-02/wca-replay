@@ -40,19 +40,21 @@ python verify.py --public-key <固定公钥文件> --expect-anchor "<四/五段>
 
 - `wca-verify` 期望：`MANIFEST CHECKSUM OK`、`ARTIFACTS OK`、`VERIFY SCRIPT OK`、`FINDINGS DIGEST OK`、`EVIDENCE DIGEST OK`、`COUNTS 发现（未签认）... / 已确认结论 ...`、`CHAIN OK`、`INPUTS DIGEST OK`、`SIGNATURE OK / pinned`、`ANCHOR CHECK OK`、`RESULT OK`。它**不执行包内 `verify.py`**；包内脚本被替换会报 `VERIFY SCRIPT FAIL`。
 - `wca replay` 期望：`工件逐文件：OK`、`发现摘要：一致`、`EVIDENCE DIGEST OK`、三元组逐项 `=`、`发现（未签认）` 条数一致、`RESULT OK`；裁剪包会显示 `≠ input_fingerprint`，这是预期。
-- **证据定位摘要（0.4.2）**：`evidence_digest` 覆盖全部 finding 的 `evidence`（tables/window/rules/aggregation，固定字段序、空值 `null`、路径 `/`），不进入 `conclusion_digest`；`wca-verify`/`replay` 从 `findings.csv.evidence_json` 重算。新版本包缺字段或重算不一致 → `EVIDENCE DIGEST FAIL`；无 `producer` 或 `producer.version < 0.4.2` 的旧包输出 `EVIDENCE DIGEST NOT CHECKED`，不参与 `RESULT OK`，这是历史兼容分档，不是“检查通过”。
-- **两层输入摘要**：`input_fingerprint` 是内容与范围指纹（输入文件内容/引用范围/规则参数）；`inputs_digest` 是包内 `inputs/` 实际文件字节（含 `inputs/manifest.json`，已不含 `run_id`）。同一批输入跨 run 导包，`inputs_digest` 应完全一致；这一点由 `tests/test_evidence_digest.py::test_inputs_digest_stable_across_runs_same_inputs` 断言。
+- **证据定位摘要（0.4.3）**：`evidence_digest` 覆盖全部 finding 的 `evidence`（tables/window/rules/aggregation，固定字段序、空值 `null`、路径 `/`），不进入 `conclusion_digest`；`wca-verify`/`replay` 从 `findings.csv.evidence_json` 重算。新版本包缺字段或重算不一致 → `EVIDENCE DIGEST FAIL`；无 `producer` 或 `producer.version < 0.4.3` 的旧包输出 `EVIDENCE DIGEST NOT CHECKED`，**即使其余四项外部门禁齐全也不得给 `RESULT OK`**，这是历史兼容分档，不是“检查通过”。签名者作恶或私钥失窃时，必须用包外 `--expect-evidence-digest` 或单包 anchor 文件的 `evidence_digest` 锚定。
+- **两层输入摘要**：`input_fingerprint` 是内容与范围指纹（输入文件内容/引用范围/规则参数）；`inputs_digest` 是包内 `inputs/` 实际文件字节（含 `inputs/manifest.json`，已不含 `run_id` 与 DB `file_id`；文件名由 `rel_path` 推导）。同一批输入跨 run/跨库导包，`inputs_digest` 应完全一致；跨库实测见 `tests/test_evidence_digest.py::test_inputs_manifest_cross_database_stable`。`conclusion_digest` 可能因 `QUAL-01/02` metric 里的 DB `file_id` 不同而不同，不能误读成 inputs 不稳定。
 - **没有 `--expect-anchor`**：两个工具都输出 `ANCHOR NOT CHECKED` 与 `RESULT PARTIAL`（exit 2），不能当作验收通过；只传 `--expect-triple` 也只是 legacy 外部比对，仍不给 `RESULT OK`。
-- **四项门禁（0.4.1）**：`RESULT OK` 必须同时满足签名 `pinned`、外部锚点、外部
-  `--expect-package-sha256`、外部 `--expect-artifacts-digest`；缺一项即 `RESULT PARTIAL`（exit 2），
-  任一项不匹配即 `RESULT FAIL`（exit 1）。`--anchor-file <单包 anchor.json>` 可一次提供
-  `anchor`/`package_sha256`/`artifacts_digest`；**显式参数优先、文件兜底**。
+- **五项门禁（0.4.3）**：`RESULT OK` 必须同时满足签名 `pinned`、外部锚点、外部
+  `--expect-package-sha256`、外部 `--expect-artifacts-digest`、外部 `--expect-evidence-digest`；
+  缺一项即 `RESULT PARTIAL`（exit 2），任一项不匹配即 `RESULT FAIL`（exit 1）。
+  `--anchor-file <单包 anchor.json>` 可一次提供 `anchor`/`package_sha256`/`artifacts_digest`/
+  `evidence_digest`；**显式参数优先 > 环境变量 > 文件兜底**。
 - **`NOT CHECKED` 含义**：只表示早退时尚未走到该检查，不等于“缺失/不符”。例如
   `ANCHOR SKIPPED (early exit)` 表示已传锚点、但前序检查先失败，不能据此判锚点缺失或错误；
   只有真正未传锚点才输出 `ANCHOR NOT CHECKED（未传外部锚点）`。
 - **anchor 对象与环境变量**：`anchor.json` 的 `packages` 是**对象**（key → 单包记录），不是数组；
-  `--anchor-file` 只接受单包扁平 JSON，组合式文件会被拒绝。环境变量只有 `WCA_EXPECT_ANCHOR`
-  （仅锚点）；包 SHA 与 `artifacts_digest` 只能走显式参数或单包 anchor 文件。
+  `--anchor-file` 只接受单包扁平 JSON，组合式文件会被拒绝。环境变量：`WCA_EXPECT_ANCHOR`
+  （锚点）、`WCA_EXPECT_EVIDENCE_DIGEST`（证据定位摘要）；包 SHA 与 `artifacts_digest`
+  只能走显式参数或单包 anchor 文件。
 - `--expect-package-sha256` 只对 zip 有效；目录包传它按失败关闭。`--expect-artifacts-digest` 比对 manifest 的包根工件清单摘要。
 - 五段：最后一段是 `projection_fingerprint`，必须与包内相等；四段旧调用不变。未裁剪包没有投影字段，传五段按失败关闭：`ANCHOR FAIL 包内无 projection_fingerprint，第五段无法校验`。
 - 两段结果合并：`wca-verify` 覆盖字节层 + 工件绑定 + 发现反算摘要 + 签名 + 外部锚点；`wca replay` 再证明规则字段能复算同一结论。包内 `verify.py` 只作便利脚本，不能替代任何一段。

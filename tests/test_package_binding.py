@@ -16,6 +16,7 @@ from conftest import EMPLOYEES, ORGS, punch, schedule
 from src import cli, signing
 from src.engine import run_check
 from src.evidence import export_package
+from src.package_inputs import input_arcnames
 from src.ingest import import_csv_file
 from src.replay import replay
 from src.util import canonical_json, manifest_checksum, sha256_hex
@@ -76,6 +77,20 @@ def _anchor(manifest: dict) -> str:
                      triple["conclusion_digest"]])
 
 
+def _five_args(manifest: dict, package_sha: str) -> list[str]:
+    return ["--expect-anchor", _anchor(manifest),
+            "--expect-package-sha256", package_sha,
+            "--expect-artifacts-digest", manifest["artifacts_digest"],
+            "--expect-evidence-digest", manifest["evidence_digest"]]
+
+
+def _five_kwargs(manifest: dict, package_sha: str) -> dict:
+    return {"expect_anchor": _anchor(manifest),
+            "expect_package_sha256": package_sha,
+            "expect_artifacts_digest": manifest["artifacts_digest"],
+            "expect_evidence_digest": manifest["evidence_digest"]}
+
+
 def _verify(pkg: Path, *args: str, cwd: Path = ROOT) -> tuple[int, str]:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(ROOT)
@@ -121,18 +136,17 @@ def _lines_starting(text: str, prefix: str) -> list[str]:
 def test_good_package_passes_independent_verify(conn, cfg, tmp_path):
     _out, zip_path, manifest, _key, pub = _build_signed(conn, cfg, tmp_path)
     anchor = _anchor(manifest)
-    code, out = _verify(zip_path, "--public-key", str(pub), "--expect-anchor", anchor,
-                        "--expect-package-sha256", sha256_hex(zip_path.read_bytes()),
-                        "--expect-artifacts-digest", manifest["artifacts_digest"])
+    package_sha = sha256_hex(zip_path.read_bytes())
+    code, out = _verify(zip_path, "--public-key", str(pub),
+                        *_five_args(manifest, package_sha))
     assert code == 0, out
     assert "RESULT OK" in out and "pinned (key matches supplied pin" in out
     assert "来源可信" not in out, out
     assert "independent key_id verification not done" in out, out
     assert "(9 fields; source_* not covered by digest)" in out, out
     assert len(_lines_starting(out, "ARTIFACTS DIGEST")) == 1, out
-    res = replay(zip_path, expect_anchor=anchor, public_keys=[str(pub)],
-                 expect_package_sha256=sha256_hex(zip_path.read_bytes()),
-                 expect_artifacts_digest=manifest["artifacts_digest"])
+    res = replay(zip_path, public_keys=[str(pub)],
+                 **_five_kwargs(manifest, package_sha))
     assert res["ok"], res["reason"]
     assert res["partial"] is False, res["reason"]
     assert res["producer_ok"] is True
@@ -206,8 +220,10 @@ def test_b_input_timestamp_change_fails_both(conn, cfg, tmp_path):
     _out, zip_path, manifest, _key, pub = _build_signed(conn, cfg, tmp_path)
     pkg = _unpack(zip_path, tmp_path / "b")
     inputs = json.loads((pkg / "inputs" / "manifest.json").read_text(encoding="utf-8"))
-    punch_entry = next(e for e in inputs["entries"] if e["kind"] == "punch")
-    path = pkg / punch_entry["arcname"]
+    arcnames = input_arcnames(inputs["entries"])
+    idx = next(i for i, e in enumerate(inputs["entries"]) if e["kind"] == "punch")
+    punch_entry = inputs["entries"][idx]
+    path = pkg / (punch_entry.get("arcname") or arcnames[idx])
     path.write_text(path.read_text(encoding="utf-8").replace(
         "2025-09-02T19:00:00+08:00", "2025-09-02T22:00:00+08:00"), encoding="utf-8")
     out, reason = _assert_both_fail(pkg, pub, _anchor(manifest))
@@ -301,9 +317,8 @@ def test_package_sha_and_artifacts_digest_are_enforced(conn, cfg, tmp_path):
     anchor = _anchor(manifest)
     package_sha = hashlib.sha256(zip_path.read_bytes()).hexdigest()
     artifacts_digest = manifest["artifacts_digest"]
-    code, out = _verify(zip_path, "--public-key", str(pub), "--expect-anchor", anchor,
-                        "--expect-package-sha256", package_sha,
-                        "--expect-artifacts-digest", artifacts_digest)
+    code, out = _verify(zip_path, "--public-key", str(pub),
+                        *_five_args(manifest, package_sha))
     assert code == 0, out
     assert "external=OK" in out
     assert "manifest-internal OK / external OK" in out
@@ -325,29 +340,31 @@ def test_package_sha_and_artifacts_digest_are_enforced(conn, cfg, tmp_path):
     assert f"expected={'0' * 64}" in digest_line, digest_line
     assert f"actual={artifacts_digest}" in digest_line, digest_line
 
-    res = replay(zip_path, expect_anchor=anchor, public_keys=[str(pub)],
-                 expect_package_sha256=package_sha,
-                 expect_artifacts_digest=artifacts_digest)
+    res = replay(zip_path, public_keys=[str(pub)],
+                 **_five_kwargs(manifest, package_sha))
     assert res["ok"], res["reason"]
     bad = replay(zip_path, expect_anchor=anchor, public_keys=[str(pub)],
                  expect_package_sha256="0" * 64)
     assert not bad["ok"] and "PACKAGE SHA256 FAIL" in bad["reason"]
 
 
-def test_result_ok_requires_four_external_gates(conn, cfg, tmp_path):
+def test_result_ok_requires_five_external_gates(conn, cfg, tmp_path):
     _out, zip_path, manifest, _key, pub = _build_signed(conn, cfg, tmp_path)
     anchor = _anchor(manifest)
     package_sha = sha256_hex(zip_path.read_bytes())
     digest = manifest["artifacts_digest"]
+    evidence_digest = manifest["evidence_digest"]
 
     code, out = _verify(zip_path, "--public-key", str(pub), "--expect-anchor", anchor,
                         "--expect-package-sha256", package_sha,
-                        "--expect-artifacts-digest", digest)
+                        "--expect-artifacts-digest", digest,
+                        "--expect-evidence-digest", evidence_digest)
     assert code == 0 and "RESULT OK" in out, out
 
     no_key = _verify(zip_path, "--expect-anchor", anchor,
                      "--expect-package-sha256", package_sha,
-                     "--expect-artifacts-digest", digest)
+                     "--expect-artifacts-digest", digest,
+                     "--expect-evidence-digest", evidence_digest)
     assert no_key[0] != 0, no_key[1]
     assert "RESULT OK" not in no_key[1] and "RESULT PARTIAL" in no_key[1], no_key[1]
     assert "package self-check (NOT source trust)" in no_key[1], no_key[1]
@@ -355,7 +372,8 @@ def test_result_ok_requires_four_external_gates(conn, cfg, tmp_path):
     assert "来源可信" not in no_key[1], no_key[1]
 
     no_sha = _verify(zip_path, "--public-key", str(pub), "--expect-anchor", anchor,
-                     "--expect-artifacts-digest", digest)
+                     "--expect-artifacts-digest", digest,
+                     "--expect-evidence-digest", evidence_digest)
     assert no_sha[0] != 0, no_sha[1]
     assert "RESULT OK" not in no_sha[1] and "RESULT PARTIAL" in no_sha[1], no_sha[1]
     assert "PACKAGE SHA256" in no_sha[1] and "external=NOT CHECKED" in no_sha[1], no_sha[1]
@@ -363,17 +381,85 @@ def test_result_ok_requires_four_external_gates(conn, cfg, tmp_path):
 
     no_anchor = _verify(zip_path, "--public-key", str(pub),
                         "--expect-package-sha256", package_sha,
-                        "--expect-artifacts-digest", digest)
+                        "--expect-artifacts-digest", digest,
+                        "--expect-evidence-digest", evidence_digest)
     assert no_anchor[0] != 0, no_anchor[1]
     assert "RESULT OK" not in no_anchor[1] and "RESULT PARTIAL" in no_anchor[1], no_anchor[1]
     anchor_line = next(line for line in no_anchor[1].splitlines() if "ANCHOR" in line)
     assert "NOT CHECKED" in anchor_line and "未传外部锚点" in anchor_line, anchor_line
 
     no_digest = _verify(zip_path, "--public-key", str(pub), "--expect-anchor", anchor,
-                        "--expect-package-sha256", package_sha)
+                        "--expect-package-sha256", package_sha,
+                        "--expect-evidence-digest", evidence_digest)
     assert no_digest[0] != 0, no_digest[1]
     assert "RESULT OK" not in no_digest[1] and "RESULT PARTIAL" in no_digest[1], no_digest[1]
     assert "外部 artifacts_digest" in no_digest[1], no_digest[1]
+
+    no_evidence = _verify(zip_path, "--public-key", str(pub), "--expect-anchor", anchor,
+                          "--expect-package-sha256", package_sha,
+                          "--expect-artifacts-digest", digest)
+    assert no_evidence[0] != 0, no_evidence[1]
+    assert "RESULT OK" not in no_evidence[1] and "RESULT PARTIAL" in no_evidence[1], no_evidence[1]
+    assert "外部 evidence_digest" in no_evidence[1], no_evidence[1]
+    assert "EVIDENCE DIGEST OK" in no_evidence[1] and "external=NOT CHECKED" in no_evidence[1], no_evidence[1]
+
+
+def test_evidence_digest_external_wrong_fails(conn, cfg, tmp_path):
+    _out, zip_path, manifest, _key, pub = _build_signed(conn, cfg, tmp_path)
+    args = _five_args(manifest, sha256_hex(zip_path.read_bytes()))
+    args[-1] = "0" * 64
+    code, out = _verify(zip_path, "--public-key", str(pub), *args)
+    assert code != 0 and "RESULT FAIL" in out, out
+    line = next(line for line in out.splitlines() if line.startswith("EVIDENCE DIGEST"))
+    assert "external=FAIL" in line, line
+    assert f"expected={'0' * 64}" in line, line
+    assert f"actual={manifest['evidence_digest']}" in line, line
+
+
+def test_evidence_digest_env_and_explicit_priority(conn, cfg, tmp_path, monkeypatch):
+    _out, zip_path, manifest, _key, pub = _build_signed(conn, cfg, tmp_path)
+    package_sha = sha256_hex(zip_path.read_bytes())
+    four = ["--expect-anchor", _anchor(manifest),
+            "--expect-package-sha256", package_sha,
+            "--expect-artifacts-digest", manifest["artifacts_digest"]]
+
+    monkeypatch.setenv("WCA_EXPECT_EVIDENCE_DIGEST", manifest["evidence_digest"])
+    code, out = _verify(zip_path, "--public-key", str(pub), *four)
+    assert code == 0 and "RESULT OK" in out, out
+
+    # 显式参数优先于环境变量：环境里是死值，显式正确仍通过。
+    monkeypatch.setenv("WCA_EXPECT_EVIDENCE_DIGEST", "deadbeef" * 16)
+    code, out = _verify(zip_path, "--public-key", str(pub), *four,
+                        "--expect-evidence-digest", manifest["evidence_digest"])
+    assert code == 0 and "RESULT OK" in out, out
+
+    # 环境正确、显式错误：显式值必须生效并失败。
+    monkeypatch.setenv("WCA_EXPECT_EVIDENCE_DIGEST", manifest["evidence_digest"])
+    code, out = _verify(zip_path, "--public-key", str(pub), *four,
+                        "--expect-evidence-digest", "0" * 64)
+    assert code != 0 and "RESULT FAIL" in out, out
+    line = next(line for line in out.splitlines() if line.startswith("EVIDENCE DIGEST"))
+    assert "external=FAIL" in line, line
+
+
+def test_replay_evidence_digest_external_gate(conn, cfg, tmp_path):
+    _out, zip_path, manifest, _key, pub = _build_signed(conn, cfg, tmp_path)
+    package_sha = sha256_hex(zip_path.read_bytes())
+    base = {"expect_anchor": _anchor(manifest),
+            "expect_package_sha256": package_sha,
+            "expect_artifacts_digest": manifest["artifacts_digest"]}
+
+    missing = replay(zip_path, public_keys=[str(pub)], **base)
+    assert missing["ok"] is True and missing["partial"] is True
+    assert "外部 evidence_digest" in str(missing.get("reason") or "")
+
+    wrong = replay(zip_path, public_keys=[str(pub)], **base,
+                   expect_evidence_digest="0" * 64)
+    assert not wrong["ok"] and "EVIDENCE DIGEST FAIL" in str(wrong.get("reason") or "")
+
+    ok = replay(zip_path, public_keys=[str(pub)], **base,
+                expect_evidence_digest=manifest["evidence_digest"])
+    assert ok["ok"] and ok["partial"] is False, ok["reason"]
 
 
 def test_anchor_file_fallback_and_explicit_priority(conn, cfg, tmp_path, capsys):
@@ -382,6 +468,7 @@ def test_anchor_file_fallback_and_explicit_priority(conn, cfg, tmp_path, capsys)
         "anchor": _anchor(manifest),
         "package_sha256": sha256_hex(zip_path.read_bytes()),
         "artifacts_digest": manifest["artifacts_digest"],
+        "evidence_digest": manifest["evidence_digest"],
     }
     anchor_file = tmp_path / "anchor-single.json"
     anchor_file.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
@@ -390,13 +477,15 @@ def test_anchor_file_fallback_and_explicit_priority(conn, cfg, tmp_path, capsys)
                         "--anchor-file", str(anchor_file))
     assert code == 0 and "RESULT OK" in out, out
 
-    # 显式参数优先：文件里故意放错包 SHA，显式值正确时仍应通过。
-    bad_record = dict(record, package_sha256="0" * 64)
+    # 显式参数优先：文件里故意放错包 SHA/evidence_digest，显式值正确时仍应通过。
+    bad_record = dict(record, package_sha256="0" * 64,
+                      evidence_digest="deadbeef" * 8)
     bad_file = tmp_path / "anchor-bad-sha.json"
     bad_file.write_text(json.dumps(bad_record, ensure_ascii=False), encoding="utf-8")
     code, out = _verify(zip_path, "--public-key", str(pub),
                         "--anchor-file", str(bad_file),
-                        "--expect-package-sha256", record["package_sha256"])
+                        "--expect-package-sha256", record["package_sha256"],
+                        "--expect-evidence-digest", record["evidence_digest"])
     assert code == 0 and "RESULT OK" in out, out
 
     # 组合式 anchor.json 含多个包时必须拒绝，避免套错哈希。
@@ -512,10 +601,8 @@ def test_missing_relative_public_key_reports_path_not_base64(conn, cfg, tmp_path
 def test_relative_public_key_resolves_from_caller_cwd(conn, cfg, tmp_path, monkeypatch):
     _out, zip_path, manifest, _key, pub = _build_signed(conn, cfg, tmp_path)
     monkeypatch.chdir(tmp_path)
-    code, out = _verify(zip_path, "--public-key", "pub.pub", "--expect-anchor",
-                        _anchor(manifest), "--expect-package-sha256",
-                        sha256_hex(zip_path.read_bytes()),
-                        "--expect-artifacts-digest", manifest["artifacts_digest"],
+    code, out = _verify(zip_path, "--public-key", "pub.pub",
+                        *_five_args(manifest, sha256_hex(zip_path.read_bytes())),
                         cwd=tmp_path)
     assert code == 0, out
     assert "pinned (key matches supplied pin" in out, out
@@ -547,9 +634,7 @@ def test_policies_are_in_package_and_hashed(conn, cfg, tmp_path):
         names = set(zf.namelist())
     assert policy_names <= names, names
     code, out = _verify(zip_path, "--public-key", str(pub),
-                        "--expect-anchor", _anchor(manifest),
-                        "--expect-package-sha256", sha256_hex(zip_path.read_bytes()),
-                        "--expect-artifacts-digest", manifest["artifacts_digest"])
+                        *_five_args(manifest, sha256_hex(zip_path.read_bytes())))
     assert code == 0, out
     assert "ARTIFACTS OK checked=14" in out, out
 
@@ -571,7 +656,8 @@ def test_terminology_separates_findings_from_final_conclusions(conn, cfg, tmp_pa
     cli_code = cli.main(["replay", str(zip_path), "--public-key", str(pub),
                          "--expect-anchor", _anchor(manifest),
                          "--expect-package-sha256", sha256_hex(zip_path.read_bytes()),
-                         "--expect-artifacts-digest", manifest["artifacts_digest"]])
+                         "--expect-artifacts-digest", manifest["artifacts_digest"],
+                         "--expect-evidence-digest", manifest["evidence_digest"]])
     text = capsys.readouterr().out + capsys.readouterr().err
     assert cli_code == 0, text
     assert "发现（未签认）" in text

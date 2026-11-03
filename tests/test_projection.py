@@ -133,7 +133,7 @@ def test_omit_non_projection_field_replays_with_omitted_fields(conn, cfg, tmp_pa
         # 文件名序号由导入顺序决定；用 inputs/manifest 找到 leave 条目。
         im = json.loads(zf.read("inputs/manifest.json").decode("utf-8"))
         leave = next(e for e in im["entries"] if e["kind"] == "leave")
-        header = zf.read(leave["arcname"]).decode("utf-8").splitlines()[0]
+        header = zf.read("inputs/" + leave["rel_path"]).decode("utf-8").splitlines()[0]
         assert "paid" not in header
         assert im["omitted_fields"] == manifest["omitted_fields"]
 

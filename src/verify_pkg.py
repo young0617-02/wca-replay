@@ -95,11 +95,26 @@ def _print_result(result: dict) -> None:
     line("FINDINGS DIGEST", st("findings"), "findings", findings_detail)
     evidence = result.get("evidence") or {}
     if result.get("evidence_legacy"):
-        print("EVIDENCE DIGEST NOT CHECKED（旧包 producer.version < 0.4.2，无 "
-              "evidence_digest；不参与 RESULT OK）")
+        print("EVIDENCE DIGEST NOT CHECKED（旧包无 evidence_digest；"
+              "不能据此给完整通过）")
     else:
-        evidence_detail = str(evidence.get("actual_digest") or "")
-        line("EVIDENCE DIGEST", st("evidence"), "evidence", evidence_detail)
+        internal = st("evidence")
+        external = ("OK" if result.get("evidence_digest_ok") else "FAIL") \
+            if result.get("evidence_digest_checked") else "NOT CHECKED"
+        detail = str(result.get("evidence_digest") or evidence.get("actual_digest") or "")
+        if internal == "OK":
+            line_text = f"EVIDENCE DIGEST OK {detail} / external={external}"
+        elif internal == "FAIL":
+            line_text = f"EVIDENCE DIGEST FAIL {detail} / external={external}"
+        else:
+            line_text = f"EVIDENCE DIGEST NOT CHECKED / external={external}"
+        if external == "FAIL":
+            line_text += (f" expected={result.get('evidence_digest_expected')} "
+                          f"actual={result.get('evidence_digest')}")
+        elif external == "NOT CHECKED":
+            line_text += ("（早退，尚未走到摘要比对；非缺失）" if early
+                          else "（未传外部期望值；不能算完整验收）")
+        print(line_text)
     if findings.get("ok"):
         print(f"COUNTS 发现（未签认） {findings.get('rows', 0)} 条 / "
               f"已确认结论 {findings.get('final_rows', 0)} 条")
@@ -163,9 +178,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="包外记录的 zip SHA-256（RESULT OK 必需）")
     parser.add_argument("--expect-artifacts-digest", dest="expect_artifacts_digest", default=None,
                         help="包外记录的 manifest.artifacts_digest（RESULT OK 必需）")
+    parser.add_argument("--expect-evidence-digest", dest="expect_evidence_digest", default=None,
+                        help="包外记录的 manifest.evidence_digest（RESULT OK 必需；"
+                             "也可用环境变量 WCA_EXPECT_EVIDENCE_DIGEST）")
     parser.add_argument("--anchor-file", dest="anchor_file", default=None,
-                        help="单包 anchor JSON（anchor/package_sha256/artifacts_digest）；"
-                             "显式参数优先，文件兜底")
+                        help="单包 anchor JSON（anchor/package_sha256/artifacts_digest/"
+                             "evidence_digest）；显式参数优先，文件兜底")
     parser.add_argument("--public-key", action="append", default=None, dest="public_keys",
                         help="外部固定公钥路径或 Base64，可重复；也可用 WCA_PUBLIC_KEY")
     parser.add_argument("--require-signature", action="store_true",
@@ -183,6 +201,9 @@ def main(argv: list[str] | None = None) -> int:
             or record.get("anchor")
         package_sha = args.expect_package_sha256 or record.get("package_sha256")
         artifacts_digest = args.expect_artifacts_digest or record.get("artifacts_digest")
+        evidence_digest = args.expect_evidence_digest \
+            or os.environ.get("WCA_EXPECT_EVIDENCE_DIGEST") \
+            or record.get("evidence_digest")
         result = package_verify.verify_package(
             Path(args.package),
             public_keys=_public_keys(args.public_keys),
@@ -190,6 +211,7 @@ def main(argv: list[str] | None = None) -> int:
             expect_triple=args.expect_triple,
             expect_package_sha256=package_sha,
             expect_artifacts_digest=artifacts_digest,
+            expect_evidence_digest=evidence_digest,
             require_signature=require_signature)
     except ValueError as exc:
         print(f"RESULT FAIL —— {exc}", file=sys.stderr)

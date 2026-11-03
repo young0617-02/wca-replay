@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import load_full_facts
+from conftest import EMPLOYEES, ORGS, load_full_facts, punch, schedule
 from src import signing
 from src.config import Config
 from src.db import connect, init_db
@@ -213,6 +213,93 @@ def test_evidence_annotation_changes_only_evidence_digest(small_runs, tmp_path):
         evidence_digest([changed.evidence_record()])
 
 
+def test_inputs_manifest_cross_database_stable(tmp_path, cfg):
+    """换空库、反向导入同一批 CSV：inputs_digest 必须只由文件本身决定。"""
+    files = {
+        "org.csv": ("org", ORGS),
+        "employee.csv": ("employee", EMPLOYEES),
+        "schedule.csv": ("schedule", [schedule(
+            "T-STD", "2025-09-02", "2025-09-02T09:00:00+08:00",
+            "2025-09-02T19:00:00+08:00")]),
+        "punch.csv": ("punch", [
+            punch("T-STD", "2025-09-02T09:00:00+08:00", "in"),
+            punch("T-STD", "2025-09-02T19:00:00+08:00", "out"),
+        ]),
+    }
+    key = signing.generate_keypair()
+
+    def build(tag: str, order: list[str]):
+        work = tmp_path / tag
+        data_dir = work / "data"
+        work.mkdir()
+        data_dir.mkdir()
+        for name, (_kind, rows) in files.items():
+            path = data_dir / name
+            with path.open("w", encoding="utf-8", newline="") as fh:
+                writer = csv.DictWriter(fh, fieldnames=list(rows[0].keys()),
+                                        lineterminator="\n")
+                writer.writeheader()
+                writer.writerows(rows)
+        config = Config.load(
+            env_path=work / "nonexistent.env",
+            WCA_DB_BACKEND="sqlite",
+            WCA_DB_PATH=str(work / "db.sqlite3"),
+            WCA_DB_IDENTITY_PATH=str(work / "db_target.json"),
+            WCA_DATA_DIR=str(data_dir),
+            WCA_REPORTS_DIR=str(work / "reports"),
+            WCA_PACKAGES_DIR=str(work / "packages"),
+            WCA_USERS_PATH=str(work / "users.json"),
+            WCA_UPLOAD_DIR=str(work / "uploads"),
+            WCA_REGION_CODE="440300",
+            WCA_RULE_PACK="rp-2026.10.gd-pilot-standard.v4",
+            WCA_LLM_PROVIDER="stub",
+            WCA_EMBEDDING_BACKEND="bm25",
+            WCA_SQLITE_SYNCHRONOUS="OFF",
+        )
+        config.ensure_dirs()
+        conn = connect(config.db_path)
+        init_db(conn)
+        for name in order:
+            kind = files[name][0]
+            import_csv_file(conn, config, data_dir / name, kind=kind, rel_path=name)
+        out = run_check(conn, config, start=date(2025, 9, 2), end=date(2025, 9, 2))
+        manifest = export_package(conn, config, out.run_id, signing_key=key)
+        with zipfile.ZipFile(Path(manifest["package_zip"])) as zf:
+            inputs_doc = json.loads(zf.read("inputs/manifest.json").decode("utf-8"))
+        return out, manifest, inputs_doc, conn
+
+    out_a, manifest_a, inputs_a, conn_a = build("db-a", ["org.csv", "employee.csv",
+                                                        "schedule.csv", "punch.csv"])
+    out_b, manifest_b, inputs_b, conn_b = build("db-b", ["org.csv", "employee.csv",
+                                                        "punch.csv", "schedule.csv"])
+    try:
+        file_ids_a = [int(r["file_id"]) for r in conn_a.execute(
+            "SELECT file_id FROM raw_file ORDER BY file_id").fetchall()]
+        file_ids_b = [int(r["file_id"]) for r in conn_b.execute(
+            "SELECT file_id FROM raw_file ORDER BY file_id").fetchall()]
+        assert file_ids_a == [1, 2, 3, 4]
+        assert file_ids_b == [1, 2, 3, 4]
+        # 同一批文件反向导入：内容/路径相同，只是 kind 与 file_id 的对应关系不同。
+        rel_a = {r["rel_path"]: int(r["file_id"]) for r in conn_a.execute(
+            "SELECT file_id, rel_path FROM raw_file").fetchall()}
+        rel_b = {r["rel_path"]: int(r["file_id"]) for r in conn_b.execute(
+            "SELECT file_id, rel_path FROM raw_file").fetchall()}
+        assert rel_a["punch.csv"] != rel_b["punch.csv"]
+    finally:
+        conn_a.close()
+        conn_b.close()
+
+    assert manifest_a["inputs_digest"] == manifest_b["inputs_digest"]
+    assert manifest_a["triple"]["input_fingerprint"] == \
+        manifest_b["triple"]["input_fingerprint"]
+    assert out_a.conclusion_digest == out_b.conclusion_digest
+    assert manifest_a["evidence_digest"] == manifest_b["evidence_digest"]
+    for doc in (inputs_a, inputs_b):
+        for entry in doc["entries"]:
+            assert set(entry) == {"rel_path", "kind", "sha256", "bytes", "row_count"}, entry
+        assert all(int(entry["row_count"]) >= 0 for entry in doc["entries"])
+
+
 def test_new_package_missing_evidence_digest_fails_closed(small_runs, tmp_path):
     _conn, _cfg, key, _first, first_manifest, _second, _second_manifest = small_runs
     src = Path(first_manifest["package_zip"])
@@ -282,3 +369,36 @@ def test_old_producer_without_evidence_digest_is_not_checked(small_runs, tmp_pat
     assert result["evidence_legacy"] is True
     assert "EVIDENCE DIGEST FAIL" not in result["reason"]
     assert result["partial"] is True
+
+
+def test_old_package_without_evidence_digest_cannot_result_ok(small_runs, tmp_path):
+    """旧包即使其余四项外部凭据齐全，也不能因 evidence NOT CHECKED 给 RESULT OK。"""
+    _conn, _cfg, key, _first, first_manifest, _second, _second_manifest = small_runs
+    src = Path(first_manifest["package_zip"])
+    dst = tmp_path / "old-four-gates.zip"
+
+    def mutate(files):
+        manifest = json.loads(files["manifest.json"])
+        manifest.pop("evidence_digest", None)
+        manifest.pop("producer", None)
+        _resign(manifest, key)
+        files["manifest.json"] = canonical_json(manifest).encode("utf-8")
+        return files
+
+    mutated = _rezip(src, dst, mutate)
+    manifest = json.loads(_zip_member(mutated, "manifest.json").decode("utf-8"))
+    triple = manifest["triple"]
+    anchor = ",".join(["3", triple["rule_pack_version"], triple["input_fingerprint"],
+                       triple["conclusion_digest"]])
+    result = verify_package(
+        mutated,
+        public_keys=[signing.public_key_b64(key.verify_key.encode())],
+        expect_anchor=anchor,
+        expect_package_sha256=sha256_hex(mutated.read_bytes()),
+        expect_artifacts_digest=manifest["artifacts_digest"],
+    )
+    assert result["ok"] is False, result
+    assert result["partial"] is True, result
+    assert result["checks"]["evidence_digest_external"] == "NOT CHECKED"
+    assert "外部 evidence_digest" in result["reason"]
+

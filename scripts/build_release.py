@@ -101,10 +101,12 @@ def _readme(version: str, commit: str, wheel: str, build_time: str) -> str:
   **单个 `FINDINGS DIGEST OK` 不等于整张 `findings.csv` 未变**，必须同时 `ARTIFACTS OK`。
 - **证据定位摘要**：`evidence_digest` 单独覆盖全部 finding 的 `evidence` 块
   （`tables/window/rules/aggregation`，固定字段序、空值 `null`、路径 `/`），**不进入**
-  `conclusion_digest`。0.4.2 起新包必须有该字段；旧包缺失按 `NOT CHECKED` 分档写明。
+  `conclusion_digest`。0.4.3 起新包必须有该字段；旧包缺失按 `NOT CHECKED` 分档，
+  且不能因此给 `RESULT OK`。签名者可能作恶或私钥失窃，**必须**用包外
+  `--expect-evidence-digest` 锚定，不能只看包内 manifest。
 - **两层输入摘要**：`input_fingerprint` 是内容与范围指纹（输入文件内容/引用范围/规则参数）；
-  `inputs_digest` 是包内 `inputs/` 实际文件字节（已不含 `run_id`）。同一批输入跨 run
-  导包，`inputs_digest` 应相同。
+  `inputs_digest` 是包内 `inputs/` 实际文件字节（已不含 `run_id` 与 DB `file_id`；
+  文件名由 `rel_path` 推导）。同一批输入跨 run/跨库导包，`inputs_digest` 应相同。
 - **规则版本**：`rule_version` 是单条规则版本，不等于 rule pack 版本；v5 包内可同时有
   v4/v5 规则，分布见 `manifest.counts.rule_versions` 与包内 `policies/RULE-PACK.md`。
 - **policies/ 用途**：包内 `policies/` 提供规则包定义（rule_id/版本/条文号/阈值/生效日期）、
@@ -153,7 +155,8 @@ py -3.12 -m venv .venv-clean
 
 ```powershell
 .venv-clean\\Scripts\\wca-verify.exe <包.zip> --public-key <固定公钥文件> --expect-anchor "<四/五段>" `
-  --expect-package-sha256 <包SHA256> --expect-artifacts-digest <artifacts_digest>
+  --expect-package-sha256 <包SHA256> --expect-artifacts-digest <artifacts_digest> `
+  --expect-evidence-digest <evidence_digest>
 ```
 
 期望：`MANIFEST CHECKSUM OK`、`ARTIFACTS OK`、`VERIFY SCRIPT OK`、`FINDINGS DIGEST OK`、
@@ -162,30 +165,35 @@ py -3.12 -m venv .venv-clean
 它证明包字节、工件绑定、发现反算摘要、证据定位摘要、输入摘要、签名与外部锚点一致；
 **不证明结论正确**。
 
-**`RESULT OK` 四项门禁**：签名 `pinned` + 外部锚点 + 外部 `package_sha256` + 外部
-`artifacts_digest` 必须同时通过；缺一项 → `RESULT PARTIAL`（exit 2），任一项不匹配 →
-`RESULT FAIL`（exit 1）。`--anchor-file <单包 anchor.json>` 可一次提供
-`anchor`/`package_sha256`/`artifacts_digest`，**显式参数优先、文件兜底**。
+**`RESULT OK` 五项门禁**：签名 `pinned` + 外部锚点 + 外部 `package_sha256` + 外部
+`artifacts_digest` + 外部 `evidence_digest` 必须同时通过；缺一项 → `RESULT PARTIAL`（exit 2），
+任一项不匹配 → `RESULT FAIL`（exit 1）。`--anchor-file <单包 anchor.json>` 可一次提供
+`anchor`/`package_sha256`/`artifacts_digest`/`evidence_digest`，**显式参数优先 > 环境变量 >
+文件兜底**；证据摘要环境变量为 `WCA_EXPECT_EVIDENCE_DIGEST`。
 
 **`NOT CHECKED` / `SKIPPED` 含义**：`NOT CHECKED` 只表示早退时尚未走到该检查，
 **不等于“缺失/不符”**；已传入锚点但前序失败时输出 `ANCHOR SKIPPED (early exit)`，与
 “未提供锚点”的 `ANCHOR NOT CHECKED（未传外部锚点）` 彻底分开。`ARTIFACTS FAIL` 行会带具体
 失败文件名；`FINDINGS DIGEST OK` 会带后缀 `(9 fields; source_* not covered by digest)`；
-`EVIDENCE DIGEST` 在 0.4.2 新包上必须是 `OK`，新版本包缺字段会 `FAIL` 失败关闭，
-无 producer 或 producer.version < 0.4.2 的旧包输出 `NOT CHECKED`（明确不参与 `RESULT OK`）。
-`input_fingerprint` 与 `inputs_digest` 的分工见上；`inputs_digest` 不含 `run_id`，跨 run 稳定。
+`EVIDENCE DIGEST` 在 0.4.3 新包上内部必须 `OK`，且外部 `evidence_digest` 必须匹配；
+新版本包缺字段会 `FAIL` 失败关闭，无 producer 或 producer.version < 0.4.3 的旧包输出
+`NOT CHECKED`（明确不能给 `RESULT OK`）。
+`input_fingerprint` 与 `inputs_digest` 的分工见上；`inputs_digest` 不含 `run_id`/DB `file_id`，
+同一批输入跨 run/跨库稳定。
 
 **anchor 文件与环境变量**：`anchor.json` 的 `packages` 是**对象**（key → 单包记录），不是数组；
-`--anchor-file` 只接受单包扁平 JSON（`anchor`/`package_sha256`/`artifacts_digest`），组合式
-`anchor.json` 会被拒绝。环境变量入口只有 `WCA_EXPECT_ANCHOR`（仅锚点）；包 SHA 与
-`artifacts_digest` 只能走显式参数或单包 anchor 文件。优先级：显式参数 > `WCA_EXPECT_ANCHOR` >
-anchor 文件。
+`--anchor-file` 只接受单包扁平 JSON（`anchor`/`package_sha256`/`artifacts_digest`/
+`evidence_digest`），组合式
+`anchor.json` 会被拒绝。环境变量入口：`WCA_EXPECT_ANCHOR`（锚点）与
+`WCA_EXPECT_EVIDENCE_DIGEST`（证据定位摘要）；包 SHA 与 `artifacts_digest` 只能走显式参数或
+单包 anchor 文件。优先级：显式参数 > 环境变量 > anchor 文件。
 
 ## 4. 字段层：同版本 `replay`
 
 ```powershell
 .venv-clean\\Scripts\\wca.exe replay <包.zip> --public-key <固定公钥文件> --expect-anchor "<四/五段>" `
-  --expect-package-sha256 <包SHA256> --expect-artifacts-digest <artifacts_digest>
+  --expect-package-sha256 <包SHA256> --expect-artifacts-digest <artifacts_digest> `
+  --expect-evidence-digest <evidence_digest>
 ```
 
 期望：`工件逐文件：OK`、`发现摘要：一致`、`EVIDENCE DIGEST OK`、三元组逐项 `=`、

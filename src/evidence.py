@@ -27,6 +27,7 @@ from .config import Config, PROJECT_ROOT
 from .db import (DB_BACKEND_POSTGRES, Connection, column_exists, get_meta, set_meta,
                  table_exists, transaction_if_needed)
 from .evidence_digest import evidence_digest as compute_evidence_digest
+from .package_inputs import input_arcnames
 from .rules.approvals import export_approval_csv, export_coverage_csv
 from .rules.rulepack import RULE_PACK_V4, RULE_PACK_V5, RULE_PACK_V6
 from .util import (CN_TZ, CSV_FORMULA_ESCAPE, EVIDENCE_PACKAGE_SCHEMA,
@@ -456,10 +457,12 @@ PACKAGE_README = (
     "不等于整张 findings.csv 未变，必须同时看 ARTIFACTS OK。\r\n"
     "evidence_digest 单独覆盖全部 finding 的 evidence 块（tables/window/rules/"
     "aggregation，固定字段序、空值 null、路径 /），不进入 conclusion_digest；"
-    "只补/改证据定位注释时，只有 evidence_digest 变化。\r\n"
+    "只补/改证据定位注释时，只有 evidence_digest 变化。正式验收必须用包外 "
+    "--expect-evidence-digest 或单包 anchor 文件的 evidence_digest 锚定；"
+    "签名者可能作恶或私钥失窃，不能只看包内 manifest。\r\n"
     "input_fingerprint 是内容与范围指纹（输入文件内容/引用范围/规则参数），"
-    "inputs_digest 是包内 inputs/ 实际文件字节（已不含 run_id）；两者分工不同，"
-    "同一批输入跨 run 导包时 inputs_digest 应稳定一致。\r\n"
+    "inputs_digest 是包内 inputs/ 实际文件字节（已不含 run_id 与 DB file_id；"
+    "文件名由 rel_path 推导）；同一批输入跨 run/跨库导包时 inputs_digest 应稳定一致。\r\n"
     "rule_version 是单条规则版本，不等于 rule pack 版本；v5 包可同时有 v4/v5 规则，"
     "分布见 manifest.counts.rule_versions 与包内 policies/RULE-PACK.md。\r\n"
 )
@@ -934,8 +937,7 @@ def collect_package_inputs(conn: Connection, cfg: Config, run_id: str,
             continue
         entries.append({"file_id": int(r["file_id"]), "rel_path": r["rel_path"],
                         "kind": r["kind"], "sha256": r["sha256"], "bytes": len(data),
-                        "arcname": f"{INPUTS_DIRNAME}/{int(r['file_id']):03d}-{src.name}",
-                        "source": str(src)})
+                        "row_count": int(r["row_count"]), "source": str(src)})
     total = sum(e["bytes"] for e in entries)
     status = check_input_budget(total)
     note = ""
@@ -1118,13 +1120,16 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
             collected["entries"].append({
                 "file_id": 0, "rel_path": "approval_ledger.csv", "kind": "approval",
                 "sha256": approval_meta["sha256"], "bytes": approval_meta["bytes"],
-                "rows": approval_meta["rows"],
-                "arcname": f"{INPUTS_DIRNAME}/000-approval.csv",
+                "row_count": int(approval_meta["rows"]),
                 "source": str(approval_meta["path"]),
             })
             collected["total_bytes"] += approval_meta["bytes"]
             collected["approval_rows"] = approval_meta["rows"]
             collected["approval_sha256"] = approval_meta["sha256"]
+        # 包内输入文件名只由 rel_path 推导，不再依赖数据库 file_id；
+        # 这样换空库重导同一批 CSV 时，inputs_digest 不会因 file_id 不同而漂移。
+        for entry, arc in zip(collected["entries"], input_arcnames(collected["entries"])):
+            entry["arcname"] = arc
         omitted_fields = _apply_omissions(collected, work, omit_fields)
         status = input_budget_status(collected["total_bytes"])
         collected["warning"] = status in ("warning", "critical")
@@ -1173,10 +1178,10 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
                   "reason": collected["reason"],
                   "approval_rows": int(collected.get("approval_rows", 0)),
                   "approval_source": approval_source,
+                  "path_rule": ("inputs/<rel_path>；同一规范化路径重复时按 entries 顺序追加 -2/-3"),
                   **({"omitted_fields": omitted_fields} if omit_fields else {}),
-                  "entries": [{k: e[k] for k in ("file_id", "rel_path", "kind", "sha256",
-                                                 "bytes", "arcname", "rows",
-                                                 "source_sha256") if k in e}
+                  "entries": [{k: e[k] for k in ("rel_path", "kind", "sha256",
+                                                 "bytes", "row_count") if k in e}
                               for e in collected["entries"]]}
     inputs_manifest.write_text(canonical_json(inputs_doc) + chr(10), encoding="utf-8")
     for e in collected["entries"]:
@@ -1725,6 +1730,29 @@ def safe_path(root, arcname):
     return target
 
 
+def input_arcnames(entries):
+    """0.4.3 包内输入名由 rel_path 推导；旧包仍优先使用 arcname。"""
+    used, out = set(), []
+    for entry in entries:
+        rel = str(entry.get("rel_path") or "").replace(chr(92), "/")
+        parts = [part for part in rel.split("/") if part not in ("", ".")]
+        if not parts or ".." in parts:
+            raise ValueError("inputs/manifest.json rel_path 非法：" + rel)
+        rel = "/".join(parts)
+        base = "inputs/" + rel
+        candidate, serial = base, 2
+        while candidate in used:
+            if "." in rel:
+                stem, ext = rel.rsplit(".", 1)
+                candidate = "inputs/" + stem + "-" + str(serial) + "." + ext
+            else:
+                candidate = base + "-" + str(serial)
+            serial += 1
+        used.add(candidate)
+        out.append(candidate)
+    return out
+
+
 def require(manifest, key, where):
     value = manifest.get(key)
     if value is None:
@@ -1914,20 +1942,22 @@ def main():
             total_bytes = im["total_bytes"]
             selection_rule = im["selection_rule"]
             bad, checked = [], 0
-            for entry in entries:
+            derived_arcnames = input_arcnames(entries)
+            for entry, derived in zip(entries, derived_arcnames):
+                arc = entry.get("arcname") or derived
                 try:
-                    path = safe_path(root, entry["arcname"])
+                    path = safe_path(root, arc)
                 except Exception as exc:
                     bad.append(str(exc))
                     continue
                 if not path.is_file():
-                    bad.append(str(entry["arcname"]) + " (缺失)")
+                    bad.append(str(arc) + " (缺失)")
                     continue
                 with path.open("rb") as fh:
                     digest = hashlib.sha256(fh.read()).hexdigest()
                 checked += 1
                 if digest != entry.get("sha256"):
-                    bad.append(str(entry.get("rel_path", entry["arcname"])) + " (哈希不一致)")
+                    bad.append(str(entry.get("rel_path", arc)) + " (哈希不一致)")
             print("INPUTS", "OK" if not bad else "FAIL", "checked=", checked,
                   "packed=", len(entries), "missing_at_export=", len(missing))
             for b in bad:

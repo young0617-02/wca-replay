@@ -125,7 +125,7 @@ def test_v6_package_uses_coverage_csv_and_replays(conn, cfg):
     with zipfile.ZipFile(Path(manifest["package_zip"])) as zf:
         im = json.loads(zf.read("inputs/manifest.json").decode("utf-8"))
         assert im["approval_source"] == "v6-coverage"
-        rows = list(csv.DictReader(zf.read("inputs/000-approval.csv").decode("utf-8")
+        rows = list(csv.DictReader(zf.read("inputs/approval_ledger.csv").decode("utf-8")
                                    .splitlines()))
         assert rows and "version_no" in rows[0] and "published_at" in rows[0]
         findings = list(csv.DictReader(zf.read("findings.csv").decode("utf-8").splitlines()))

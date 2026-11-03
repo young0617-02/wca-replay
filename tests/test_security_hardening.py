@@ -110,7 +110,7 @@ def test_verify_nonzero_when_input_content_tampered(packed, tmp_path):
     pkg = _unpack(zip_path, tmp_path / "tamper-input")
     im = json.loads((pkg / "inputs" / "manifest.json").read_text(encoding="utf-8"))
     target = next(e for e in im["entries"] if e["kind"] == "punch")
-    path = pkg / target["arcname"]
+    path = pkg / ("inputs/" + target["rel_path"])
     path.write_text(path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
 
     proc = _run_verify(pkg)
@@ -187,8 +187,10 @@ def test_verify_and_replay_reject_out_of_root_arcname(packed, tmp_path, kind):
     assert "包内路径非法" in proc.stdout
     assert "RESULT FAIL" in proc.stdout
 
-    with pytest.raises(ValueError, match="包内路径"):
-        replay(pkg)
+    res = replay(pkg)
+    assert not res["ok"]
+    assert "ARTIFACT FAIL" in str(res.get("reason") or "") or \
+        "包内路径" in str(res.get("reason") or "")
 
 
 @pytest.mark.parametrize("member", [
@@ -390,7 +392,7 @@ def test_approval_csv_escape_keeps_replay_triple_and_counts(conn, cfg, tmp_path)
     assert inputs_doc["csv_formula_escape"] == "apostrophe", \
         "重放必须靠包内显式声明识别转义，不能靠猜"
 
-    rows = _read_zip_rows(Path(manifest["package_zip"]), "inputs/000-approval.csv")
+    rows = _read_zip_rows(Path(manifest["package_zip"]), "inputs/approval_ledger.csv")
     assert rows[0]["doc_no"] == "'=cmd|' /C calc'!A0"
     assert rows[0]["recorded_at"] == "'\t2025-01-02T00:00:00+08:00"
     assert rows[0]["valid_from"] == "2025-01-01", "正常日期字段不得被改写"

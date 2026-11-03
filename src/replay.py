@@ -29,6 +29,7 @@ from .config import Config
 from .db import DB_BACKEND_SQLITE, connect, init_db
 from .engine import run_check
 from .ingest import import_csv_file
+from .package_inputs import input_arcnames
 from .rules.approvals import import_approval_csv, import_coverage_csv
 from .util import (CSV_FORMULA_ESCAPE, MANIFEST_CHECKSUM_FIELD, anchor_schema_version,
                    evidence_schema_version, manifest_checksum, sha256_hex)
@@ -423,6 +424,8 @@ def _base_result(package: Path | str, manifest: dict, *,
         "package_sha256": "", "package_sha256_checked": False, "package_sha256_ok": None,
         "artifacts_digest": "", "artifacts_digest_checked": False, "artifacts_digest_ok": None,
         "artifacts_digest_expected": "",
+        "evidence_digest": "", "evidence_digest_checked": False, "evidence_digest_ok": None,
+        "evidence_digest_expected": "",
         "final_conclusions_expected": 0, "final_conclusions_packaged": 0,
         "input_fingerprint_recomputed": False,
         "ok": False, "reason": "",
@@ -435,7 +438,8 @@ def replay(package: Path | str, *, limits: ZipLimits | None = None,
            public_keys: list[str] | tuple[str, ...] | None = None,
            require_signature: bool = False,
            expect_package_sha256: str | None = None,
-           expect_artifacts_digest: str | None = None) -> dict:
+           expect_artifacts_digest: str | None = None,
+           expect_evidence_digest: str | None = None) -> dict:
     """重放一个举证包，返回可比对的字典（不抛异常即代表流程跑通，结论看 ok 字段）。
 
     `expect_anchor`（或 `WCA_EXPECT_ANCHOR`）是包外记录的四元组锚点，优先使用；
@@ -526,6 +530,22 @@ def replay(package: Path | str, *, limits: ZipLimits | None = None,
             if not evidence_binding["ok"]:
                 result["reason"] = evidence_binding["reason"]
                 return result
+            if expect_evidence_digest:
+                result["evidence_digest_checked"] = True
+                result["evidence_digest_expected"] = str(
+                    expect_evidence_digest).strip().lower()
+                if evidence_binding.get("legacy") or not result["evidence_digest"]:
+                    result["evidence_digest_ok"] = False
+                    result["reason"] = ("EVIDENCE DIGEST FAIL 包内无 evidence_digest，"
+                                        "无法与外部期望值比对")
+                    return result
+                if result["evidence_digest_expected"] != result["evidence_digest"].lower():
+                    result["evidence_digest_ok"] = False
+                    result["reason"] = ("EVIDENCE DIGEST FAIL "
+                                        f"expected={result['evidence_digest_expected']} "
+                                        f"actual={result['evidence_digest']}")
+                    return result
+                result["evidence_digest_ok"] = True
         if expect_artifacts_digest:
             result["artifacts_digest_checked"] = True
             expected_artifacts = str(expect_artifacts_digest).strip().lower()
@@ -687,19 +707,21 @@ def replay(package: Path | str, *, limits: ZipLimits | None = None,
             cfg.ensure_dirs()
             conn = connect(cfg)
             init_db(conn)
-            by_kind: dict[str, list[dict]] = {}
-            for e in inputs["entries"]:
-                by_kind.setdefault(e["kind"], []).append(e)
+            by_kind: dict[str, list[tuple[dict, str]]] = {}
+            derived_arcnames = input_arcnames(inputs["entries"])
+            for entry, derived in zip(inputs["entries"], derived_arcnames):
+                arc = str(entry.get("arcname") or derived)
+                by_kind.setdefault(entry["kind"], []).append((entry, arc))
             # 只有包内明确声明了 `'` 前缀转义时才撤销；旧包没有该字段，按原值导入。
             unescape_formula = str(
                 inputs.get("csv_formula_escape") or "") == CSV_FORMULA_ESCAPE
             imported = []
             for kind in INGEST_ORDER:
-                for e in sorted(by_kind.pop(kind, []), key=lambda x: x["file_id"]):
-                    # arcname 是包内相对路径（inputs/004-punch.csv）；解析后必须仍在包根目录内。
-                    src = _package_member(d, e.get("arcname"))
+                for e, arc in sorted(by_kind.pop(kind, []), key=lambda pair: pair[1]):
+                    # arcname 是包内相对路径（inputs/<rel_path>）；解析后必须仍在包根目录内。
+                    src = _package_member(d, arc)
                     if not src.is_file():
-                        raise FileNotFoundError(f"包内缺少输入文件：{e.get('arcname')}")
+                        raise FileNotFoundError(f"包内缺少输入文件：{arc}")
                     if kind == "approval":
                         if str(inputs.get("approval_source") or "") == "v6-coverage":
                             rows = import_coverage_csv(conn, src,
@@ -792,7 +814,8 @@ def replay(package: Path | str, *, limits: ZipLimits | None = None,
         pinned_ok = result.get("signature_trust") == "pinned"
         external_ok = (pinned_ok and result.get("anchor_ok") is True
                        and result.get("package_sha256_ok") is True
-                       and result.get("artifacts_digest_ok") is True)
+                       and result.get("artifacts_digest_ok") is True
+                       and result.get("evidence_digest_ok") is True)
         result["partial"] = bool(result["ok"] and not external_ok)
         if result["partial"]:
             missing = []
@@ -804,6 +827,8 @@ def replay(package: Path | str, *, limits: ZipLimits | None = None,
                 missing.append("外部包 SHA-256")
             if not result.get("artifacts_digest_ok"):
                 missing.append("外部 artifacts_digest")
+            if not result.get("evidence_digest_ok"):
+                missing.append("外部 evidence_digest")
             result["reason"] += ("；RESULT PARTIAL（缺少/未通过 " + "、".join(missing)
                                  + "，不能算完整验收）")
         return result

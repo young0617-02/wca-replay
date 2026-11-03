@@ -93,12 +93,13 @@ def test_v5_package_contains_approval_ledger(packed_with_approval):
     assert manifest["inputs"]["approval_sha256"]
     with zipfile.ZipFile(zip_path) as zf:
         names = set(zf.namelist())
-        assert "inputs/000-approval.csv" in names
+        assert "inputs/approval_ledger.csv" in names
         im = json.loads(zf.read("inputs/manifest.json").decode("utf-8"))
         approval_entries = [e for e in im["entries"] if e["kind"] == "approval"]
         assert len(approval_entries) == 1
-        assert approval_entries[0]["arcname"] == "inputs/000-approval.csv"
-        rows = list(csv.DictReader(zf.read("inputs/000-approval.csv").decode("utf-8")
+        assert "file_id" not in approval_entries[0] and "arcname" not in approval_entries[0]
+        assert approval_entries[0]["row_count"] == 1
+        rows = list(csv.DictReader(zf.read("inputs/approval_ledger.csv").decode("utf-8")
                                    .splitlines()))
         assert rows and rows[0]["doc_no"] == "深人社函〔2025〕001号"
         assert rows[0]["job_codes"] == '["warehouse_shift"]'
@@ -212,9 +213,9 @@ def test_tampered_approval_csv_breaks_replay(packed_with_approval, tmp_path):
     _, _, zip_path, _, _ = packed_with_approval
 
     def mutate(files):
-        text = files["inputs/000-approval.csv"].decode("utf-8")
-        files["inputs/000-approval.csv"] = text.replace("深人社函〔2025〕001号",
-                                                        "深人社函〔2099〕999号").encode("utf-8")
+        text = files["inputs/approval_ledger.csv"].decode("utf-8")
+        files["inputs/approval_ledger.csv"] = text.replace("深人社函〔2025〕001号",
+                                                            "深人社函〔2099〕999号").encode("utf-8")
         return files
 
     tampered = _rezip(zip_path, tmp_path / "tampered-approval.zip", mutate)
@@ -248,7 +249,7 @@ def test_empty_ledger_package_still_replays_old_v5_shape(conn, cfg, tmp_path):
         im["entries"] = [e for e in im["entries"] if e["kind"] != "approval"]
         files["inputs/manifest.json"] = json.dumps(im, ensure_ascii=False,
                                                    sort_keys=True).encode("utf-8")
-        files.pop("inputs/000-approval.csv", None)
+        files.pop("inputs/approval_ledger.csv", None)
         return files
 
     legacy_shape = _rezip(src, tmp_path / "legacy-v5.zip", strip)

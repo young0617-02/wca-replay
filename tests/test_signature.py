@@ -323,7 +323,7 @@ def test_swap_input_csv_with_synced_manifest_fails_inputs_digest(signed_packed, 
     pkg = _unpack(zip_path, tmp_path / "swap-input")
     im = _inputs_manifest(pkg)
     entry = next(e for e in im["entries"] if e["kind"] == "punch")
-    target = pkg / entry["arcname"]
+    target = pkg / ("inputs/" + entry["rel_path"])
     original = target.read_bytes()
     forged = original.replace(b"T-STD", b"X-STD", 1)
     assert forged != original and len(forged) == len(original)
@@ -364,7 +364,7 @@ def test_add_or_remove_input_file_fails_inputs_digest(signed_packed, tmp_path, a
         (pkg / "inputs" / "999-extra.csv").write_text("extra\n", encoding="utf-8")
     else:
         im = _inputs_manifest(pkg)
-        (pkg / im["entries"][0]["arcname"]).unlink()
+        (pkg / ("inputs/" + im["entries"][0]["rel_path"])).unlink()
 
     proc = _run_verify(pkg)
     assert proc.returncode != 0
