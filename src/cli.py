@@ -369,6 +369,21 @@ def cmd_replay(args) -> int:
         print(f"  发现摘要：{'一致' if findings_binding.get('ok') else '不一致'}"
               f"（findings.csv {findings_binding.get('rows', 0)} 行，"
               f"反算 {str(findings_binding.get('actual_digest', ''))[:16]}…）")
+    evidence_binding = res.get("evidence_binding") or {}
+    if res.get("evidence_legacy"):
+        print("  EVIDENCE DIGEST NOT CHECKED（旧包 producer.version < 0.4.2，无 "
+              "evidence_digest；不参与 RESULT OK）")
+    elif evidence_binding:
+        if not evidence_binding.get("ok"):
+            print(f"  EVIDENCE DIGEST FAIL —— {evidence_binding.get('reason', '')}")
+        elif res.get("evidence_replay_ok") is False:
+            print("  EVIDENCE DIGEST FAIL —— 重放实得 "
+                  f"{str(res.get('evidence_actual_digest', ''))[:16]}… 与 manifest "
+                  f"{str(res.get('evidence_digest', ''))[:16]}… 不一致")
+        else:
+            print(f"  EVIDENCE DIGEST OK {res.get('evidence_digest', '')}")
+    elif early:
+        print("  EVIDENCE DIGEST NOT CHECKED（早退，尚未走到证据定位摘要校验）")
     sha_status = ("NOT CHECKED" if not res.get("package_sha256_checked")
                   else ("OK" if res.get("package_sha256_ok") else "FAIL"))
     print(f"  PACKAGE SHA256 computed={res.get('package_sha256') or 'NOT AVAILABLE'} "

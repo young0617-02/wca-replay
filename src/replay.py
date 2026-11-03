@@ -416,6 +416,8 @@ def _base_result(package: Path | str, manifest: dict, *,
             manifest.get("producer"), dict) else {},
         "producer_ok": True, "producer_reason": "",
         "artifact": {}, "findings_binding": {},
+        "evidence_binding": {}, "evidence_legacy": False,
+        "evidence_digest": "", "evidence_actual_digest": "", "evidence_replay_ok": None,
         "anchor_expected": anchor_expected, "anchor_checked": False, "anchor_ok": None,
         "partial": False,
         "package_sha256": "", "package_sha256_checked": False, "package_sha256_ok": None,
@@ -516,6 +518,13 @@ def replay(package: Path | str, *, limits: ZipLimits | None = None,
             result["final_conclusions_packaged"] = int(findings_binding.get("final_rows", 0))
             if not findings_binding["ok"]:
                 result["reason"] = findings_binding["reason"]
+                return result
+            evidence_binding = package_verify.check_evidence(d, manifest)
+            result["evidence_binding"] = evidence_binding
+            result["evidence_legacy"] = bool(evidence_binding.get("legacy"))
+            result["evidence_digest"] = str(manifest.get("evidence_digest") or "")
+            if not evidence_binding["ok"]:
+                result["reason"] = evidence_binding["reason"]
                 return result
         if expect_artifacts_digest:
             result["artifacts_digest_checked"] = True
@@ -756,11 +765,23 @@ def replay(package: Path | str, *, limits: ZipLimits | None = None,
             else:
                 mismatched = [k for k in actual if actual[k] != triple.get(k)]
             result["mismatched_fields"] = mismatched
-            if not mismatched and result["findings_expected"] == result["findings_actual"]:
+            declared_evidence = str(manifest.get("evidence_digest") or "")
+            if declared_evidence:
+                result["evidence_actual_digest"] = out.evidence_digest
+                result["evidence_replay_ok"] = out.evidence_digest == declared_evidence
+                if not result["evidence_replay_ok"]:
+                    result["ok"] = False
+                    result["reason"] = (
+                        "EVIDENCE DIGEST FAIL 重放实得 "
+                        f"{out.evidence_digest[:16]}… 与 manifest.evidence_digest "
+                        f"{declared_evidence[:16]}… 不一致")
+                    return result
+            if (not mismatched and result["findings_expected"] == result["findings_actual"]
+                    and result.get("evidence_replay_ok") is not False):
                 result["ok"] = True
-                result["reason"] = ("投影指纹、结论摘要与发现（未签认）条数逐项一致"
+                result["reason"] = ("投影指纹、结论摘要、证据定位摘要与发现（未签认）条数逐项一致"
                                     if expected_projection and omitted_fields
-                                    else "三元组与发现（未签认）条数逐项一致")
+                                    else "三元组、证据定位摘要与发现（未签认）条数逐项一致")
             else:
                 result["reason"] = (f"重放结果与包内三元组不一致：{mismatched or '发现（未签认）条数不同'}"
                                     f"（期望 {result['findings_expected']} 条 / 实得 "

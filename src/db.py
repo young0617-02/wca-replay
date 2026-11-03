@@ -543,6 +543,7 @@ def _finish_schema_init(conn: Connection) -> None:
     _migrate_org_unit_path(conn)
     _migrate_app_csrf(conn)
     _migrate_question_log_run_id(conn)
+    _migrate_finding_evidence(conn)
     set_meta(conn, "schema_version", SCHEMA_VERSION)
     set_meta(conn, "schema_digest", schema_digest())
 
@@ -588,6 +589,15 @@ def _migrate_audit_epoch(conn: Connection) -> None:
         conn.execute("ALTER TABLE audit_event ADD COLUMN rule_pack_version TEXT")
     if not column_exists(conn, "audit_event", "segment_id"):
         conn.execute("ALTER TABLE audit_event ADD COLUMN segment_id TEXT")
+
+
+def _migrate_finding_evidence(conn: Connection) -> None:
+    """旧库补 finding.evidence_json；旧结论保持空 evidence，不伪造定位元数据。"""
+    if not table_exists(conn, "finding"):
+        return
+    if not column_exists(conn, "finding", "evidence_json"):
+        conn.execute(
+            "ALTER TABLE finding ADD COLUMN evidence_json TEXT NOT NULL DEFAULT '{}'")
 
 
 def init_db_for(cfg: Config) -> Connection:

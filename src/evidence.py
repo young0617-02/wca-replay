@@ -26,6 +26,7 @@ from . import ENGINE_VERSION, producer, projection, signing
 from .config import Config, PROJECT_ROOT
 from .db import (DB_BACKEND_POSTGRES, Connection, column_exists, get_meta, set_meta,
                  table_exists, transaction_if_needed)
+from .evidence_digest import evidence_digest as compute_evidence_digest
 from .rules.approvals import export_approval_csv, export_coverage_csv
 from .rules.rulepack import RULE_PACK_V4, RULE_PACK_V5, RULE_PACK_V6
 from .util import (CN_TZ, CSV_FORMULA_ESCAPE, EVIDENCE_PACKAGE_SCHEMA,
@@ -453,6 +454,12 @@ PACKAGE_README = (
     "severity/metric/citations/explanation 九个规范字段；source_rel_path、source_line_no、"
     "severity_label 由 artifact_sha256[findings.csv] 负责。单个 FINDINGS DIGEST OK "
     "不等于整张 findings.csv 未变，必须同时看 ARTIFACTS OK。\r\n"
+    "evidence_digest 单独覆盖全部 finding 的 evidence 块（tables/window/rules/"
+    "aggregation，固定字段序、空值 null、路径 /），不进入 conclusion_digest；"
+    "只补/改证据定位注释时，只有 evidence_digest 变化。\r\n"
+    "input_fingerprint 是内容与范围指纹（输入文件内容/引用范围/规则参数），"
+    "inputs_digest 是包内 inputs/ 实际文件字节（已不含 run_id）；两者分工不同，"
+    "同一批输入跨 run 导包时 inputs_digest 应稳定一致。\r\n"
     "rule_version 是单条规则版本，不等于 rule pack 版本；v5 包可同时有 v4/v5 规则，"
     "分布见 manifest.counts.rule_versions 与包内 policies/RULE-PACK.md。\r\n"
 )
@@ -664,28 +671,28 @@ def _write_package_confidence(path, *, findings_count: int, final_count: int,
     path.write_text(base + block, encoding="utf-8")
 
 
-def _aggregate_violations(findings, file_paths: dict[int, str]) -> list[dict]:
-    """VIOLATION 中没有单行来源的，列出周期聚合口径，供未覆盖清单明示。"""
+def _aggregate_findings(findings) -> list[dict]:
+    """带 evidence 定位元数据的结论（第四轮实测 24 条：6 VIOLATION + 17 REVIEW + 1 DEFENSIBLE）。
+
+    筛选依据是 evidence 块非空，而不是严重级别或“有没有行号”；这样 QUAL/REG/SCOPE
+    这类同样没有单行来源、但事实来自台账/主数据的结论不会被误算进周期聚合清单。
+    """
     out: list[dict] = []
     for f in findings:
-        if str(f["severity"]) != "VIOLATION":
+        evidence = json.loads(f["evidence_json"] or "{}")
+        if not evidence:
             continue
-        refs = json.loads(f["source_refs"])
-        _path, line = _source_loc(refs, file_paths)
-        if line:
-            continue
-        metric = json.loads(f["metric_json"])
-        window = metric.get("evidence_window") if isinstance(
-            metric.get("evidence_window"), dict) else {}
+        window = evidence.get("window") if isinstance(evidence.get("window"), dict) else {}
         out.append({
+            "severity": str(f["severity"]),
             "rule_id": str(f["rule_id"]),
             "emp_id": str(f["emp_id"]),
             "period_key": str(f["period_key"] or f["work_date"] or ""),
-            "tables": metric.get("evidence_tables") or [],
+            "tables": evidence.get("tables") or [],
             "start": window.get("start"),
             "end": window.get("end"),
-            "rules": metric.get("evidence_rules") or [],
-            "aggregation": metric.get("evidence_aggregation") or "",
+            "rules": evidence.get("rules") or [],
+            "aggregation": evidence.get("aggregation") or "",
         })
     return out
 
@@ -697,6 +704,16 @@ def _not_covered_markdown(nc: dict, *, findings_count: int = 0,
     """把未覆盖清单渲染成给人读的 Markdown（数据来自 config/not_covered.json，不写死在代码里）。"""
     NL = chr(10)
     scope = nc["scope"]
+    labels = list(scope.get("cities_covered_labels") or [])
+    codes = [str(code) for code in (scope.get("cities_covered") or [])]
+    if labels and codes and len(labels) == len(codes):
+        city_text = "、".join(f"{label}（{code}）" for label, code in zip(labels, codes))
+    elif labels:
+        city_text = "、".join(labels)
+    elif codes:
+        city_text = "、".join(codes)
+    else:
+        city_text = "无"
     out = [
         "# 未覆盖清单（本期不做 / 未验证）",
         "",
@@ -708,8 +725,7 @@ def _not_covered_markdown(nc: dict, *, findings_count: int = 0,
         "- 覆盖工时制：" + str(scope["worktime_regimes_covered"]),
         "- 不覆盖工时制：" + str(scope["worktime_regimes_excluded"]),
         "  - 原因：" + str(scope["excluded_reason"]),
-        "- 覆盖城市：" + str(scope.get("cities_covered_labels") or scope.get("cities_covered"))
-        + "（清单见 config/region_profile.json）",
+        "- 覆盖城市：" + city_text,
         "- 金额：" + str(scope["money_outputs"]),
         "",
         "## 摘除的判据",
@@ -720,18 +736,26 @@ def _not_covered_markdown(nc: dict, *, findings_count: int = 0,
     out += [f"- {x}" for x in nc["known_limitations"]]
     out += ["", "## 未测项（不得当成已达成）", ""]
     out += [f"- {x}" for x in nc["not_tested"]]
-    out += ["", "## 周期聚合结论（无法定位到单行）", ""]
+    out += ["", "## 证据定位（非单行结论）", ""]
     if aggregate_findings:
+        counts = {severity: 0 for severity in ("VIOLATION", "REVIEW", "DEFENSIBLE")}
+        for item in aggregate_findings:
+            counts[item["severity"]] = counts.get(item["severity"], 0) + 1
+        out.append(
+            f"- 共 {len(aggregate_findings)} 条：VIOLATION {counts['VIOLATION']} / "
+            f"REVIEW {counts['REVIEW']} / DEFENSIBLE {counts['DEFENSIBLE']}。"
+            "以下每条都有 evidence 定位元数据，但仍是周期聚合/跨行事实，"
+            "无法定位到单行；复算须按下列表、区间与规则进行。")
         for item in aggregate_findings:
             out.append(
-                f"- `{item['rule_id']} / {item['emp_id']} / {item['period_key']}`："
-                "该结论为周期聚合，无法定位到单行；"
+                f"- `{item['severity']} / {item['rule_id']} / {item['emp_id']} / "
+                f"{item['period_key']}`：该结论为周期聚合，无法定位到单行；"
                 f"复算口径：表 {'/'.join(item['tables']) or '未知'}，"
                 f"区间 {item['start'] or '未知'}..{item['end'] or '未知'}，"
                 f"关联规则 {'/'.join(item['rules']) or item['rule_id']}；"
                 f"{item['aggregation'] or '按 metric_json 聚合值复算'}。")
     else:
-        out.append("- 无：本轮所有 VIOLATION 均有单行来源。")
+        out.append("- 无：本轮没有带 evidence 定位元数据的结论。")
     return NL.join(out) + NL
 
 
@@ -991,6 +1015,12 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
         "SELECT * FROM finding WHERE run_id = ? ORDER BY emp_id, work_date, rule_id", (run_id,)
     ).fetchall()
     file_paths = {int(f["file_id"]): str(f["rel_path"]) for f in files}
+    evidence_digest_value = compute_evidence_digest(
+        {"rule_id": f["rule_id"], "rule_version": f["rule_version"],
+         "emp_id": f["emp_id"], "work_date": f["work_date"],
+         "period_key": f["period_key"],
+         "evidence": json.loads(f["evidence_json"] or "{}")}
+        for f in findings)
 
     approval_source = "none"
     approval_meta: dict | None = None
@@ -1068,7 +1098,7 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
     nc_md.write_text(_not_covered_markdown(
         nc, findings_count=len(findings), final_count=len(resp["human_confirmations"]),
         rule_versions=_rule_version_counts(findings),
-        aggregate_findings=_aggregate_violations(findings, file_paths)))
+        aggregate_findings=_aggregate_findings(findings)))
     confidence_path = policies_dir / "CONFIDENCE.md"
     if not confidence_path.is_file():
         raise RuntimeError("缺少 policies/CONFIDENCE.md，无法生成按包计数")
@@ -1126,7 +1156,7 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
                      "warning_message": "", "critical_message": ""}
         omitted_fields = _apply_omissions(collected, work, omit_fields)
     inputs_manifest = work / INPUTS_MANIFEST_NAME
-    inputs_doc = {"schema": "wca-package-inputs-v1", "run_id": run_id,
+    inputs_doc = {"schema": "wca-package-inputs-v1",
                   "csv_formula_escape": CSV_FORMULA_ESCAPE,
                   "cap_bytes": EXPORT_INPUTS_MAX_BYTES,
                   "warn_bytes": EXPORT_INPUTS_WARN_BYTES,
@@ -1260,6 +1290,7 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
                    "reason": collected["reason"],
                    "replay_command": "python -m src.cli replay <本包.zip 或解包目录>"},
         "approval_source": approval_source,
+        "evidence_digest": evidence_digest_value,
         **({"inputs_digest": inputs_digest} if signing_key else {}),
         "artifacts": [p.name for p in (findings_csv, manifest_files, chain_json, issues_csv,
                                        conclusions_csv, resp_path, nc_path, nc_md)]
@@ -1337,16 +1368,20 @@ def _write_findings_csv(path: Path, findings, file_paths: dict[int, str]) -> Non
         w = csv.writer(fh, lineterminator="\n")
         w.writerow([
             "rule_id", "rule_version", "emp_id", "work_date", "period_key", "severity",
-            "severity_label", "citations", "metric_json", "source_rel_path", "source_line_no",
-            "explanation",
+            "severity_label", "citations", "metric_json", "evidence_json", "source_rel_path",
+            "source_line_no", "explanation",
         ])
         for f in findings:
             refs = json.loads(f["source_refs"])
             loc = _source_loc(refs, file_paths)
+            try:
+                evidence_json = f["evidence_json"]
+            except (KeyError, IndexError):
+                evidence_json = "{}"
             w.writerow(csv_safe_row([
                 f["rule_id"], f["rule_version"], f["emp_id"], f["work_date"], f["period_key"],
                 f["severity"], _sev_label(f["severity"]), f["citation_ids"], f["metric_json"],
-                loc[0], loc[1], f["explanation"],
+                evidence_json, loc[0], loc[1], f["explanation"],
             ]))
 
 
@@ -1511,6 +1546,8 @@ def signature_payload(manifest, audit_chain_head):
     if "artifacts_digest" in manifest or "verify_script_sha256" in manifest:
         payload["artifacts_digest"] = manifest.get("artifacts_digest")
         payload["verify_script_sha256"] = manifest.get("verify_script_sha256")
+    if "evidence_digest" in manifest:
+        payload["evidence_digest"] = manifest.get("evidence_digest")
     return payload
 
 

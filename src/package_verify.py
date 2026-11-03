@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 
 from . import producer, signing
+from .evidence_digest import evidence_digest as compute_evidence_digest
 from .util import (anchor_schema_version, canonical_json, csv_unescape_cell, digest_of,
                    evidence_schema_version, manifest_checksum, sha256_hex)
 
@@ -25,6 +26,8 @@ MANIFEST_FILE = "manifest.json"
 VERIFY_SCRIPT = "verify.py"
 VERIFY_REQUIREMENTS = "verify-requirements.txt"
 README_FILE = "README.txt"
+# 0.4.2 起新包必须有 evidence_digest；更早的包按旧包兼容路径记 NOT CHECKED。
+EVIDENCE_DIGEST_MIN_PRODUCER = (0, 4, 2)
 REQUIRED_ARTIFACTS = (
     "findings.csv", "input_files.csv", "quality_issues.csv",
     "conclusions_final.csv", "responsibility.json", "not_covered.json", "未覆盖清单.md",
@@ -277,6 +280,92 @@ def check_findings(root: Path, manifest: dict) -> dict:
             "final_rows": final_rows, "rule_versions": versions}
 
 
+def evidence_digest_from_findings(path: Path) -> tuple[str, int]:
+    """公开规范化算法：findings.csv 的 evidence_json -> evidence_digest。
+
+    `findings.csv` 必须有 `evidence_json` 列；解析失败/未知字段按失败关闭。
+    evidence 不进入 conclusion_digest，只用于这里的独立摘要。
+    """
+    with path.open("r", encoding="utf-8-sig", newline="") as fh:
+        reader = csv.DictReader(fh)
+        header = list(reader.fieldnames or [])
+        if "evidence_json" not in header:
+            raise ValueError("findings.csv 缺列：evidence_json")
+        records = []
+        for row in reader:
+            try:
+                evidence = json.loads(_unescape_text(row["evidence_json"]) or "{}")
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"findings.csv evidence_json 非法：{exc}") from exc
+            if not isinstance(evidence, dict):
+                raise ValueError("findings.csv evidence_json 必须是对象")
+            records.append({
+                "rule_id": _unescape_text(row["rule_id"]),
+                "rule_version": _unescape_text(row["rule_version"]),
+                "emp_id": _unescape_text(row["emp_id"]),
+                "work_date": _empty_to_none(row["work_date"]),
+                "period_key": _empty_to_none(row["period_key"]),
+                "evidence": evidence,
+            })
+    return compute_evidence_digest(records), len(records)
+
+
+def _producer_version(manifest: dict) -> tuple[int, ...] | None:
+    block = manifest.get("producer")
+    if not isinstance(block, dict):
+        return None
+    raw = str(block.get("version") or "").strip()
+    parts = raw.split(".")
+    if len(parts) < 2:
+        return None
+    try:
+        return tuple(int(part) for part in parts)
+    except ValueError:
+        return None
+
+
+def check_evidence(root: Path, manifest: dict) -> dict:
+    """核验 manifest.evidence_digest 与 findings.csv 的 evidence 块。
+
+    分档（写死，避免“缺字段也能过”）：
+      * manifest 有 evidence_digest：必须能重算且一致；缺列/解析失败/不一致 → FAIL；
+      * 缺失且 producer.version >= 0.4.2：新版本包失败关闭 → FAIL；
+      * 缺失且无 producer 或 producer.version < 0.4.2：旧包兼容路径 → NOT CHECKED，
+        不参与 RESULT OK；这是历史包没有该字段的事实，不是“检查通过”。
+    """
+    declared = manifest.get("evidence_digest")
+    version = _producer_version(manifest)
+    if declared is None:
+        if version is not None and version >= EVIDENCE_DIGEST_MIN_PRODUCER:
+            return {"ok": False, "legacy": False, "actual_digest": "", "rows": 0,
+                    "reason": ("EVIDENCE DIGEST FAIL 新版本包（producer.version="
+                               + ".".join(str(part) for part in version)
+                               + "）缺少 manifest.evidence_digest")}
+        return {"ok": True, "legacy": True, "actual_digest": "", "rows": 0,
+                "reason": ("旧包（producer.version < 0.4.2 或无 producer）无 "
+                           "manifest.evidence_digest；EVIDENCE DIGEST NOT CHECKED，"
+                           "不参与 RESULT OK")}
+    if not isinstance(declared, str) or not declared.strip():
+        return {"ok": False, "legacy": False, "actual_digest": "", "rows": 0,
+                "reason": "EVIDENCE DIGEST FAIL manifest.evidence_digest 为空或不是字符串"}
+    path = root / "findings.csv"
+    if not path.is_file():
+        return {"ok": False, "legacy": False, "actual_digest": "", "rows": 0,
+                "reason": "EVIDENCE DIGEST FAIL 包内缺少 findings.csv"}
+    try:
+        actual, rows = evidence_digest_from_findings(path)
+    except Exception as exc:
+        return {"ok": False, "legacy": False, "actual_digest": "", "rows": 0,
+                "reason": f"EVIDENCE DIGEST FAIL 无法重算 evidence_digest："
+                          f"{type(exc).__name__}: {exc}"}
+    if actual != declared.strip():
+        return {"ok": False, "legacy": False, "actual_digest": actual, "rows": rows,
+                "reason": "EVIDENCE DIGEST FAIL findings.csv 的 evidence 块与 "
+                          "manifest.evidence_digest 不一致"}
+    return {"ok": True, "legacy": False, "actual_digest": actual, "rows": rows,
+            "reason": ""}
+
+
 def _parse_expected_anchor(value: object) -> dict | None:
     if value in (None, ""):
         return None
@@ -386,15 +475,16 @@ def verify_package(package: Path | str, *, public_keys: list[str] | tuple[str, .
     """
     p = Path(package)
     check_names = ("manifest", "producer", "artifacts", "verify_script",
-                   "artifacts_digest_internal", "extras", "findings", "chain", "inputs",
-                   "signature", "signature_pinned", "anchor", "package_sha",
+                   "artifacts_digest_internal", "extras", "findings", "evidence", "chain",
+                   "inputs", "signature", "signature_pinned", "anchor", "package_sha",
                    "artifacts_digest_external")
     result = {
         "package": str(p), "schema": "", "manifest_schema_version": None, "run_id": "",
         "producer": {}, "producer_ok": True, "producer_reason": "",
         "manifest_checksum": "missing", "chain": {"ok": False, "reason": "未校验", "length": 0,
                                                    "head_hash": "", "checked": False},
-        "artifact": {}, "findings": {}, "inputs_digest": "", "inputs_digest_ok": False,
+        "artifact": {}, "findings": {}, "evidence": {}, "evidence_legacy": False,
+        "inputs_digest": "", "inputs_digest_ok": False,
         "signature_present": False, "signature_ok": False, "signature_trust": "none",
         "signature_key_id": "", "signature_reason": "", "signature_checked": False,
         "anchor_checked": False, "anchor_expected": bool(
@@ -488,6 +578,14 @@ def verify_package(package: Path | str, *, public_keys: list[str] | tuple[str, .
             if not findings["ok"]:
                 result["reason"] = findings["reason"]
                 return result
+            evidence = check_evidence(root, manifest)
+            result["evidence"] = evidence
+            result["evidence_legacy"] = bool(evidence.get("legacy"))
+            checks["evidence"] = ("OK" if evidence["ok"] and not evidence.get("legacy")
+                                  else ("NOT CHECKED" if evidence.get("legacy") else "FAIL"))
+            if not evidence["ok"]:
+                result["reason"] = evidence["reason"]
+                return result
             result["artifacts_digest"] = artifact["artifacts_digest"]
             checks["artifacts_digest_internal"] = artifact["digest_status"]
             if expect_artifacts_digest:
@@ -573,8 +671,13 @@ def verify_package(package: Path | str, *, public_keys: list[str] | tuple[str, .
                 result["reason"] = anchor_reason
                 return result
             internal_checks = ("manifest", "producer", "artifacts", "verify_script",
-                               "artifacts_digest_internal", "extras", "findings", "chain",
-                               "inputs")
+                               "artifacts_digest_internal", "extras", "findings", "evidence",
+                               "chain", "inputs")
+            if result.get("evidence_legacy"):
+                # 旧包没有 evidence_digest：按既有分档保留可验证性，但不把 NOT CHECKED
+                # 写成“检查通过”，也不让它参与 RESULT OK 门禁。
+                internal_checks = tuple(name for name in internal_checks
+                                        if name != "evidence")
             content_ok = all(checks[k] == "OK" for k in internal_checks) and \
                 checks["signature"] in ("OK", "NOT CHECKED")
             external_ok = (checks["signature_pinned"] == "OK"
@@ -593,7 +696,7 @@ def verify_package(package: Path | str, *, public_keys: list[str] | tuple[str, .
             if checks["artifacts_digest_external"] != "OK":
                 missing_external.append("外部 artifacts_digest")
             if result["ok"]:
-                result["reason"] = ("工件、发现摘要、链、输入与签名均一致；"
+                result["reason"] = ("工件、发现摘要、证据定位摘要、链、输入与签名均一致；"
                                     "外部 pin、锚点、包 SHA 与 artifacts_digest 均通过")
             elif result["partial"]:
                 result["reason"] = ("RESULT PARTIAL：内容检查通过，但缺少/未通过 "

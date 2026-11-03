@@ -99,6 +99,12 @@ def _readme(version: str, commit: str, wheel: str, build_time: str) -> str:
   period_key, severity, metric, citations, explanation` 九个规范字段；`source_rel_path`、
   `source_line_no`、`severity_label` 由 `artifact_sha256["findings.csv"]` 负责。
   **单个 `FINDINGS DIGEST OK` 不等于整张 `findings.csv` 未变**，必须同时 `ARTIFACTS OK`。
+- **证据定位摘要**：`evidence_digest` 单独覆盖全部 finding 的 `evidence` 块
+  （`tables/window/rules/aggregation`，固定字段序、空值 `null`、路径 `/`），**不进入**
+  `conclusion_digest`。0.4.2 起新包必须有该字段；旧包缺失按 `NOT CHECKED` 分档写明。
+- **两层输入摘要**：`input_fingerprint` 是内容与范围指纹（输入文件内容/引用范围/规则参数）；
+  `inputs_digest` 是包内 `inputs/` 实际文件字节（已不含 `run_id`）。同一批输入跨 run
+  导包，`inputs_digest` 应相同。
 - **规则版本**：`rule_version` 是单条规则版本，不等于 rule pack 版本；v5 包内可同时有
   v4/v5 规则，分布见 `manifest.counts.rule_versions` 与包内 `policies/RULE-PACK.md`。
 - **policies/ 用途**：包内 `policies/` 提供规则包定义（rule_id/版本/条文号/阈值/生效日期）、
@@ -151,9 +157,10 @@ py -3.12 -m venv .venv-clean
 ```
 
 期望：`MANIFEST CHECKSUM OK`、`ARTIFACTS OK`、`VERIFY SCRIPT OK`、`FINDINGS DIGEST OK`、
-`COUNTS 发现（未签认）... / 已确认结论 ...`、`CHAIN OK`、`INPUTS DIGEST OK`、
-`SIGNATURE OK / pinned`、`ANCHOR CHECK OK`、`RESULT OK`。它证明包字节、工件绑定、
-发现反算摘要、输入摘要、签名与外部锚点一致；**不证明结论正确**。
+`EVIDENCE DIGEST OK`、`COUNTS 发现（未签认）... / 已确认结论 ...`、`CHAIN OK`、
+`INPUTS DIGEST OK`、`SIGNATURE OK / pinned`、`ANCHOR CHECK OK`、`RESULT OK`。
+它证明包字节、工件绑定、发现反算摘要、证据定位摘要、输入摘要、签名与外部锚点一致；
+**不证明结论正确**。
 
 **`RESULT OK` 四项门禁**：签名 `pinned` + 外部锚点 + 外部 `package_sha256` + 外部
 `artifacts_digest` 必须同时通过；缺一项 → `RESULT PARTIAL`（exit 2），任一项不匹配 →
@@ -163,7 +170,10 @@ py -3.12 -m venv .venv-clean
 **`NOT CHECKED` / `SKIPPED` 含义**：`NOT CHECKED` 只表示早退时尚未走到该检查，
 **不等于“缺失/不符”**；已传入锚点但前序失败时输出 `ANCHOR SKIPPED (early exit)`，与
 “未提供锚点”的 `ANCHOR NOT CHECKED（未传外部锚点）` 彻底分开。`ARTIFACTS FAIL` 行会带具体
-失败文件名；`FINDINGS DIGEST OK` 会带后缀 `(9 fields; source_* not covered by digest)`。
+失败文件名；`FINDINGS DIGEST OK` 会带后缀 `(9 fields; source_* not covered by digest)`；
+`EVIDENCE DIGEST` 在 0.4.2 新包上必须是 `OK`，新版本包缺字段会 `FAIL` 失败关闭，
+无 producer 或 producer.version < 0.4.2 的旧包输出 `NOT CHECKED`（明确不参与 `RESULT OK`）。
+`input_fingerprint` 与 `inputs_digest` 的分工见上；`inputs_digest` 不含 `run_id`，跨 run 稳定。
 
 **anchor 文件与环境变量**：`anchor.json` 的 `packages` 是**对象**（key → 单包记录），不是数组；
 `--anchor-file` 只接受单包扁平 JSON（`anchor`/`package_sha256`/`artifacts_digest`），组合式
@@ -178,9 +188,9 @@ anchor 文件。
   --expect-package-sha256 <包SHA256> --expect-artifacts-digest <artifacts_digest>
 ```
 
-期望：`工件逐文件：OK`、`发现摘要：一致`、三元组逐项 `=`、
+期望：`工件逐文件：OK`、`发现摘要：一致`、`EVIDENCE DIGEST OK`、三元组逐项 `=`、
 `发现（未签认）`条数一致、`RESULT OK`。裁剪包会显示 `≠ input_fingerprint`（预期），
-但投影指纹与结论摘要必须一致。
+但投影指纹、结论摘要与证据定位摘要必须一致。
 
 ## 5. 版本核对（决定“该用哪个版本复算”）
 

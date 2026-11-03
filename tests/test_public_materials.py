@@ -100,25 +100,40 @@ def test_confidence_matches_manifest_and_not_covered_for_both_packages(conn, cfg
         )
 
 
-def _assert_violation_scope(manifest: dict, not_covered: str, findings: list[dict]) -> int:
+def _evidence_of(finding: dict) -> dict:
+    """新包读 evidence_json；第三轮旧包兼容读 metric 里的 evidence_* 键。"""
+    raw = finding.get("evidence_json")
+    if raw:
+        evidence = json.loads(raw)
+        if evidence:
+            return evidence
+    metric = json.loads(finding["metric_json"])
+    if metric.get("evidence_tables") or metric.get("evidence_window"):
+        return {
+            "tables": metric.get("evidence_tables") or [],
+            "window": metric.get("evidence_window") or {},
+            "rules": metric.get("evidence_rules") or [],
+            "aggregation": metric.get("evidence_aggregation") or "",
+        }
+    return {}
+
+
+def _assert_evidence_scope(manifest: dict, not_covered: str, findings: list[dict]) -> tuple[int, dict]:
     assert manifest["counts"]["findings"] == len(findings)
-    violations = [f for f in findings if f["severity"] == "VIOLATION"]
-    aggregate = []
-    for f in violations:
-        if f["source_line_no"]:
-            continue
-        metric = json.loads(f["metric_json"])
-        assert metric.get("evidence_tables") == ["punch.csv", "schedule.csv"], f
-        window = metric.get("evidence_window") or {}
-        assert window.get("start") and window.get("end"), f
-        assert metric.get("evidence_rules"), f
-        assert metric.get("evidence_aggregation"), f
-        aggregate.append(f)
+    aggregate = [f for f in findings if _evidence_of(f)]
+    severity_counts = {name: 0 for name in ("VIOLATION", "REVIEW", "DEFENSIBLE")}
     for f in aggregate:
+        evidence = _evidence_of(f)
+        assert evidence.get("tables") == ["punch.csv", "schedule.csv"], f
+        window = evidence.get("window") or {}
+        assert window.get("start") and window.get("end"), f
+        assert evidence.get("rules"), f
+        assert evidence.get("aggregation"), f
+        severity_counts[f["severity"]] = severity_counts.get(f["severity"], 0) + 1
         assert "该结论为周期聚合，无法定位到单行" in not_covered
         assert f["rule_id"] in not_covered
         assert f["emp_id"] in not_covered
-    return len(aggregate)
+    return len(aggregate), severity_counts
 
 
 def test_violations_have_line_or_aggregate_scope(conn, cfg, tmp_path):
@@ -126,18 +141,24 @@ def test_violations_have_line_or_aggregate_scope(conn, cfg, tmp_path):
     manifest, _confidence, not_covered, findings = _package_docs(confirmed_zip)
     violations = [f for f in findings if f["severity"] == "VIOLATION"]
     assert violations, "测试夹具应至少产生一条 VIOLATION"
-    _assert_violation_scope(manifest, not_covered, findings)
+    count, severity_counts = _assert_evidence_scope(manifest, not_covered, findings)
+    assert count >= 1
+    assert severity_counts["VIOLATION"] >= 1
 
 
-def test_handoff_package_has_7_violations_and_6_aggregate_scopes():
-    """本工作区的交接包实测：7 条 VIOLATION，6 条无法定位单行；缺包时跳过。"""
+def test_handoff_package_has_7_violations_and_24_aggregate_scopes():
+    """交接包实测：7 条 VIOLATION，24 条带 evidence 定位元数据（6/17/1）。"""
     import pytest
 
-    confirmed = next((ROOT / "handoff" / "20261104-第三轮整改").glob(
-        "package/confirmed-*.zip"), None)
+    fourth = ROOT / "handoff" / "20261104-第四轮整改"
+    confirmed = next((fourth.glob("package/confirmed-*.zip")), None)
     if confirmed is None:
-        pytest.skip("本工作区没有第三轮交接包，跳过 7 条 VIOLATION 实测")
+        pytest.skip("本工作区没有第四轮交接包，跳过 24 条证据定位实测")
     manifest, _confidence, not_covered, findings = _package_docs(confirmed)
     violations = [f for f in findings if f["severity"] == "VIOLATION"]
     assert len(violations) == 7
-    assert _assert_violation_scope(manifest, not_covered, findings) == 6
+    count, severity_counts = _assert_evidence_scope(manifest, not_covered, findings)
+    assert count == 24
+    assert severity_counts == {"VIOLATION": 6, "REVIEW": 17, "DEFENSIBLE": 1}
+    assert "共 24 条：VIOLATION 6 / REVIEW 17 / DEFENSIBLE 1" in not_covered
+    assert "config/region_profile.json" not in not_covered

@@ -266,6 +266,7 @@ CREATE TABLE IF NOT EXISTS finding (
     period_key         TEXT,
     severity           TEXT NOT NULL CHECK (severity IN ('DEFENSIBLE','REVIEW','VIOLATION')),
     metric_json        TEXT NOT NULL,   -- 全部整数分/分钟；确定性计算结果
+    evidence_json      TEXT NOT NULL DEFAULT '{}',  -- 证据定位元数据；不进 conclusion_digest
     citation_ids       TEXT NOT NULL,   -- JSON list of kb_doc.doc_id
     source_refs        TEXT NOT NULL,   -- JSON list of {"file_id","line_no"}
     explanation        TEXT NOT NULL

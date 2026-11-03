@@ -38,8 +38,10 @@ wca replay <包>.zip --public-key <固定公钥文件> --expect-anchor "<四/五
 python verify.py --public-key <固定公钥文件> --expect-anchor "<四/五段>"
 ```
 
-- `wca-verify` 期望：`MANIFEST CHECKSUM OK`、`ARTIFACTS OK`、`VERIFY SCRIPT OK`、`FINDINGS DIGEST OK`、`COUNTS 发现（未签认）... / 已确认结论 ...`、`CHAIN OK`、`INPUTS DIGEST OK`、`SIGNATURE OK / pinned`、`ANCHOR CHECK OK`、`RESULT OK`。它**不执行包内 `verify.py`**；包内脚本被替换会报 `VERIFY SCRIPT FAIL`。
-- `wca replay` 期望：`工件逐文件：OK`、`发现摘要：一致`、三元组逐项 `=`、`发现（未签认）` 条数一致、`RESULT OK`；裁剪包会显示 `≠ input_fingerprint`，这是预期。
+- `wca-verify` 期望：`MANIFEST CHECKSUM OK`、`ARTIFACTS OK`、`VERIFY SCRIPT OK`、`FINDINGS DIGEST OK`、`EVIDENCE DIGEST OK`、`COUNTS 发现（未签认）... / 已确认结论 ...`、`CHAIN OK`、`INPUTS DIGEST OK`、`SIGNATURE OK / pinned`、`ANCHOR CHECK OK`、`RESULT OK`。它**不执行包内 `verify.py`**；包内脚本被替换会报 `VERIFY SCRIPT FAIL`。
+- `wca replay` 期望：`工件逐文件：OK`、`发现摘要：一致`、`EVIDENCE DIGEST OK`、三元组逐项 `=`、`发现（未签认）` 条数一致、`RESULT OK`；裁剪包会显示 `≠ input_fingerprint`，这是预期。
+- **证据定位摘要（0.4.2）**：`evidence_digest` 覆盖全部 finding 的 `evidence`（tables/window/rules/aggregation，固定字段序、空值 `null`、路径 `/`），不进入 `conclusion_digest`；`wca-verify`/`replay` 从 `findings.csv.evidence_json` 重算。新版本包缺字段或重算不一致 → `EVIDENCE DIGEST FAIL`；无 `producer` 或 `producer.version < 0.4.2` 的旧包输出 `EVIDENCE DIGEST NOT CHECKED`，不参与 `RESULT OK`，这是历史兼容分档，不是“检查通过”。
+- **两层输入摘要**：`input_fingerprint` 是内容与范围指纹（输入文件内容/引用范围/规则参数）；`inputs_digest` 是包内 `inputs/` 实际文件字节（含 `inputs/manifest.json`，已不含 `run_id`）。同一批输入跨 run 导包，`inputs_digest` 应完全一致；这一点由 `tests/test_evidence_digest.py::test_inputs_digest_stable_across_runs_same_inputs` 断言。
 - **没有 `--expect-anchor`**：两个工具都输出 `ANCHOR NOT CHECKED` 与 `RESULT PARTIAL`（exit 2），不能当作验收通过；只传 `--expect-triple` 也只是 legacy 外部比对，仍不给 `RESULT OK`。
 - **四项门禁（0.4.1）**：`RESULT OK` 必须同时满足签名 `pinned`、外部锚点、外部
   `--expect-package-sha256`、外部 `--expect-artifacts-digest`；缺一项即 `RESULT PARTIAL`（exit 2），
@@ -458,9 +460,11 @@ sha256 `25ad007314b54a46f83afcda8c0905d8aaf796472d6c872f7cef5159daf996f1`。
   与“规则包冻结/切换日”，并说明规则包是不可变快照、不是按事件日期回溯适用；`CAP-M01` 与
   `CAP-W01` 补操作性代理/法律依据/保守性说明；`字段口径与条文依据-对外版.md` 增加 13 项存疑
   → 受影响 rule_id → 阈值/事实认定 → 处置的映射表。
-- 7 条 `VIOLATION` 中 6 条无单行来源：`CAP-W01`/`WK-W02`/`CAP-M01` 的 finding 增加
-  `evidence_tables`/`evidence_window`/`evidence_rules`/`evidence_aggregation`；
-  `未覆盖清单.md` 逐条写“该结论为周期聚合，无法定位到单行”并给区间/表/规则。
+- 7 条 `VIOLATION` 中 6 条无单行来源；另有 17 条 `REVIEW` 与 1 条 `DEFENSIBLE` 也带
+  evidence 定位元数据，共 **24 条**（6 VIOLATION + 17 REVIEW + 1 DEFENSIBLE）。
+  `CAP-W01`/`WK-W02`/`CAP-M01` 的 finding 增加 `evidence` 块；0.4.2 起该块不再放进 `metric`，
+  由 `evidence_digest` 独立覆盖；`未覆盖清单.md` 逐条写“该结论为周期聚合，无法定位到单行”
+  并给区间/表/规则。
 
 **交接包**：`handoff/20261104-第三轮整改/`，共 **18 个文件 / 512,843 字节**（其中
 `交付清单.txt` 覆盖的 17 个非自身文件合计 511,130 字节）。目录含两个包、`release/` 发行物副本、

@@ -247,7 +247,8 @@ def signature_payload(manifest: dict, audit_chain_head: str) -> dict:
     """签名对象；canonical JSON 后跨语言可复算。
 
     v2/v3 新包若带 `artifacts_digest` / `verify_script_sha256`，一并进入签名载荷；
-    修订前旧包没有这两个字段，继续用旧 7 字段载荷（避免历史签名失效）。
+    0.4.2 起若带 `evidence_digest`，再增加该字段。修订前旧包没有这些字段，
+    继续用旧载荷（避免历史签名失效）。
     """
     triple = manifest.get("triple") or {}
     payload = {
@@ -262,6 +263,8 @@ def signature_payload(manifest: dict, audit_chain_head: str) -> dict:
     if "artifacts_digest" in manifest or "verify_script_sha256" in manifest:
         payload["artifacts_digest"] = manifest.get("artifacts_digest")
         payload["verify_script_sha256"] = manifest.get("verify_script_sha256")
+    if "evidence_digest" in manifest:
+        payload["evidence_digest"] = manifest.get("evidence_digest")
     return payload
 
 

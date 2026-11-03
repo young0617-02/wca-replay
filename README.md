@@ -98,6 +98,14 @@ citations, explanation` 九个规范字段；`source_rel_path`、`source_line_no
 `artifact_sha256["findings.csv"]` 负责，**单个 `FINDINGS DIGEST OK` 不等于整张表未变**，必须同时看
 `ARTIFACTS OK`。
 
+**证据定位与两层输入摘要（0.4.2）**：`metric` 只保留数值与计量口径；证据定位元数据（表/区间/
+规则/聚合口径）放在 finding 的非 canonical `evidence` 块，由独立的 `evidence_digest` 覆盖，
+**不进入** `conclusion_digest`。v5 包里有 **24 条**带 evidence 的结论（6 VIOLATION + 17 REVIEW +
+1 DEFENSIBLE），逐条列在 `未覆盖清单.md` 的“证据定位（非单行结论）”一节。
+`input_fingerprint` 是内容与范围指纹；`inputs_digest` 是包内 `inputs/` 实际文件字节（已不含
+`run_id`）。同一批输入跨 run 导包，`inputs_digest` 必须相同；实测见
+`tests/test_evidence_digest.py::test_inputs_digest_stable_across_runs_same_inputs`。
+
 ## v4 历史结果（2026-10-08，规则包 `rp-2026.10.gd-pilot-standard.v4`）
 
 > 以下是 v4 时点的历史数字，**不是 v5 实测**；保留用于版本对照。
@@ -204,7 +212,8 @@ V1 → V1.1 优化的前后对照（含没达成的目标）在 [`reports/优化
    uv run python -m src.cli export --run <run_id> --signing-key var/keys/ed25519.key
    ```
    v3 的 `manifest.signature` 覆盖 schema、三元组、`inputs_digest`、`artifact_sha256`/
-   `artifacts_digest`/`verify_script_sha256`、`manifest_checksum` 与重算链头；`inputs_digest`
+   `artifacts_digest`/`verify_script_sha256`、`manifest_checksum` 与重算链头；0.4.2 起还覆盖
+   `evidence_digest`。`inputs_digest`
    覆盖 `inputs/` 下全部文件（含 `inputs/manifest.json`），所以换输入 CSV、只改登记表、增删文件
    都会被 `INPUTS FAIL` 发现。改 `findings.csv` 一条严重级别会被 `ARTIFACT FAIL` 发现；
    即使同步重算工件哈希/checksum 并重签，`FINDINGS DIGEST FAIL` 仍会因 findings 反算摘要不一致而拦下。

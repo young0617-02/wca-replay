@@ -36,6 +36,9 @@ class Finding:
     explanation: str
     citations: list[str] = field(default_factory=list)
     metric: dict = field(default_factory=dict)
+    # 证据定位元数据（tables/window/rules/aggregation）：非 canonical 字段，
+    # 不进入 conclusion_digest；由 evidence_digest 单独覆盖。
+    evidence: dict = field(default_factory=dict)
     source_refs: list[dict] = field(default_factory=list)
     work_date: str | None = None
     period_key: str | None = None
@@ -52,9 +55,21 @@ class Finding:
         return (
             run_id, self.rule_id, self.rule_version, self.emp_id, self.work_date, self.period_key,
             self.severity, json.dumps(self.metric, sort_keys=True, ensure_ascii=False),
+            json.dumps(self.evidence, sort_keys=True, ensure_ascii=False),
             json.dumps(sorted(self.citations), ensure_ascii=False),
             json.dumps(self.source_refs, ensure_ascii=False), self.explanation,
         )
+
+    def evidence_record(self) -> dict:
+        """evidence_digest 的输入记录；身份字段用于防止证据块串位。"""
+        return {
+            "rule_id": self.rule_id,
+            "rule_version": self.rule_version,
+            "emp_id": self.emp_id,
+            "work_date": self.work_date,
+            "period_key": self.period_key,
+            "evidence": self.evidence,
+        }
 
     def canonical(self) -> dict:
         """结论摘要用的规范形式：不含时间戳，重跑必须逐字节一致（A8）。"""

@@ -93,6 +93,13 @@ def _print_result(result: dict) -> None:
     if st("findings") == "OK":
         findings_detail += " (9 fields; source_* not covered by digest)"
     line("FINDINGS DIGEST", st("findings"), "findings", findings_detail)
+    evidence = result.get("evidence") or {}
+    if result.get("evidence_legacy"):
+        print("EVIDENCE DIGEST NOT CHECKED（旧包 producer.version < 0.4.2，无 "
+              "evidence_digest；不参与 RESULT OK）")
+    else:
+        evidence_detail = str(evidence.get("actual_digest") or "")
+        line("EVIDENCE DIGEST", st("evidence"), "evidence", evidence_detail)
     if findings.get("ok"):
         print(f"COUNTS 发现（未签认） {findings.get('rows', 0)} 条 / "
               f"已确认结论 {findings.get('final_rows', 0)} 条")

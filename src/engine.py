@@ -14,6 +14,7 @@ from . import ENGINE_VERSION
 from .config import Config
 from .db import Connection, Row, get_meta, insert_many, set_meta, transaction
 from .evidence import append_audit, conclusion_digest, genesis_of, input_fingerprint, set_genesis
+from .evidence_digest import evidence_digest as compute_evidence_digest
 from .observability import Timer
 from .rules.approvals import (approval_ledger_digest, coverage_ledger_digest,
                               load_approvals, load_coverage_approvals)
@@ -40,6 +41,7 @@ class CheckOutcome:
     findings: list[Finding] = field(default_factory=list)
     input_fingerprint: str = ""
     conclusion_digest: str = ""
+    evidence_digest: str = ""
     counts: dict[str, int] = field(default_factory=dict)
     elapsed_us: int = 0
     employees: int = 0
@@ -286,6 +288,8 @@ def run_check(conn: Connection, cfg: Config, *, start: date, end: date,
         findings = _dedupe_findings(findings)
         findings.sort(key=lambda f: (f.emp_id, f.work_date or "", f.period_key or "", f.rule_id))
         digest = conclusion_digest(findings)
+        evidence_digest_value = compute_evidence_digest(
+            f.evidence_record() for f in findings)
 
     counts = {SEV_DEFENSIBLE: 0, SEV_REVIEW: 0, SEV_VIOLATION: 0}
     for f in findings:
@@ -303,7 +307,8 @@ def run_check(conn: Connection, cfg: Config, *, start: date, end: date,
         for f in findings:
             conn.execute(
                 "INSERT INTO finding(run_id, rule_id, rule_version, emp_id, work_date, period_key, "
-                "severity, metric_json, citation_ids, source_refs, explanation) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                "severity, metric_json, evidence_json, citation_ids, source_refs, explanation) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 f.as_row(run_id),
             )
             if f.severity in (SEV_REVIEW, SEV_VIOLATION):
@@ -333,6 +338,7 @@ def run_check(conn: Connection, cfg: Config, *, start: date, end: date,
 
     return CheckOutcome(
         run_id=run_id, findings=findings, input_fingerprint=fingerprint, conclusion_digest=digest,
+        evidence_digest=evidence_digest_value,
         counts=counts, elapsed_us=timer.total_us(),
         employees=len(employees), days=total_days, warnings=warnings,
     )
