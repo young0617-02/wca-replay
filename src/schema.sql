@@ -376,6 +376,7 @@ CREATE TABLE IF NOT EXISTS kb_link (
 -- ---------------------------------------------------------------- 问答与可观测（F-010 / F-013）
 CREATE TABLE IF NOT EXISTS question_log (
     qid                 TEXT PRIMARY KEY,
+    run_id              TEXT,                     -- 归属最近一次校验 run；旧行可为 NULL
     asked_at            TEXT NOT NULL,
     actor_emp_id        TEXT NOT NULL,
     question            TEXT NOT NULL,

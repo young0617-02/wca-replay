@@ -175,7 +175,8 @@ def test_unsigned_findings_never_reach_the_conclusion_set(conn, cfg):
     with zipfile.ZipFile(cfg.packages_dir / f"{out.run_id}.zip") as zf:
         body = zf.read("conclusions_final.csv").decode("utf-8")
         assert body.strip().count(chr(10)) == 1, "结论集必须只有那一条已确认记录"
-        assert "rv1" in body and "4500" in body
+        assert "rv1" in body and "amount_cents_input" not in body
+        assert "4500" not in body, "金额只留在库/复核台，不进入举证包"
 
 
 def test_delivery_event_and_sign_alias_share_the_same_audit_bytes(conn, cfg):
@@ -293,7 +294,7 @@ def test_responsibility_block_separates_machine_and_human(conn, cfg):
     q = resp["ai_participation"][0]
     assert q["actor_emp_id"] == "T-STD" and q["provider"]
     assert q["gate_decision"] in ("ANSWERED", "EXPLAIN_ONLY", "ESCALATED")
-    assert resp["ai_participation_scope_note"], "问答留痕不按 run 切分，必须如实标明"
+    assert "本 run" in resp["ai_participation_scope_note"], "问答留痕必须标明按 run 过滤"
 
     assert resp["signed"] is False, "没签字就不能显示成已签发"
     export_package(conn, cfg, out.run_id)
@@ -301,4 +302,6 @@ def test_responsibility_block_separates_machine_and_human(conn, cfg):
         in_zip = json.loads(zf.read("responsibility.json").decode("utf-8"))
         assert in_zip["human_confirmed_findings"] == 1
         assert in_zip["ai_participation_count"] == 1
-        assert "8800" in json.dumps(in_zip, ensure_ascii=False), "人工金额要看得见是谁录的"
+        text = json.dumps(in_zip, ensure_ascii=False)
+        assert "amount_cents_input" not in text and "amount_entered_by" not in text
+        assert "8800" not in text, "金额只留在库/复核台，不进入举证包"

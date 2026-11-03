@@ -290,7 +290,8 @@ def test_conclusions_csv_escapes_formula_cells_without_changing_triple(conn, cfg
     row = rows[0]
     assert row["confirmed_by"] == "'@SUM(A1)"
     assert row["note"] == "'\t=cmd|' /C calc'!A0"
-    assert row["amount_cents_input"] == "4500", "正常金额字段不得被改写"
+    assert "amount_cents_input" not in row, "金额字段按 M-02 不再进入导出副本"
+    assert "amount_entered_by" not in row
     assert manifest["counts"]["final_conclusions"] == 1
     assert manifest["triple"] == {
         "rule_pack_version": cfg.rule_pack_id,

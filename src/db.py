@@ -542,6 +542,7 @@ def _finish_schema_init(conn: Connection) -> None:
     _migrate_audit_epoch(conn)
     _migrate_org_unit_path(conn)
     _migrate_app_csrf(conn)
+    _migrate_question_log_run_id(conn)
     set_meta(conn, "schema_version", SCHEMA_VERSION)
     set_meta(conn, "schema_digest", schema_digest())
 
@@ -569,6 +570,14 @@ def _migrate_org_unit_path(conn: Connection) -> None:
         conn.execute("ALTER TABLE org_unit ADD COLUMN org_path TEXT NOT NULL DEFAULT ''")
     if not column_exists(conn, "org_unit", "org_level"):
         conn.execute("ALTER TABLE org_unit ADD COLUMN org_level INTEGER NOT NULL DEFAULT 0")
+
+
+def _migrate_question_log_run_id(conn: Connection) -> None:
+    """旧库补 question_log.run_id；历史行保持 NULL，不猜归属、不重写问答内容。"""
+    if not table_exists(conn, "question_log"):
+        return
+    if not column_exists(conn, "question_log", "run_id"):
+        conn.execute("ALTER TABLE question_log ADD COLUMN run_id TEXT")
 
 
 def _migrate_audit_epoch(conn: Connection) -> None:

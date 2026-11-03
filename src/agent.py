@@ -314,13 +314,16 @@ class ComplianceAgent:
         # 问答落库（问题日志/span/复核单）与审计事件同事务：审计 append 失败时
         # 不让问题日志单独留下；并发 append 的 advisory lock 持有到本次提交。
         with transaction_if_needed(self.conn):
+            latest_run = self.conn.execute(
+                "SELECT run_id FROM run ORDER BY started_at DESC LIMIT 1").fetchone()
+            run_id = str(latest_run["run_id"]) if latest_run is not None else None
             self.conn.execute(
-                "INSERT INTO question_log(qid, asked_at, actor_emp_id, question, intent, tier, answer, "
+                "INSERT INTO question_log(qid, run_id, asked_at, actor_emp_id, question, intent, tier, answer, "
                 "confidence_permille, evidence_coverage_permille, gate_decision, needs_review, "
                 "citation_ids, numeric_tokens, allowed_numbers, provider, model, tokens_in_est, "
-                "tokens_out_est, tool_calls_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "tokens_out_est, tool_calls_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
-                    qid, kw["asked_at"], kw["actor_emp_id"], kw["question"], kw["plan"].intent,
+                    qid, run_id, kw["asked_at"], kw["actor_emp_id"], kw["question"], kw["plan"].intent,
                     _tier_of(kw["plan"].intent, bool(kw["retrieval"].hits)), kw["text"],
                     kw["confidence"], kw["coverage"], kw["gate"], int(needs_review),
                     json.dumps([c.doc_id for c in kw["citations"]], ensure_ascii=False),

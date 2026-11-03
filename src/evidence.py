@@ -494,12 +494,14 @@ def responsibility_block(conn: Connection, cfg: Config, run_id: str) -> dict:
         else:
             pending.append(entry)
 
-    ai_rows = conn.execute(
+    # 问答留痕只导出关联到本 run 的记录；旧库/升级前的行 run_id 为 NULL，
+    # 宁可少带也不把其他 run 的问答元数据混进本次举证包。
+    ai_rows = (conn.execute(
         "SELECT qid, asked_at, actor_emp_id, question, intent, gate_decision, citation_ids, "
         "       numeric_tokens, allowed_numbers, provider, model, needs_review "
-        "FROM question_log ORDER BY asked_at").fetchall() if _has_table(conn, "question_log") else []
-    # 问答留痕不按 run 过滤：它是"这台机器上 AI 参与过什么"的账，
-    # 与某一次校验结论没有一一对应关系，硬编成 per-run 反而是假的。
+        "FROM question_log WHERE run_id = ? ORDER BY asked_at", (run_id,)).fetchall()
+        if _has_table(conn, "question_log") and _has_column(conn, "question_log", "run_id")
+        else [])
     ai = [{"qid": a["qid"], "asked_at": a["asked_at"], "actor_emp_id": a["actor_emp_id"],
            "intent": a["intent"], "provider": a["provider"], "model": a["model"],
            "gate_decision": a["gate_decision"],
@@ -515,7 +517,7 @@ def responsibility_block(conn: Connection, cfg: Config, run_id: str) -> dict:
                      "且出口有数字白名单与重大事项拒诺两道闸；对外结论必须由具名人工确认。",
         "engine_only_outputs": ["分钟数", "法定倍数档位（千分位）", "规则 ID", "条文号", "原始行号"],
         "never_output": ["应付金额", "赔偿数额", "违法定性"],
-        "ai_participation_scope_note": "问答留痕为全仓范围（question_log 不按 run 切分）",
+        "ai_participation_scope_note": "问答留痕仅本 run 关联记录（question_log.run_id；历史 NULL 行不导出）",
         "ai_participation": ai,
         "ai_participation_count": len(ai),
         "human_confirmations": confirmed,
@@ -556,18 +558,30 @@ def sign_package(conn: Connection, cfg: Config, run_id: str, signed_by: str) -> 
     return record_delivery_event(conn, cfg, run_id, recorded_by=signed_by)
 
 
+# 导出产物最小化：金额与录入人只留在库/复核台，不进入举证包。
+EXPORT_REDACTED_REVIEW_FIELDS = ("amount_cents_input", "amount_entered_by")
+
+
+def _minimized_responsibility(resp: dict) -> dict:
+    """复制责任区块并去掉包内不应出现的金额/录入人字段；原 dict/数据库不动。"""
+    doc = dict(resp)
+    doc["human_confirmations"] = [
+        {k: v for k, v in item.items() if k not in EXPORT_REDACTED_REVIEW_FIELDS}
+        for item in resp["human_confirmations"]
+    ]
+    return doc
+
+
 def _write_conclusions_csv(path: Path, rows: list[dict]) -> None:
     """对外结论集：**只收已登记人工结论的条目**（US-RV-01★：无人工结论的异常不得进入）。"""
     with path.open("w", encoding="utf-8", newline="") as fh:
         w = csv.writer(fh, lineterminator="\n")
         w.writerow(["rule_id", "emp_id", "work_date", "period_key", "severity",
-                    "decision", "confirmed_by", "confirmed_at",
-                    "amount_cents_input", "amount_entered_by", "note"])
+                    "decision", "confirmed_by", "confirmed_at", "note"])
         for x in rows:
             w.writerow(csv_safe_row([
                 x["rule_id"], x["emp_id"], x["work_date"], x["period_key"], x["severity"],
-                x["decision"], x["confirmed_by"], x["confirmed_at"],
-                x.get("amount_cents_input"), x.get("amount_entered_by"), x.get("note"),
+                x["decision"], x["confirmed_by"], x["confirmed_at"], x.get("note"),
             ]))
 
 
@@ -898,12 +912,14 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
 
     # 5) 对外结论集：只收"已登记人工结论"的条目（US-RV-01★）
     resp = responsibility_block(conn, cfg, run_id)
+    # 导出副本去掉金额/录入人；库内 resp 仍保留，供复核台与责任审计使用。
+    export_resp = _minimized_responsibility(resp)
     conclusions_csv = work / "conclusions_final.csv"
-    _write_conclusions_csv(conclusions_csv, resp["human_confirmations"])
+    _write_conclusions_csv(conclusions_csv, export_resp["human_confirmations"])
 
     # 6) 责任区块（US-EX-02★）：机器做了什么、人确认了什么、谁签的字
     resp_path = work / "responsibility.json"
-    resp_doc = dict(resp)
+    resp_doc = dict(export_resp)
     resp_path.write_text(canonical_json(resp_doc) + chr(10), encoding="utf-8")
 
     # 7) 未覆盖清单（US-EX-03）：不覆盖什么，自己先说
