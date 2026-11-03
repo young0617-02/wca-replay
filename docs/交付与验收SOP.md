@@ -562,3 +562,45 @@ VIOLATION；`config/region_profile.json` 引用已清掉，城市改为内联标
 不是四段锚点的一部分；跨 run 稳定性只在同一临时 SQLite 库内实测；24 条中 17 REVIEW +
 1 DEFENSIBLE 不是已定性违规；法律实体性仍需外部审查；无可复现构建/第三方时间戳。
 
+## 12. 0.4.3 第五轮整改：evidence 外部五门禁与跨库 inputs_digest（2026-11-04）
+
+发行物：`dist/wca-replay-0.4.3/`，7 文件 **358,131 字节**；commit
+`980d18af7f3f4d352ea2f636cd8f7c35a3de0443`；wheel 312,501 字节，sha256
+`d2a6c0de4978d4381f0f2e19c4f65d2872f3e6bbfd5998c82b95b806579940e5`。干净 venv
+（`%TEMP%\wca-handoff-043\venv`）实测 `SHA256SUMS SIGNATURE OK` 与 5/5 文件哈希。
+
+**五项门禁**：新增 `--expect-evidence-digest`（`wca-verify`/`wca replay`）与环境变量
+`WCA_EXPECT_EVIDENCE_DIGEST`；`--anchor-file` 读取 `evidence_digest` 兜底。优先级显式 >
+环境变量 > 文件。新包缺证据字段/外部参数 → `RESULT PARTIAL`；错值 → `RESULT FAIL`；
+旧包无字段 → `EVIDENCE DIGEST NOT CHECKED`，**即使其余四项齐全也不得 `RESULT OK`**。
+签名者作恶或私钥失窃时，必须用包外 evidence 锚定，不能只看包内 manifest。
+
+**输入命名**：`inputs/manifest.json` entries 只保留 `rel_path/kind/sha256/bytes/row_count`；
+`file_id`/`arcname` 已移除，包内文件名由 `rel_path` 推导；`replay`/`verify`/包内
+`verify.py` 同步。同导入顺序新建空库重导：`inputs_digest aad527d1…` 与两包相同，
+`input_fingerprint 8b3b54a0…`、`evidence_digest 01cb5aeb…`、`conclusion_digest 01bd4403…`
+均相同。反向导入顺序探测（不交付包）：`inputs_digest` / `input_fingerprint` /
+`evidence_digest` 仍相同，但 `conclusion_digest` 变为 `db86083b…`，原因是 `QUAL-01/02`
+metric `line_refs` 仍含 DB `file_id`（4→3）；**这不是 inputs 不稳定**。
+
+**交接包**：`handoff/20261104-第五轮整改/`，20 个文件 / **610,268 字节**（`交付清单.txt`
+覆盖 19 个非自身文件 / 608,340 字节）。三包：
+
+| 包 | 字节 | SHA-256 | 发现/已确认 | `conclusion_digest` | `evidence_digest` | `inputs_digest` | `input_fingerprint` |
+|---|---|---|---|---|---|---|---|
+| engine-only | 72,966 | `61bb8243…` | 116 / 0 | `01bd4403…` | `01cb5aeb…` | `aad527d1…` | `8b3b54a0…` |
+| confirmed | 73,800 | `00229e09…` | 116 / 2 | `01bd4403…` | `01cb5aeb…` | `aad527d1…` | `8b3b54a0…` |
+| cross-db | 72,968 | `9b89e262…` | 116 / 0 | `01bd4403…` | `01cb5aeb…` | `aad527d1…` | `8b3b54a0…` |
+
+三包在仓库外干净 venv 用 0.4.3 wheel 的 `wca-verify`/`wca replay` 均 `RESULT OK`；
+五项外部门禁齐全才给完整通过。**交付方自测，不构成采信结论**。
+
+**测试**：离线 **543 passed / 8 skipped / 1 deselected**；带 PG **566 passed / 1 skipped /
+1 deselected**（相对第四轮 538/561 各 +5）。新增/修改
+`tests/test_package_binding.py`（28 项）与 `tests/test_evidence_digest.py`（9 项）。
+
+**仍不能证明**：旧包（producer < 0.4.3）会被 `PRODUCER FAIL` 拒收；`evidence_digest`
+不在四段锚点字符串内，必须额外传参数/单包 anchor 文件；跨库 `conclusion_digest` 仍受
+`QUAL-01/02` metric `file_id` 影响；24 条中 17 REVIEW + 1 DEFENSIBLE 不是已定性违规；
+法律实体性仍需外部审查；无可复现构建/第三方时间戳。
+

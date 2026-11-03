@@ -22,7 +22,7 @@ uv run python -m src.cli status                          # 用 `uv run` 就不�
 # 需求文档已同步修订到 v2.1：US-EV-01 / NFR-07 的验收命令就是上面这条（裁决 D-07）。
 # 下面所有命令都等价于先 `source .venv/bin/activate` 再 `python -m …`。
 uv run python -m src.cli all                             # 生成→导入→建库→校验→报表→举证包
-uv run python -m pytest tests/ -q -m "not llm"           # 538 passed / 8 skipped，无网络、无云凭证
+uv run python -m pytest tests/ -q -m "not llm"           # 543 passed / 8 skipped，无网络、无云凭证
 uv run python evals/judge.py --write-report              # 70 条评测集打分
 uv run python tools/mutation_test.py                     # 注入 31 个缺陷，看测试抓不抓得住
 uv run python tools/perf_probe.py --pg-url "$WCA_TEST_POSTGRES_URL" --employees 1000 --dense \
@@ -51,7 +51,7 @@ Web 界面与只读接口需要 FastAPI（没装时界面测试如实 skip，`py
 
 | 指标 | v5 实测 |
 |---|---|
-| 测试 | 离线 **538 passed / 8 skipped / 1 deselected**（`-m "not llm"`，2026-11-04 实测；相对第三轮基线 531 增加 7 项：`evidence_digest` 回到 `01bd4403…`、跨 run `inputs_digest`、单条 evidence 只改 evidence 摘要、删除 evidence 失败关闭、旧包 NOT CHECKED、24 条清单；含 Ed25519 签名/输入摘要 15 项、keygen 参数对账 1 项、Web 签名导出 1 项、数据最小化 2 项、两层指纹 5 项、五段锚点 5 项、producer 2 项、工件绑定/独立验算/坏包/四项门禁/早退状态/锚点文件 25 项 + 对外材料 4 项）；带 PG **561 passed / 1 skipped / 1 deselected**（2026-11-04 实测，`WCA_TEST_POSTGRES_URL` 指向维护库 `postgres`） |
+| 测试 | 离线 **543 passed / 8 skipped / 1 deselected**（`-m "not llm"`，2026-11-04 实测；相对第四轮基线 538 增加 5 项：五项门禁缺 evidence → PARTIAL、错值 → FAIL、env/显式优先级、replay 同样生效、旧包四门禁不得 RESULT OK、跨库 inputs 稳定）；带 PG **566 passed / 1 skipped / 1 deselected**（2026-11-04 实测，`WCA_TEST_POSTGRES_URL` 指向维护库 `postgres`） |
 | 评测（stub 离线） | 意图 Top-1 **70/70** · Hit@5 **37/37** · MRR **0.664** · 数值工具 **30/30** · 引用忠实 **70/70** · 错承诺 **0** · 越权召回 **0** |
 | 门禁分布 | ANSWERED 57 / EXPLAIN_ONLY 9 / REFUSED_ACL 3 / REFUSED_NO_EVIDENCE 1 |
 | 评测集 | 70 条（检索 29 / 数值 24 / 混合 17）；`sha256=2b8e91b1f44510c3…`；M-003 已最小改为 v5 REG-01 场景 |
@@ -98,13 +98,18 @@ citations, explanation` 九个规范字段；`source_rel_path`、`source_line_no
 `artifact_sha256["findings.csv"]` 负责，**单个 `FINDINGS DIGEST OK` 不等于整张表未变**，必须同时看
 `ARTIFACTS OK`。
 
-**证据定位与两层输入摘要（0.4.2）**：`metric` 只保留数值与计量口径；证据定位元数据（表/区间/
+**证据定位与两层输入摘要（0.4.3）**：`metric` 只保留数值与计量口径；证据定位元数据（表/区间/
 规则/聚合口径）放在 finding 的非 canonical `evidence` 块，由独立的 `evidence_digest` 覆盖，
 **不进入** `conclusion_digest`。v5 包里有 **24 条**带 evidence 的结论（6 VIOLATION + 17 REVIEW +
 1 DEFENSIBLE），逐条列在 `未覆盖清单.md` 的“证据定位（非单行结论）”一节。
+`evidence_digest` 是**第五项外部门禁**：`wca-verify`/`wca replay` 必须同时传
+`--expect-evidence-digest`（或单包 anchor 文件的 `evidence_digest`，环境变量
+`WCA_EXPECT_EVIDENCE_DIGEST` 可兜底）才能 `RESULT OK`；缺失 → `RESULT PARTIAL`，错值 →
+`RESULT FAIL`。签名者作恶或私钥失窃时，签名本身不再可信，必须靠包外 evidence 锚定。
 `input_fingerprint` 是内容与范围指纹；`inputs_digest` 是包内 `inputs/` 实际文件字节（已不含
-`run_id`）。同一批输入跨 run 导包，`inputs_digest` 必须相同；实测见
-`tests/test_evidence_digest.py::test_inputs_digest_stable_across_runs_same_inputs`。
+`run_id` 与 DB `file_id`；文件名由 `rel_path` 推导）。同一批输入跨 run/跨库导包，`inputs_digest`
+必须相同；实测见 `tests/test_evidence_digest.py::test_inputs_manifest_cross_database_stable`。
+`conclusion_digest` 可能因 `QUAL-01/02` metric 里的 DB `file_id` 不同而不同，不能误读成 inputs 不稳定。
 
 ## v4 历史结果（2026-10-08，规则包 `rp-2026.10.gd-pilot-standard.v4`）
 
@@ -212,19 +217,20 @@ V1 → V1.1 优化的前后对照（含没达成的目标）在 [`reports/优化
    uv run python -m src.cli export --run <run_id> --signing-key var/keys/ed25519.key
    ```
    v3 的 `manifest.signature` 覆盖 schema、三元组、`inputs_digest`、`artifact_sha256`/
-   `artifacts_digest`/`verify_script_sha256`、`manifest_checksum` 与重算链头；0.4.2 起还覆盖
-   `evidence_digest`。`inputs_digest`
+   `artifacts_digest`/`verify_script_sha256`、`manifest_checksum` 与重算链头；0.4.3 起还覆盖
+   `evidence_digest`，且 evidence 必须由包外参数/单包 anchor 文件额外锚定。`inputs_digest`
    覆盖 `inputs/` 下全部文件（含 `inputs/manifest.json`），所以换输入 CSV、只改登记表、增删文件
    都会被 `INPUTS FAIL` 发现。改 `findings.csv` 一条严重级别会被 `ARTIFACT FAIL` 发现；
    即使同步重算工件哈希/checksum 并重签，`FINDINGS DIGEST FAIL` 仍会因 findings 反算摘要不一致而拦下。
-   **包内自带公钥只能打印 `package self-check`（NOT source trust）**；只有包外固定公钥 pin 才打印
+   **包内自带公钥只能打印 `package self-check` (NOT source trust)**；只有包外固定公钥 pin 才打印
    `SIGNATURE OK (pinned ...)`。签名不证明结论正确，也不能防私钥持有人作恶；结论正确性仍要靠
    `wca replay` 证明。未配置私钥时仍导出 v2 无签名包，行为不变。
    交付时请把**四元组**另行记录在包外：`schema_version,rule_pack_version,input_fingerprint,
-   conclusion_digest`，并记录签名 `key_id`、包 SHA-256 与 `artifacts_digest`；事后用
-   `wca-verify ... --expect-anchor ... --public-key fixed.pub` 或
-   `wca replay ... --expect-anchor ... --public-key fixed.pub` 做外部锚点与验签；
-   环境变量 `WCA_EXPECT_ANCHOR` 等价。**不传 `--expect-anchor` 只给 `RESULT PARTIAL`（exit 2）**，
+   conclusion_digest`，并记录签名 `key_id`、包 SHA-256、`artifacts_digest` 与
+   `evidence_digest`（0.4.3 起为第五项外部门禁）；事后用
+   `wca-verify ... --expect-anchor ... --expect-evidence-digest ... --public-key fixed.pub` 或
+   `wca replay ...` 做外部锚点、证据摘要与验签；
+   环境变量 `WCA_EXPECT_ANCHOR` / `WCA_EXPECT_EVIDENCE_DIGEST` 等价。**不传 `--expect-anchor` 只给 `RESULT PARTIAL`（exit 2）**，
    不再静默放行；`--expect-triple` / `WCA_EXPECT_TRIPLE` 仍保留，但它**不约束 schema**，
    交付验收请用四元组，否则“伪装成 v1 旧包”的降级不会被发现。
    **交付验收必须两条一起跑**：`wca-verify` 校验包体完整性、工件绑定、审计链、输入逐文件哈希、
@@ -409,10 +415,10 @@ uv run python tools/start_services.py --json     # 机器可读结果（退出�
 | A3 ★ ACL 越权召回 0 | **已达成（离线实测）** | `tests/test_acl_retrieval.py` 断言打在候选集；评测 `acl_leak=0`；变异测试 M5（改成先召回再过滤）被捕获 |
 | A4 ★ 错承诺 0 | **已达成（离线实测）** | `tests/test_agent_guard.py`；评测 `wrong_commitment=0`；变异测试 M11 被捕获 |
 | A5 ★ 测试有鉴别力 | **已达成** | `python tools/mutation_test.py`：v4 时注入 20 捕获 20；v5 扩到 **31 注入 / 31 捕获**，还原 MD5 一致（工装自身曾报出一条**不存在的漏网**，修法与记录见 `reports/优化验证.md` 第四节的 `tools/mutation_test.py` 出处） |
-| A6 测试可跑且可复现 | **已达成** | v4 时点仓库副本 + **无 `.env`**，依赖走 `uv sync`：`uv run python -m src.cli all`（rc=0）→ `uv run python -m pytest tests/ -q -m "not llm"` = **197 passed / 1 deselected**（历史记录；当前工作区为 **538 passed / 8 skipped** 实测（相对第三轮 531 增加 7 项 evidence_digest/24 条测试），带 PG **561 passed / 1 skipped / 1 deselected**（2026-11-04 实测）；2026-11-04 新增 0.4.2 发行物干净 venv 演练：只装 wheel + 带哈希锁，在仓库外 venv 内建库/导出/`wca-verify`/`wca replay` 跑通，两个第四轮包 `RESULT OK`，`EVIDENCE DIGEST OK` 与 `SHA256SUMS.sig` 验签通过；但这**不是**全量 pytest 干净环境复跑，A6 仍按上述历史记录，不冒充复验）；三元组与本机库逐字符一致。需求文档已同步修订到 **v2.1**（US-EV-01/NFR-07 的验收命令改为 uv，裁决 D-07），所以这不是「实现偏离需求」，是需求本身按决定改了；换 uv 之前那一趟走的是 `pip install -r requirements.txt`，那段历史保留在 `reports/干净环境复跑.md`；
+| A6 测试可跑且可复现 | **已达成** | v4 时点仓库副本 + **无 `.env`**，依赖走 `uv sync`：`uv run python -m src.cli all`（rc=0）→ `uv run python -m pytest tests/ -q -m "not llm"` = **197 passed / 1 deselected**（历史记录；当前工作区为 **543 passed / 8 skipped** 实测（相对第四轮 538 增加 5 项五门禁/跨库输入测试），带 PG **566 passed / 1 skipped / 1 deselected**（2026-11-04 实测）；2026-11-04 新增 0.4.3 发行物干净 venv 演练：只装 wheel + 带哈希锁，在仓库外 venv 内对三个第五轮包执行 `wca-verify`/`wca replay`，五项外部门禁齐全才 `RESULT OK`；`SHA256SUMS.sig` 验签通过；但这**不是**全量 pytest 干净环境复跑，A6 仍按上述历史记录，不冒充复验）；三元组与本机库逐字符一致。需求文档已同步修订到 **v2.1**（US-EV-01/NFR-07 的验收命令改为 uv，裁决 D-07），所以这不是「实现偏离需求」，是需求本身按决定改了；换 uv 之前那一趟走的是 `pip install -r requirements.txt`，那段历史保留在 `reports/干净环境复跑.md`；
   且旧版 `export --sign-as → replay → 包内 verify.py` 整条复核链同一趟跑通（`reports/干净环境复跑.md`；历史记录；现独立验算用发行 wheel 的 `wca-verify`，包内 `verify.py` 只是便利脚本；旧命令名现为 `--record-delivery-as`，`--sign-as` 仍保留为迁移别名、非密码学签名） |
 | A7 行级可追溯 | **已达成** | `tests/test_ingest_quality.py` + 举证包 `findings.csv` 的 `source_rel_path/source_line_no` |
-| A8 举证包可复核 | **已达成** | `test_exported_package_reproduces_same_triple`（同输入重跑）+ `tests/test_replay.py`（**把包内输入喂回引擎逐项比三元组**，改输入必须报不一致）；`tests/test_signature.py` 15 项守住 v3 签名/输入摘要/结论集哈希/外部 pin/旧包兼容；`tests/test_projection.py` 5 项守住投影字段清单/裁剪/replay；`tests/test_anchor_projection.py` 5 项守住五段锚点；`tests/test_producer.py` 2 项守住 producer 版本指纹与 `PRODUCER FAIL` 失败关闭；`tests/test_package_binding.py` 25 项守住工件逐文件哈希/`artifacts_digest`/包内 `verify.py` 哈希/findings 反算摘要/额外文件失败关闭/七种坏包/四项门禁/早退状态/`--anchor-file` 兜底；`tests/test_evidence_digest.py` 7 项守住 `conclusion_digest` 回到 `01bd4403…`、跨 run `inputs_digest` 稳定、单条 evidence 只改 evidence 摘要、删除 evidence 失败关闭、旧包分档与 24 条清单；另 4 项守住结论集纪律、交付登记人入链、责任区块与未覆盖清单随包给出。2026-11-04 0.4.2 发行物干净 venv 实测：`wca-verify` 输出 `RESULT OK`（必须 pin + 锚点 + 包 SHA + artifacts_digest 四项齐全），`EVIDENCE DIGEST OK`、两个第四轮包 `wca replay` 三元组逐项 `=`，`SHA256SUMS.sig` 验签通过；`handoff/20261104-第四轮整改/` 的 engine-only（116 发现 / 0 确认）与 confirmed（116 / 2）两包也验通；包内 `policies/` 5 个文件纳入工件哈希/签名，`ARTIFACTS OK checked=14`；`未覆盖清单.md` 逐条列 24 条证据定位（6/17/1） |
+| A8 举证包可复核 | **已达成** | `test_exported_package_reproduces_same_triple`（同输入重跑）+ `tests/test_replay.py`（**把包内输入喂回引擎逐项比三元组**，改输入必须报不一致）；`tests/test_signature.py` 15 项守住 v3 签名/输入摘要/结论集哈希/外部 pin/旧包兼容；`tests/test_projection.py` 5 项守住投影字段清单/裁剪/replay；`tests/test_anchor_projection.py` 5 项守住五段锚点；`tests/test_producer.py` 2 项守住 producer 版本指纹与 `PRODUCER FAIL` 失败关闭；`tests/test_package_binding.py` 28 项守住工件逐文件哈希/`artifacts_digest`/包内 `verify.py` 哈希/findings 反算摘要/额外文件失败关闭/七种坏包/五项门禁/早退状态/`--anchor-file` 兜底/evidence 环境变量与显式优先级；`tests/test_evidence_digest.py` 9 项守住 `conclusion_digest` 回到 `01bd4403…`、跨 run/跨库 `inputs_digest` 稳定、单条 evidence 只改 evidence 摘要、删除 evidence 失败关闭、旧包分档与 24 条清单；另 4 项守住结论集纪律、交付登记人入链、责任区块与未覆盖清单随包给出。2026-11-04 0.4.3 发行物干净 venv 实测：三个第五轮包 `wca-verify` 输出 `RESULT OK`（必须五项外部门禁齐全），`EVIDENCE DIGEST OK ... / external=OK`，`wca replay` 三元组逐项 `=`；`handoff/20261104-第五轮整改/` 的 engine-only（116/0）、confirmed（116/2）、cross-db（116/0）三包也验通；包内 `policies/` 5 个文件纳入工件哈希/签名，`ARTIFACTS OK checked=14`；`未覆盖清单.md` 逐条列 24 条证据定位（6/17/1） |
 | A9 性能口径诚实 | **已达成** | `docs/口径声明.md` 每个数字标实测/设计值/未测；`tests/test_acceptance.py` 检查 |
 | A10 ★ 无虚假宣称 | **已达成** | `tests/test_acceptance.py::test_no_false_claims_in_docs_and_code` 扫 README/docs/src/evals/data，禁词命中数=0 |
 | A11 合成数据如实标注 | **部分** | 生成器与 README 已明示合成+seed；**「字段语义取得人事部门口径确认」这句不成立**（F-001 未完成，见下） |
