@@ -22,7 +22,7 @@ uv run python -m src.cli status                          # 用 `uv run` 就不�
 # 需求文档已同步修订到 v2.1：US-EV-01 / NFR-07 的验收命令就是上面这条（裁决 D-07）。
 # 下面所有命令都等价于先 `source .venv/bin/activate` 再 `python -m …`。
 uv run python -m src.cli all                             # 生成→导入→建库→校验→报表→举证包
-uv run python -m pytest tests/ -q -m "not llm"           # 530 passed / 8 skipped，无网络、无云凭证
+uv run python -m pytest tests/ -q -m "not llm"           # 531 passed / 8 skipped，无网络、无云凭证
 uv run python evals/judge.py --write-report              # 70 条评测集打分
 uv run python tools/mutation_test.py                     # 注入 31 个缺陷，看测试抓不抓得住
 uv run python tools/perf_probe.py --pg-url "$WCA_TEST_POSTGRES_URL" --employees 1000 --dense \
@@ -51,7 +51,7 @@ Web 界面与只读接口需要 FastAPI（没装时界面测试如实 skip，`py
 
 | 指标 | v5 实测 |
 |---|---|
-| 测试 | 离线 **530 passed / 8 skipped / 1 deselected**（`-m "not llm"`，2026-11-04 实测；含 Ed25519 签名/输入摘要 15 项、keygen 参数对账 1 项、Web 签名导出 1 项、数据最小化 2 项、两层指纹 5 项、五段锚点 5 项、producer 2 项、工件绑定/独立验算/坏包/四项门禁/早退状态/锚点文件 25 项）；带 PG **553 passed / 1 skipped / 1 deselected**（2026-11-04 实测，`WCA_TEST_POSTGRES_URL` 指向维护库 `postgres`） |
+| 测试 | 离线 **531 passed / 8 skipped / 1 deselected**（`-m "not llm"`，2026-11-04 实测；含 Ed25519 签名/输入摘要 15 项、keygen 参数对账 1 项、Web 签名导出 1 项、数据最小化 2 项、两层指纹 5 项、五段锚点 5 项、producer 2 项、工件绑定/独立验算/坏包/四项门禁/早退状态/锚点文件 25 项 + 对外材料 4 项）；带 PG **554 passed / 1 skipped / 1 deselected**（2026-11-04 实测，`WCA_TEST_POSTGRES_URL` 指向维护库 `postgres`） |
 | 评测（stub 离线） | 意图 Top-1 **70/70** · Hit@5 **37/37** · MRR **0.664** · 数值工具 **30/30** · 引用忠实 **70/70** · 错承诺 **0** · 越权召回 **0** |
 | 门禁分布 | ANSWERED 57 / EXPLAIN_ONLY 9 / REFUSED_ACL 3 / REFUSED_NO_EVIDENCE 1 |
 | 评测集 | 70 条（检索 29 / 数值 24 / 混合 17）；`sha256=2b8e91b1f44510c3…`；M-003 已最小改为 v5 REG-01 场景 |
@@ -400,10 +400,10 @@ uv run python tools/start_services.py --json     # 机器可读结果（退出�
 | A3 ★ ACL 越权召回 0 | **已达成（离线实测）** | `tests/test_acl_retrieval.py` 断言打在候选集；评测 `acl_leak=0`；变异测试 M5（改成先召回再过滤）被捕获 |
 | A4 ★ 错承诺 0 | **已达成（离线实测）** | `tests/test_agent_guard.py`；评测 `wrong_commitment=0`；变异测试 M11 被捕获 |
 | A5 ★ 测试有鉴别力 | **已达成** | `python tools/mutation_test.py`：v4 时注入 20 捕获 20；v5 扩到 **31 注入 / 31 捕获**，还原 MD5 一致（工装自身曾报出一条**不存在的漏网**，修法与记录见 `reports/优化验证.md` 第四节的 `tools/mutation_test.py` 出处） |
-| A6 测试可跑且可复现 | **已达成** | v4 时点仓库副本 + **无 `.env`**，依赖走 `uv sync`：`uv run python -m src.cli all`（rc=0）→ `uv run python -m pytest tests/ -q -m "not llm"` = **197 passed / 1 deselected**（历史记录；当前工作区为 **530 passed / 8 skipped** 实测（含 Ed25519 签名/输入摘要 15 项、keygen 参数对账 1 项、Web 签名导出 1 项、数据最小化 2 项、两层指纹 5 项、五段锚点 5 项、producer 2 项与工件绑定/独立验算/坏包/四项门禁/早退状态/锚点文件 25 项），带 PG **553 passed / 1 skipped / 1 deselected**（2026-11-04 实测）；2026-11-04 新增 0.4.1 发行物干净 venv 演练：只装 wheel + 带哈希锁，在仓库外 venv 内建库/导出/`wca-verify`/`wca replay` 跑通，七种坏包全部失败关闭，无公钥/无包 SHA/无锚点/无 artifacts digest 四种组合均 `RESULT PARTIAL`；但这**不是**全量 pytest 干净环境复跑，A6 仍按上述历史记录，不冒充复验）；三元组与本机库逐字符一致。需求文档已同步修订到 **v2.1**（US-EV-01/NFR-07 的验收命令改为 uv，裁决 D-07），所以这不是「实现偏离需求」，是需求本身按决定改了；换 uv 之前那一趟走的是 `pip install -r requirements.txt`，那段历史保留在 `reports/干净环境复跑.md`；
+| A6 测试可跑且可复现 | **已达成** | v4 时点仓库副本 + **无 `.env`**，依赖走 `uv sync`：`uv run python -m src.cli all`（rc=0）→ `uv run python -m pytest tests/ -q -m "not llm"` = **197 passed / 1 deselected**（历史记录；当前工作区为 **531 passed / 8 skipped** 实测（含 Ed25519 签名/输入摘要 15 项、keygen 参数对账 1 项、Web 签名导出 1 项、数据最小化 2 项、两层指纹 5 项、五段锚点 5 项、producer 2 项与工件绑定/独立验算/坏包/四项门禁/早退状态/锚点文件 25 项 + 对外材料 4 项），带 PG **554 passed / 1 skipped / 1 deselected**（2026-11-04 实测）；2026-11-04 新增 0.4.1 发行物干净 venv 演练：只装 wheel + 带哈希锁，在仓库外 venv 内建库/导出/`wca-verify`/`wca replay` 跑通，七种坏包全部失败关闭，无公钥/无包 SHA/无锚点/无 artifacts digest 四种组合均 `RESULT PARTIAL`；但这**不是**全量 pytest 干净环境复跑，A6 仍按上述历史记录，不冒充复验）；三元组与本机库逐字符一致。需求文档已同步修订到 **v2.1**（US-EV-01/NFR-07 的验收命令改为 uv，裁决 D-07），所以这不是「实现偏离需求」，是需求本身按决定改了；换 uv 之前那一趟走的是 `pip install -r requirements.txt`，那段历史保留在 `reports/干净环境复跑.md`；
   且旧版 `export --sign-as → replay → 包内 verify.py` 整条复核链同一趟跑通（`reports/干净环境复跑.md`；历史记录；现独立验算用发行 wheel 的 `wca-verify`，包内 `verify.py` 只是便利脚本；旧命令名现为 `--record-delivery-as`，`--sign-as` 仍保留为迁移别名、非密码学签名） |
 | A7 行级可追溯 | **已达成** | `tests/test_ingest_quality.py` + 举证包 `findings.csv` 的 `source_rel_path/source_line_no` |
-| A8 举证包可复核 | **已达成** | `test_exported_package_reproduces_same_triple`（同输入重跑）+ `tests/test_replay.py`（**把包内输入喂回引擎逐项比三元组**，改输入必须报不一致）；`tests/test_signature.py` 15 项守住 v3 签名/输入摘要/结论集哈希/外部 pin/旧包兼容；`tests/test_projection.py` 5 项守住投影字段清单/裁剪/replay；`tests/test_anchor_projection.py` 5 项守住五段锚点；`tests/test_producer.py` 2 项守住 producer 版本指纹与 `PRODUCER FAIL` 失败关闭；`tests/test_package_binding.py` 25 项守住工件逐文件哈希/`artifacts_digest`/包内 `verify.py` 哈希/findings 反算摘要/额外文件失败关闭/七种坏包/四项门禁/早退状态/`--anchor-file` 兜底；另 4 项守住结论集纪律、交付登记人入链、责任区块与未覆盖清单随包给出。2026-11-04 0.4.1 发行物干净 venv 实测：`wca-verify` 输出 `RESULT OK`（必须 pin + 锚点 + 包 SHA + artifacts_digest 四项齐全），七种坏包全部 `RESULT FAIL`，`wca replay` 三元组逐项 `=`；`handoff/20261104-第二轮整改/` 的 engine-only（116 发现 / 0 确认）与 confirmed（116 / 2）两包也验通；包内 `policies/` 5 个文件纳入工件哈希/签名，`ARTIFACTS OK checked=14`；发行物 `SHA256SUMS.sig` 实测验签通过 |
+| A8 举证包可复核 | **已达成** | `test_exported_package_reproduces_same_triple`（同输入重跑）+ `tests/test_replay.py`（**把包内输入喂回引擎逐项比三元组**，改输入必须报不一致）；`tests/test_signature.py` 15 项守住 v3 签名/输入摘要/结论集哈希/外部 pin/旧包兼容；`tests/test_projection.py` 5 项守住投影字段清单/裁剪/replay；`tests/test_anchor_projection.py` 5 项守住五段锚点；`tests/test_producer.py` 2 项守住 producer 版本指纹与 `PRODUCER FAIL` 失败关闭；`tests/test_package_binding.py` 25 项守住工件逐文件哈希/`artifacts_digest`/包内 `verify.py` 哈希/findings 反算摘要/额外文件失败关闭/七种坏包/四项门禁/早退状态/`--anchor-file` 兜底；另 4 项守住结论集纪律、交付登记人入链、责任区块与未覆盖清单随包给出。2026-11-04 0.4.1 发行物干净 venv 实测：`wca-verify` 输出 `RESULT OK`（必须 pin + 锚点 + 包 SHA + artifacts_digest 四项齐全），七种坏包全部 `RESULT FAIL`，`wca replay` 三元组逐项 `=`；`handoff/20261104-第三轮整改/` 的 engine-only（116 发现 / 0 确认）与 confirmed（116 / 2）两包也验通；包内 `policies/` 5 个文件纳入工件哈希/签名，`ARTIFACTS OK checked=14`；发行物 `SHA256SUMS.sig` 实测验签通过 |
 | A9 性能口径诚实 | **已达成** | `docs/口径声明.md` 每个数字标实测/设计值/未测；`tests/test_acceptance.py` 检查 |
 | A10 ★ 无虚假宣称 | **已达成** | `tests/test_acceptance.py::test_no_false_claims_in_docs_and_code` 扫 README/docs/src/evals/data，禁词命中数=0 |
 | A11 合成数据如实标注 | **部分** | 生成器与 README 已明示合成+seed；**「字段语义取得人事部门口径确认」这句不成立**（F-001 未完成，见下） |
@@ -497,4 +497,5 @@ Web 监听与 TLS 相关配置（默认值都在 `.env.example`）：
 5. 字段口径取自公开资料、**未经 HR 访谈核对**；跨零点归属与出差计时长无法规依据（参数为自设）；
 6. 界面只做到"能走完三条闭环的操作路径"：3 视图 + 最小登录，无美化、无图表、无响应式适配，
    会话与口令是本机演示用（真实企业要换目录服务与正式会话后端）。
+
 

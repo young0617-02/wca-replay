@@ -205,7 +205,7 @@ py -3.12 -m venv .venv-clean
 - **发现 vs 已确认结论**：`findings.csv` 行数对应 manifest `counts.findings`（未签认）；`conclusions_final.csv` 行数对应 `counts.final_conclusions`（已签认）。`wca-verify` 从 `findings.csv` 按公开规范化算法反算 `conclusion_digest`，输出 `FINDINGS DIGEST OK (9 fields; source_* not covered by digest)`；`wca replay` 也执行同一反算。
 - **摘要覆盖范围**：`conclusion_digest` 只覆盖 `rule_id`、`rule_version`、`emp_id`、`work_date`、`period_key`、`severity`、`metric`、`citations`、`explanation` 九个规范字段。`source_rel_path`、`source_line_no`、`severity_label` 不进摘要，由 `artifact_sha256["findings.csv"]` 负责。**单个 `FINDINGS DIGEST OK` 不等于整张表未变**，必须同时 `ARTIFACTS OK`；`ARTIFACTS FAIL` 行会带具体失败文件名（如 `findings.csv`）。
 - `manifest.counts.rule_versions` 记录单条规则的版本分布（例如 v4 规则 100 条、v5 规则 16 条）。**`rule_version` 是单条规则版本，不等于 rule pack 版本**；v5 包中保留未改判据的 v4 规则是预期，不是包版本漂移。
-- **policies/**：包内 `policies/` 含 `RULE-PACK.md`、`LAW-REFERENCES.md`、`口径声明-对外版.md`、`字段口径与条文依据-对外版.md`（13 项存疑逐条）、`CONFIDENCE.md`；全部进入 `artifact_sha256`/`artifacts_digest`/签名，0.4.0 包 `ARTIFACTS OK checked=14`。
+- **policies/**：包内 `policies/` 含 `RULE-PACK.md`、`LAW-REFERENCES.md`、`口径声明-对外版.md`、`字段口径与条文依据-对外版.md`（13 项存疑逐条）、`CONFIDENCE.md`；全部进入 `artifact_sha256`/`artifacts_digest`/签名，0.4.1 包 `ARTIFACTS OK checked=14`。
 - **锚点选择：部分通过，而非静默 OK**。`wca-verify` / `wca replay` 未传 `--expect-anchor` 时仍执行字节层检查，但输出 `ANCHOR NOT CHECKED` + `RESULT PARTIAL`（exit 2）；理由是：内部/预检仍需要看字节层结果，但对外验收必须有包外锚点，`PARTIAL` 明确阻断“没有锚点也算通过”。`--expect-triple` 只是 legacy 外部比对，不约束 schema，也不给 `RESULT OK`。
 - 锚点记录可另带 `package_sha256`（zip 字节 SHA-256）与 `artifacts_digest`（包根工件清单摘要）；用 `--expect-package-sha256` / `--expect-artifacts-digest` 传入，不匹配失败关闭。目录包不能比较 `package_sha256`。
 
@@ -387,8 +387,8 @@ RESULT OK
 
 ## 9. 复测与整改闭环（AUD-2026-11-04-001；0.3.0 历史）
 
-> 本节保留 0.3.0 复测口径。0.4.0 第二轮整改交接包是
-> `handoff/20261104-第二轮整改/`（四项门禁、两个包见 §10）；A–H 复测命令必须传齐
+> 本节保留 0.3.0 复测口径。0.4.1 第三轮整改交接包是
+> `handoff/20261104-第三轮整改/`（四项门禁、两个包见 §10）；A–H 复测命令必须传齐
 > 公钥、锚点、包 SHA、artifacts_digest 四项，缺一即 PARTIAL。
 
 0.3.0 复测交接包：`handoff/20261104-验收复测/`。它是 0.3.0 的**新批次**，不覆盖上一批
@@ -432,11 +432,11 @@ wca replay package/<包>.zip --public-key trusted-public-key.pub `
 - 复测方仍需自行构造 A–H 坏包并留存命令/输出/退出码；本交接包按要求不放源码、docs、reports、
   测试、数据库、私钥或旧版发行物。
 
-## 10. 0.4.0 四项门禁、policies 与两包交接实测（2026-11-04）
+## 10. 0.4.1 按包 CONFIDENCE、policies 内联与两包交接实测（2026-11-04）
 
-发行物：`dist/wca-replay-0.4.1/`，共 **343,956 字节**；commit
-`482c7c0260f8881022963bbabdb7f06d06acb7f7`；wheel 300,496 字节，
-sha256 `9fdb5404c9af0befdde200f45c753d7f6188c667440ac50065e5b80f8139b5ec`。
+发行物：`dist/wca-replay-0.4.1/`，共 **349,012 字节**；commit
+`cffce286a3018a71df1ee4a768242d55f36b4b97`；wheel 304,953 字节，
+sha256 `25ad007314b54a46f83afcda8c0905d8aaf796472d6c872f7cef5159daf996f1`。
 发行物增加 `SHA256SUMS.sig`（Ed25519，key_id
 `ed25519:5e797e1842cf49c7043ba238f2a085b08c87d0a49663440f989cdc7df9ee5bb6`）与
 `VERIFY-SIGNATURE.txt`；`SHA256SUMS` 覆盖除自身与 `.sig` 外的发行文件，签名已实测
@@ -449,15 +449,21 @@ sha256 `9fdb5404c9af0befdde200f45c753d7f6188c667440ac50065e5b80f8139b5ec`。
 中性表述 `pinned (key matches supplied pin; independent key_id verification not done)`，不再比
 `KEY-NOTE.txt` 更乐观；`RESULT OK` 只表示包内检查与四项外部比对通过，不是来源身份核验。
 `--anchor-file <单包 anchor.json>` 可一次提供 `anchor`/`package_sha256`/`artifacts_digest`，
-显式参数优先、文件兜底。
+显式参数优先、文件兜底；组合式 `anchor.json` 的 `packages` 是对象，不能直接用于单包验算。
 
-**policies 进包**：0.4.0 包 `ARTIFACTS OK checked=14`（9 个原工件 + 5 个 policies 文件）；
-`policies/` 纳入 `artifact_sha256`、`artifacts_digest` 与签名，并加入 allowlist，不会误报
-`EXTRA FILE`。`policies/字段口径与条文依据-对外版.md` 保留 13 项存疑逐条；`CONFIDENCE.md`
-标注成熟度/未定项。confirmed 包体从 0.3.0 的 55,876 字节增至 68,508 字节（engine-only 67,672；仅必要文本）。
+**0.4.1 对外材料修复**：
+- `policies/CONFIDENCE.md` 由导出器在文末写入“本包计数”（发现/已确认/`responsibility.signed`/
+  本包角色），不再写死“0 条”；engine-only 包实测 116/0，confirmed 包实测 116/2。
+- `policies/` 已无 `src/`、`docs/`、`REV-`、`data/` 内部引用；`RULE-PACK.md` 拆分“法律条文生效日”
+  与“规则包冻结/切换日”，并说明规则包是不可变快照、不是按事件日期回溯适用；`CAP-M01` 与
+  `CAP-W01` 补操作性代理/法律依据/保守性说明；`字段口径与条文依据-对外版.md` 增加 13 项存疑
+  → 受影响 rule_id → 阈值/事实认定 → 处置的映射表。
+- 7 条 `VIOLATION` 中 6 条无单行来源：`CAP-W01`/`WK-W02`/`CAP-M01` 的 finding 增加
+  `evidence_tables`/`evidence_window`/`evidence_rules`/`evidence_aggregation`；
+  `未覆盖清单.md` 逐条写“该结论为周期聚合，无法定位到单行”并给区间/表/规则。
 
-**交接包**：`handoff/20261104-第二轮整改/`，共 **18 个文件 / 499,078 字节**（其中
-`交付清单.txt` 覆盖的 17 个非自身文件合计 497,365 字节）。目录含两个包、`release/` 发行物副本、
+**交接包**：`handoff/20261104-第三轮整改/`，共 **18 个文件 / 512,843 字节**（其中
+`交付清单.txt` 覆盖的 17 个非自身文件合计 511,130 字节）。目录含两个包、`release/` 发行物副本、
 公钥、`anchor.json`/`anchor.txt`、单包 anchor JSON、`KEY-NOTE.txt` 与 `交付清单.txt`。
 **这是交付方自测，不构成采信结论**。
 
@@ -465,31 +471,25 @@ sha256 `9fdb5404c9af0befdde200f45c753d7f6188c667440ac50065e5b80f8139b5ec`。
 
 | 包 | 字节 | SHA-256 | `artifacts_digest` | 发现/已确认 | `responsibility.signed` |
 |---|---|---|---|---|---|
-| engine-only | 67,672 | `bd112ebc0ac9dd77217cb59c88257d6f46b770d80460a87596958b5aa38f17f4` | `1cfd209b47e44e8e700259f4c1b4943c4e1831f7f277771c0dfc0c8841124365` | 116 / 0 | false |
-| confirmed | 68,508 | `656a5658413580674f3db2c3dec86545bf9d5b7c7b235c7be17382ebbe9ca7be` | `773907ea9690635c14f076efa9750fa569d16491c61ba796e6a9679f4c163dad` | 116 / 2 | true |
+| engine-only | 71,729 | `765d9a51658804c23133acf7ca7651795202133f2be53632e1ef5613787dbad6` | `a37aca790f79f9c6d03bb3cca8bd54f18d61b120e2c33c0df69e6197df3262a6` | 116 / 0 | false |
+| confirmed | 72,544 | `191a704079b5181a068434214aafd61343961540a96977ae77785016ea5142e0` | `d7e675c2c8ac9233969f47013a45a04efb24c5193ce771bf27178533a3aebf8c` | 116 / 2 | true |
 
 两包同 run、同输入、同三元组；confirmed 多 2 条 `APPROVED`（`OT-D01 / E012`）与责任签署。
 锚点（两包相同）：
-`3,rp-2026.11.gd-pilot-standard.v5,8b3b54a09aa8ede51697b899ddf2d2e738262d6a612b9bee4e34037a6aa8456e,01bd44034d61a8ead8248a1b7845b794488b46a26424c488bb525ff0d25ac10a`；
-包签名 key_id `ed25519:a8f9a5cdb3c392d25e34e9866a8c72345d07cff7c4d77ea5da0bf865579fe7dc`。
+`3,rp-2026.11.gd-pilot-standard.v5,8b3b54a09aa8ede51697b899ddf2d2e738262d6a612b9bee4e34037a6aa8456e,9a767794d7efd59ba47bda0240e4f44e60c024d6076f236a6843bd6b31e9a8b7`；
+包签名 key_id `ed25519:671243c4f7b5cabc81a8025be1444b20ab19b4f289e1b0d4a6a6bc98ef469b28`。
 
-在仓库外 `%TEMP%\wca-handoff-040\venv`（新建 venv，只装本发行 wheel + 带哈希锁）实测，
-`import src` 指向 `site-packages`、`BUILD_COMMIT=482c7c0`：
+在仓库外 `%TEMP%\wca-handoff-041\venv`（新建 venv，只装本发行 wheel + 带哈希锁）实测，
+`import src` 指向 `site-packages`、`BUILD_COMMIT=cffce28`：
 
 ```text
-# engine-only
-ARTIFACTS OK checked=14
-ARTIFACTS DIGEST manifest-internal OK / external OK
-COUNTS 发现（未签认） 116 条 / 已确认结论 0 条
+# engine-only / confirmed：均 ARTIFACTS OK checked=14、ARTIFACTS DIGEST manifest-internal OK / external OK
+FINDINGS DIGEST OK 9a7677… (9 fields; source_* not covered by digest)
 SIGNATURE OK / pinned (key matches supplied pin; independent key_id verification not done)
-PACKAGE SHA256 ... / external=OK
+PACKAGE SHA256 … / external=OK
 ANCHOR CHECK OK
 RESULT OK
-replay: 已确认结论（包内）期望 0 / 实际 0 条；RESULT OK
-
-# confirmed
-COUNTS 发现（未签认） 116 条 / 已确认结论 2 条
-replay: 已确认结论（包内）期望 2 / 实际 2 条；RESULT OK
+replay: 发现（未签认）期望 116 / 实得 116；已确认结论期望 0 / 实际 0（engine）或 2 / 2（confirmed）
 ```
 
 **四种缺失组合（最终 wheel，confirmed 包）**：
@@ -508,7 +508,7 @@ replay: 已确认结论（包内）期望 2 / 实际 2 条；RESULT OK
 - **仍不能证明**：人工确认的业务正确性、确认人身份与审批权限；`replay` 不重建人工确认，只核对
   包内 `conclusions_final.csv` 行数与 manifest `counts.final_conclusions`。
 - `SHA256SUMS.sig` 只签 SHA256SUMS，不覆盖 `.sig` 自身；公钥/锚点/包 SHA 同时被替换仍会失守。
-- `producer.commit` 必须等于发行 wheel 的 `BUILD_COMMIT`（本发行物 `482c7c0`）；用旧提交导出的
-  0.4.0 开发包会被 `PRODUCER FAIL` 拒收，这是“同版本代码”核对，不是包损坏。
+- `producer.commit` 必须等于发行 wheel 的 `BUILD_COMMIT`（本发行物 `cffce28`）；用旧提交导出的
+  0.4.x 开发包会被 `PRODUCER FAIL` 拒收，这是“同版本代码”核对，不是包损坏。
 - 0.4.1 发行物与交接包均未入库；`dist/`、`handoff/` 已 gitignore。
 
