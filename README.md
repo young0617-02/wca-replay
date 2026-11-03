@@ -22,7 +22,7 @@ uv run python -m src.cli status                          # 用 `uv run` 就不�
 # 需求文档已同步修订到 v2.1：US-EV-01 / NFR-07 的验收命令就是上面这条（裁决 D-07）。
 # 下面所有命令都等价于先 `source .venv/bin/activate` 再 `python -m …`。
 uv run python -m src.cli all                             # 生成→导入→建库→校验→报表→举证包
-uv run python -m pytest tests/ -q -m "not llm"           # 490 passed / 8 skipped，无网络、无云凭证
+uv run python -m pytest tests/ -q -m "not llm"           # 495 passed / 8 skipped，无网络、无云凭证
 uv run python evals/judge.py --write-report              # 70 条评测集打分
 uv run python tools/mutation_test.py                     # 注入 31 个缺陷，看测试抓不抓得住
 uv run python tools/perf_probe.py --pg-url "$WCA_TEST_POSTGRES_URL" --employees 1000 --dense \
@@ -48,7 +48,7 @@ Web 界面与只读接口需要 FastAPI（没装时界面测试如实 skip，`py
 
 | 指标 | v5 实测 |
 |---|---|
-| 测试 | 离线 **490 passed / 8 skipped / 1 deselected**（`-m "not llm"`，2026-11-03 实测；含 Ed25519 签名/输入摘要 15 项、keygen 参数对账 1 项、Web 签名导出 1 项、数据最小化 2 项）；带 PG **513 passed / 1 skipped / 1 deselected**（2026-11-03 实测，`WCA_TEST_POSTGRES_URL` 指向维护库 `postgres`） |
+| 测试 | 离线 **495 passed / 8 skipped / 1 deselected**（`-m "not llm"`，2026-11-03 实测；含 Ed25519 签名/输入摘要 15 项、keygen 参数对账 1 项、Web 签名导出 1 项、数据最小化 2 项、两层指纹 5 项）；带 PG **518 passed / 1 skipped / 1 deselected**（2026-11-03 实测，`WCA_TEST_POSTGRES_URL` 指向维护库 `postgres`） |
 | 评测（stub 离线） | 意图 Top-1 **70/70** · Hit@5 **37/37** · MRR **0.664** · 数值工具 **30/30** · 引用忠实 **70/70** · 错承诺 **0** · 越权召回 **0** |
 | 门禁分布 | ANSWERED 57 / EXPLAIN_ONLY 9 / REFUSED_ACL 3 / REFUSED_NO_EVIDENCE 1 |
 | 评测集 | 70 条（检索 29 / 数值 24 / 混合 17）；`sha256=2b8e91b1f44510c3…`；M-003 已最小改为 v5 REG-01 场景 |
@@ -213,7 +213,11 @@ V1 → V1.1 优化的前后对照（含没达成的目标）在 [`reports/优化
    v1 旧包缺少时打印 `MANIFEST CHECKSUM MISSING` 并继续；schema 声称 v3 却缺签名直接失败；
    schema 缺失/未知按失败关闭处理。
    数据最小化：包内 `responsibility.json` / `conclusions_final.csv` 不导出人工金额与录入人（库/复核台保留）；
-   `question_log` 只带本 run 关联的问答，不再混入其他 run。输入 CSV 本轮不裁剪，见 `docs/数据最小化方案.md`。
+   `question_log` 只带本 run 关联的问答，不再混入其他 run。输入 CSV 默认不裁剪。
+   两层指纹：`inputs_digest + 签名` 管原始字节/来源；`projection_fingerprint + conclusion_digest`
+   管规则字段复算结论。受控开关 `export --omit-fields leave:paid`（默认关）才裁剪并写
+   `omitted_fields`；`replay` 用投影指纹判定，缺投影或字段不一致输出 `PROJECTION FAIL`。
+   详见 `docs/数据最小化方案.md`。
 3. **带 ACL 的制度问答**
    权限谓词在检索层下推（SQL 的 WHERE/JOIN），未授权条目**进不了候选集**；
    答案必须带可点开出处、证据覆盖率与置信度门禁；「该付多少加班费」这类重大事项**只解释规则、
@@ -267,6 +271,7 @@ worktime-compliance-agent/
 │   ├── anomaly.py                # F-006 分级 + 复核闭环
 │   ├── evidence.py               # F-007 hash 链 + 举证包
 │   ├── signing.py                # Ed25519 签名/验签、密钥文件与 pin
+│   ├── projection.py             # 两层指纹：规则字段 projection_fingerprint
 │   ├── kb/                       # F-008 语料 + F-009 ACL 谓词 + 分词
 │   ├── retrieve.py               # F-009 ACL 下推检索（BM25/exact/vector 降级）
 │   ├── llm.py                    # provider 抽象：stub / Ollama / 云 API
@@ -286,7 +291,7 @@ worktime-compliance-agent/
 │   ├── stop_services.py          # 一键优雅停止（含 --status）
 │   ├── mutation_test.py          # F-012 变异测试（MD5 基线校验 + 字节码缓存清理）
 │   └── perf_probe.py             # 性能探针：SQL/DB 调用计数 + 多次采样中位耗时（SQLite 副本或 PG 临时库）
-├── tests/                        # 收集 499 项；离线 490 passed / 8 skipped / 1 deselected：判据/质量门禁/ACL/守卫/接口/界面权限/城市档/启停/CLI 表面/重放/v5 规则/纪元/探针/三档输入预算/审批 P0/审批网页/全站 CSRF/CSRF 哈希/旧台账迁移/连接后库守卫/allow-active/v6/导入事务与并发/QUAL-DUP 汇总/首次切包事务/分块与降级/COPY 中断/并发 check 审计/流式读取与哈希/审计事务边界/同 run 导出锁/临时表清理/维护策略/依赖口径/数据库身份硬失败/report 原子写/配置路径/签名与验签/验收
+├── tests/                        # 收集 504 项；离线 495 passed / 8 skipped / 1 deselected：判据/质量门禁/ACL/守卫/接口/界面权限/城市档/启停/CLI 表面/重放/v5 规则/纪元/探针/三档输入预算/审批 P0/审批网页/全站 CSRF/CSRF 哈希/旧台账迁移/连接后库守卫/allow-active/v6/导入事务与并发/QUAL-DUP 汇总/首次切包事务/分块与降级/COPY 中断/并发 check 审计/流式读取与哈希/审计事务边界/同 run 导出锁/临时表清理/维护策略/依赖口径/数据库身份硬失败/report 原子写/配置路径/签名与验签/两层指纹/验收
 └── reports/                      # 评测结果.md、变异测试.md、优化验证.md、判据修订.md、
                                   # 性能探针.json、P0-闸门.md、异常报表 CSV
 ```
@@ -381,10 +386,10 @@ uv run python tools/start_services.py --json     # 机器可读结果（退出�
 | A3 ★ ACL 越权召回 0 | **已达成（离线实测）** | `tests/test_acl_retrieval.py` 断言打在候选集；评测 `acl_leak=0`；变异测试 M5（改成先召回再过滤）被捕获 |
 | A4 ★ 错承诺 0 | **已达成（离线实测）** | `tests/test_agent_guard.py`；评测 `wrong_commitment=0`；变异测试 M11 被捕获 |
 | A5 ★ 测试有鉴别力 | **已达成** | `python tools/mutation_test.py`：v4 时注入 20 捕获 20；v5 扩到 **31 注入 / 31 捕获**，还原 MD5 一致（工装自身曾报出一条**不存在的漏网**，修法与记录见 `reports/优化验证.md` 第四节的 `tools/mutation_test.py` 出处） |
-| A6 测试可跑且可复现 | **已达成** | v4 时点仓库副本 + **无 `.env`**，依赖走 `uv sync`：`uv run python -m src.cli all`（rc=0）→ `uv run python -m pytest tests/ -q -m "not llm"` = **197 passed / 1 deselected**（历史记录；当前工作区为 **490 passed / 8 skipped** 实测（含 Ed25519 签名/输入摘要 15 项、keygen 参数对账 1 项、Web 签名导出 1 项与数据最小化 2 项），带 PG **513 passed / 1 skipped / 1 deselected**（2026-11-03 实测）；未见新的干净环境复跑记录，不冒充 A6 复验）；三元组与本机库逐字符一致。需求文档已同步修订到 **v2.1**（US-EV-01/NFR-07 的验收命令改为 uv，裁决 D-07），所以这不是「实现偏离需求」，是需求本身按决定改了；换 uv 之前那一趟走的是 `pip install -r requirements.txt`，那段历史保留在 `reports/干净环境复跑.md`；
+| A6 测试可跑且可复现 | **已达成** | v4 时点仓库副本 + **无 `.env`**，依赖走 `uv sync`：`uv run python -m src.cli all`（rc=0）→ `uv run python -m pytest tests/ -q -m "not llm"` = **197 passed / 1 deselected**（历史记录；当前工作区为 **495 passed / 8 skipped** 实测（含 Ed25519 签名/输入摘要 15 项、keygen 参数对账 1 项、Web 签名导出 1 项、数据最小化 2 项与两层指纹 5 项），带 PG **518 passed / 1 skipped / 1 deselected**（2026-11-03 实测）；未见新的干净环境复跑记录，不冒充 A6 复验）；三元组与本机库逐字符一致。需求文档已同步修订到 **v2.1**（US-EV-01/NFR-07 的验收命令改为 uv，裁决 D-07），所以这不是「实现偏离需求」，是需求本身按决定改了；换 uv 之前那一趟走的是 `pip install -r requirements.txt`，那段历史保留在 `reports/干净环境复跑.md`；
   且 `export --sign-as → replay → 独立 verify.py` 整条复核链同一趟跑通（`reports/干净环境复跑.md`；旧命令名，现为 `--record-delivery-as`，`--sign-as` 仍保留为迁移别名、非密码学签名） |
 | A7 行级可追溯 | **已达成** | `tests/test_ingest_quality.py` + 举证包 `findings.csv` 的 `source_rel_path/source_line_no` |
-| A8 举证包可复核 | **已达成** | `test_exported_package_reproduces_same_triple`（同输入重跑）+ `tests/test_replay.py`（**把包内输入喂回引擎逐项比三元组**，改输入必须报不一致）；`tests/test_signature.py` 15 项守住 v3 签名/输入摘要/结论集哈希/外部 pin/旧包兼容；另 4 项守住结论集纪律、交付登记人入链、责任区块与未覆盖清单随包给出 |
+| A8 举证包可复核 | **已达成** | `test_exported_package_reproduces_same_triple`（同输入重跑）+ `tests/test_replay.py`（**把包内输入喂回引擎逐项比三元组**，改输入必须报不一致）；`tests/test_signature.py` 15 项守住 v3 签名/输入摘要/结论集哈希/外部 pin/旧包兼容；`tests/test_projection.py` 5 项守住投影字段清单/裁剪/replay；另 4 项守住结论集纪律、交付登记人入链、责任区块与未覆盖清单随包给出 |
 | A9 性能口径诚实 | **已达成** | `docs/口径声明.md` 每个数字标实测/设计值/未测；`tests/test_acceptance.py` 检查 |
 | A10 ★ 无虚假宣称 | **已达成** | `tests/test_acceptance.py::test_no_false_claims_in_docs_and_code` 扫 README/docs/src/evals/data，禁词命中数=0 |
 | A11 合成数据如实标注 | **部分** | 生成器与 README 已明示合成+seed；**「字段语义取得人事部门口径确认」这句不成立**（F-001 未完成，见下） |
