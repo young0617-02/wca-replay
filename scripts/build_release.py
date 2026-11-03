@@ -185,7 +185,7 @@ py -3.12 -m venv .venv-clean
   给出 key_id、公钥副本与一段可执行的验证代码。
 - `SHA256SUMS` 覆盖除自身与 `SHA256SUMS.sig` 之外的发行文件；`.sig` 是 detached，
   不会被自身覆盖。
-- 该签名只证明“SHA256SUMS 与私钥匹配”；**pinned 不等于来源可信**，仍须双方通过
+- 该签名只证明“SHA256SUMS 与私钥匹配”；**pinned 不等于来源身份已核验**，仍须双方通过
   独立渠道核验 key_id。
 - 本发行物只说明构建方法，**未实现/未验证可复现构建**；不声称 wheel 可逐字节重建。
 
@@ -283,7 +283,7 @@ def main(argv: list[str] | None = None) -> int:
             "public_key_b64": public_b64,
             "signed_file": "SHA256SUMS",
             "scope": "SHA256SUMS 覆盖除 SHA256SUMS.sig 与自身外的发行文件",
-            "note": "签名只证明 SHA256SUMS 与私钥匹配；来源可信需独立核验 key_id",
+            "note": "签名只证明 SHA256SUMS 与私钥匹配；来源身份需独立核验 key_id",
         }
     release_json = release_dir / "RELEASE.json"
     release_json.write_text(json.dumps(release, ensure_ascii=False, indent=2) + "\n",
@@ -306,7 +306,7 @@ def main(argv: list[str] | None = None) -> int:
             "  VerifyKey(base64.b64decode('" + public_b64 + "')).verify(sums, sig)\n"
             "  print('SHA256SUMS SIGNATURE OK')\n\n"
             "口径：pinned 只表示“与随附公钥副本匹配”；只有通过独立渠道核验 key_id 后，\n"
-            "才能说来源可信。本签名不证明构建可复现，也不证明 wheel 未被替换——\n"
+            "才能说来源身份已核验。本签名不证明构建可复现，也不证明 wheel 未被替换——\n"
             "SHA256SUMS.sig 只签 SHA256SUMS，SHA256SUMS 不包含自身与 .sig。\n",
             encoding="utf-8")
     sums = release_dir / "SHA256SUMS"
