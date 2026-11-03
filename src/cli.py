@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import date, datetime
 from pathlib import Path
@@ -271,14 +272,29 @@ def cmd_keygen(args) -> int:
 
 
 def cmd_replay(args) -> int:
+    from .package_verify import load_anchor_record
     from .replay import replay
 
+    record = {}
+    if getattr(args, "anchor_file", None):
+        try:
+            record = load_anchor_record(args.anchor_file)
+        except ValueError as exc:
+            print(f"ANCHOR FILE FAIL —— {exc}", file=sys.stderr)
+            return 1
+    # 显式参数优先；环境变量次之；anchor 文件兜底。
+    anchor = getattr(args, "expect_anchor", None) or os.environ.get("WCA_EXPECT_ANCHOR") \
+        or record.get("anchor")
+    package_sha = getattr(args, "expect_package_sha256", None) \
+        or record.get("package_sha256")
+    artifacts_digest = getattr(args, "expect_artifacts_digest", None) \
+        or record.get("artifacts_digest")
     res = replay(args.package, expect_triple=getattr(args, "expect_triple", None),
-                 expect_anchor=getattr(args, "expect_anchor", None),
+                 expect_anchor=anchor,
                  public_keys=getattr(args, "public_key", None),
                  require_signature=bool(getattr(args, "require_signature", False)),
-                 expect_package_sha256=getattr(args, "expect_package_sha256", None),
-                 expect_artifacts_digest=getattr(args, "expect_artifacts_digest", None))
+                 expect_package_sha256=package_sha,
+                 expect_artifacts_digest=artifacts_digest)
     if args.json:
         print(json.dumps(res, ensure_ascii=False, indent=2, sort_keys=True))
         if res.get("partial"):
@@ -363,7 +379,7 @@ def cmd_replay(args) -> int:
     elif res.get("anchor_checked"):
         print(f"  ANCHOR FAIL —— {res.get('reason')}")
     elif res.get("anchor_expected"):
-        print("  ANCHOR NOT CHECKED（早退，尚未走到锚点校验；不能算完整验收）")
+        print("  ANCHOR NOT CHECKED（早退，尚未走到锚点校验；非锚点缺失；不能算完整验收）")
     else:
         print("  ANCHOR NOT CHECKED（未传外部锚点；不能算完整验收）")
     if "actual_triple" not in res:
@@ -822,6 +838,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="包外记录的 zip 文件 SHA-256；目录形态无法比较")
     p.add_argument("--expect-artifacts-digest", dest="expect_artifacts_digest", default=None,
                    help="包外记录的 manifest.artifacts_digest（包根工件清单摘要）")
+    p.add_argument("--anchor-file", dest="anchor_file", default=None,
+                   help="单包 anchor JSON（anchor/package_sha256/artifacts_digest）；"
+                        "显式参数优先，文件兜底")
     p.add_argument("--public-key", action="append", default=None, dest="public_key",
                    help="外部固定公钥（文件路径或 Base64），可重复传入以支持轮换；"
                         "pin 只表示与供给公钥匹配，来源身份需独立渠道核验 key_id")

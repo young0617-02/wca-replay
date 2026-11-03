@@ -27,10 +27,12 @@ def _note(name: str, status: str, result: dict, checks: dict, early: bool) -> st
     if status != "NOT CHECKED":
         return ""
     if name in ("package_sha", "artifacts_digest_external"):
-        return "（早退，尚未走到外部比对）" if early else "（未传外部期望值）"
+        return ("（早退，尚未走到外部比对；非缺失）" if early
+                else "（未传外部期望值）")
     if name == "anchor":
         if result.get("anchor_expected"):
-            return "（早退，尚未走到锚点校验）" if early else "（未完成外部锚点校验）"
+            return ("（早退，尚未走到锚点校验；非锚点缺失）" if early
+                    else "（未完成外部锚点校验）")
         return "（未传外部锚点）"
     if name == "signature":
         if result.get("signature_checked"):
@@ -75,7 +77,8 @@ def _print_result(result: dict) -> None:
         digest_line += (f" expected={result.get('artifacts_digest_expected')} "
                         f"actual={result.get('artifacts_digest')}")
     elif external == "NOT CHECKED":
-        digest_line += ("（早退，尚未走到摘要比对）" if early else "（未传外部期望值）")
+        digest_line += ("（早退，尚未走到摘要比对；非缺失）" if early
+                        else "（未传外部期望值）")
     print(digest_line)
 
     line("EXTRA FILE", st("extras"), "extras",
@@ -140,9 +143,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--expect-triple", default=None,
                         help="外部三元组（legacy，不约束 schema）；也可用 WCA_EXPECT_TRIPLE")
     parser.add_argument("--expect-package-sha256", dest="expect_package_sha256", default=None,
-                        help="包外记录的 zip SHA-256")
+                        help="包外记录的 zip SHA-256（RESULT OK 必需）")
     parser.add_argument("--expect-artifacts-digest", dest="expect_artifacts_digest", default=None,
-                        help="包外记录的 manifest.artifacts_digest")
+                        help="包外记录的 manifest.artifacts_digest（RESULT OK 必需）")
+    parser.add_argument("--anchor-file", dest="anchor_file", default=None,
+                        help="单包 anchor JSON（anchor/package_sha256/artifacts_digest）；"
+                             "显式参数优先，文件兜底")
     parser.add_argument("--public-key", action="append", default=None, dest="public_keys",
                         help="外部固定公钥路径或 Base64，可重复；也可用 WCA_PUBLIC_KEY")
     parser.add_argument("--require-signature", action="store_true",
@@ -153,13 +159,20 @@ def main(argv: list[str] | None = None) -> int:
         os.environ.get("WCA_REQUIRE_SIGNATURE") or "").strip().lower() in (
             "1", "true", "yes", "on")
     try:
+        record = package_verify.load_anchor_record(args.anchor_file) \
+            if args.anchor_file else {}
+        # 显式参数优先；环境变量次之；anchor 文件兜底。
+        anchor = args.expect_anchor or os.environ.get("WCA_EXPECT_ANCHOR") \
+            or record.get("anchor")
+        package_sha = args.expect_package_sha256 or record.get("package_sha256")
+        artifacts_digest = args.expect_artifacts_digest or record.get("artifacts_digest")
         result = package_verify.verify_package(
             Path(args.package),
             public_keys=_public_keys(args.public_keys),
-            expect_anchor=args.expect_anchor,
+            expect_anchor=anchor,
             expect_triple=args.expect_triple,
-            expect_package_sha256=args.expect_package_sha256,
-            expect_artifacts_digest=args.expect_artifacts_digest,
+            expect_package_sha256=package_sha,
+            expect_artifacts_digest=artifacts_digest,
             require_signature=require_signature)
     except ValueError as exc:
         print(f"RESULT FAIL —— {exc}", file=sys.stderr)

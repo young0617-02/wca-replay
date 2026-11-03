@@ -770,16 +770,19 @@ def replay(package: Path | str, *, limits: ZipLimits | None = None,
             shutil.rmtree(work, ignore_errors=True)
         pinned_ok = result.get("signature_trust") == "pinned"
         external_ok = (pinned_ok and result.get("anchor_ok") is True
-                       and result.get("package_sha256_ok") is True)
+                       and result.get("package_sha256_ok") is True
+                       and result.get("artifacts_digest_ok") is True)
         result["partial"] = bool(result["ok"] and not external_ok)
         if result["partial"]:
             missing = []
             if not pinned_ok:
                 missing.append("外部公钥 pin")
-            if not result["anchor_checked"]:
+            if not result.get("anchor_ok"):
                 missing.append("外部锚点")
-            if not result["package_sha256_checked"]:
+            if not result.get("package_sha256_ok"):
                 missing.append("外部包 SHA-256")
+            if not result.get("artifacts_digest_ok"):
+                missing.append("外部 artifacts_digest")
             result["reason"] += ("；RESULT PARTIAL（缺少/未通过 " + "、".join(missing)
                                  + "，不能算完整验收）")
         return result

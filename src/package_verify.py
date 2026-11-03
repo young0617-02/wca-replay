@@ -299,6 +299,39 @@ def _parse_expected_anchor(value: object) -> dict | None:
     return result
 
 
+def load_anchor_record(path: Path | str) -> dict:
+    """读取单包 anchor 文件，作为显式参数的兜底。
+
+    支持扁平格式：`anchor`（四/五段字符串或 `anchor_segments` 数组）、
+    `package_sha256`、`artifacts_digest`。组合式 `anchor.json` 含多个包时，
+    不能直接用于单包验算，避免把 A 包的哈希套到 B 包。
+    """
+    p = Path(path)
+    if not p.is_file():
+        raise ValueError(f"anchor 文件不存在或不可读：{p}")
+    try:
+        doc = json.loads(p.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ValueError(f"anchor 文件不是合法 JSON：{type(exc).__name__}: {exc}") from exc
+    if not isinstance(doc, dict):
+        raise ValueError("anchor 文件必须是 JSON 对象")
+    if "packages" in doc:
+        raise ValueError("组合式 anchor.json 含多个包；请使用单包 anchor 文件，"
+                         "或显式传 --expect-anchor/--expect-package-sha256/"
+                         "--expect-artifacts-digest")
+    anchor = doc.get("anchor") or doc.get("expect_anchor")
+    segments = doc.get("anchor_segments") or doc.get("expected_anchor")
+    if not anchor and isinstance(segments, list):
+        anchor = ",".join(str(x).strip() for x in segments)
+    return {
+        "anchor": str(anchor).strip() if anchor else None,
+        "package_sha256": str(doc.get("package_sha256")
+                              or doc.get("expect_package_sha256") or "").strip() or None,
+        "artifacts_digest": str(doc.get("artifacts_digest")
+                                or doc.get("expect_artifacts_digest") or "").strip() or None,
+    }
+
+
 def _parse_expected_triple(value: object) -> dict | None:
     if value in (None, ""):
         return None
@@ -347,7 +380,8 @@ def verify_package(package: Path | str, *, public_keys: list[str] | tuple[str, .
                    require_signature: bool = False) -> dict:
     """独立验算入口；返回 ok/partial/reason 与各检查状态。不执行包内代码。
 
-    RESULT OK 的门禁：内容检查全通过 + 签名 pin 命中 + 外部锚点通过 + 外部包 SHA 通过。
+    RESULT OK 的门禁：内容检查全通过 + 签名 pin 命中 + 外部锚点通过 +
+    外部包 SHA 通过 + 外部 artifacts_digest 通过。
     任一外部项缺失/未通过 → PARTIAL（内容检查失败 → FAIL）。
     """
     p = Path(package)
@@ -545,7 +579,8 @@ def verify_package(package: Path | str, *, public_keys: list[str] | tuple[str, .
                 checks["signature"] in ("OK", "NOT CHECKED")
             external_ok = (checks["signature_pinned"] == "OK"
                            and checks["anchor"] == "OK"
-                           and checks["package_sha"] == "OK")
+                           and checks["package_sha"] == "OK"
+                           and checks["artifacts_digest_external"] == "OK")
             result["partial"] = content_ok and not external_ok
             result["ok"] = content_ok and external_ok
             missing_external = []
@@ -555,9 +590,11 @@ def verify_package(package: Path | str, *, public_keys: list[str] | tuple[str, .
                 missing_external.append("外部锚点")
             if checks["package_sha"] != "OK":
                 missing_external.append("外部包 SHA-256")
+            if checks["artifacts_digest_external"] != "OK":
+                missing_external.append("外部 artifacts_digest")
             if result["ok"]:
                 result["reason"] = ("工件、发现摘要、链、输入与签名均一致；"
-                                    "外部 pin、锚点与包 SHA 均通过")
+                                    "外部 pin、锚点、包 SHA 与 artifacts_digest 均通过")
             elif result["partial"]:
                 result["reason"] = ("RESULT PARTIAL：内容检查通过，但缺少/未通过 "
                                     + "、".join(missing_external))

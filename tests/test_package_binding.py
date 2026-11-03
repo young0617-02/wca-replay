@@ -122,14 +122,18 @@ def test_good_package_passes_independent_verify(conn, cfg, tmp_path):
     _out, zip_path, manifest, _key, pub = _build_signed(conn, cfg, tmp_path)
     anchor = _anchor(manifest)
     code, out = _verify(zip_path, "--public-key", str(pub), "--expect-anchor", anchor,
-                        "--expect-package-sha256", sha256_hex(zip_path.read_bytes()))
+                        "--expect-package-sha256", sha256_hex(zip_path.read_bytes()),
+                        "--expect-artifacts-digest", manifest["artifacts_digest"])
     assert code == 0, out
     assert "RESULT OK" in out and "pinned (key matches supplied pin" in out
     assert "来源可信" not in out, out
     assert "independent key_id verification not done" in out, out
     assert len(_lines_starting(out, "ARTIFACTS DIGEST")) == 1, out
-    res = replay(zip_path, expect_anchor=anchor, public_keys=[str(pub)])
+    res = replay(zip_path, expect_anchor=anchor, public_keys=[str(pub)],
+                 expect_package_sha256=sha256_hex(zip_path.read_bytes()),
+                 expect_artifacts_digest=manifest["artifacts_digest"])
     assert res["ok"], res["reason"]
+    assert res["partial"] is False, res["reason"]
     assert res["producer_ok"] is True
 
 
@@ -329,35 +333,84 @@ def test_package_sha_and_artifacts_digest_are_enforced(conn, cfg, tmp_path):
     assert not bad["ok"] and "PACKAGE SHA256 FAIL" in bad["reason"]
 
 
-def test_result_ok_requires_pin_anchor_and_package_sha(conn, cfg, tmp_path):
+def test_result_ok_requires_four_external_gates(conn, cfg, tmp_path):
     _out, zip_path, manifest, _key, pub = _build_signed(conn, cfg, tmp_path)
     anchor = _anchor(manifest)
     package_sha = sha256_hex(zip_path.read_bytes())
+    digest = manifest["artifacts_digest"]
 
     code, out = _verify(zip_path, "--public-key", str(pub), "--expect-anchor", anchor,
-                        "--expect-package-sha256", package_sha)
+                        "--expect-package-sha256", package_sha,
+                        "--expect-artifacts-digest", digest)
     assert code == 0 and "RESULT OK" in out, out
 
     no_key = _verify(zip_path, "--expect-anchor", anchor,
-                     "--expect-package-sha256", package_sha)
+                     "--expect-package-sha256", package_sha,
+                     "--expect-artifacts-digest", digest)
     assert no_key[0] != 0, no_key[1]
     assert "RESULT OK" not in no_key[1] and "RESULT PARTIAL" in no_key[1], no_key[1]
     assert "package self-check (NOT source trust)" in no_key[1], no_key[1]
     assert "external=OK" in no_key[1], no_key[1]
     assert "来源可信" not in no_key[1], no_key[1]
 
-    no_sha = _verify(zip_path, "--public-key", str(pub), "--expect-anchor", anchor)
+    no_sha = _verify(zip_path, "--public-key", str(pub), "--expect-anchor", anchor,
+                     "--expect-artifacts-digest", digest)
     assert no_sha[0] != 0, no_sha[1]
     assert "RESULT OK" not in no_sha[1] and "RESULT PARTIAL" in no_sha[1], no_sha[1]
     assert "PACKAGE SHA256" in no_sha[1] and "external=NOT CHECKED" in no_sha[1], no_sha[1]
     assert "PACKAGE SHA256 OK" not in no_sha[1], no_sha[1]
 
     no_anchor = _verify(zip_path, "--public-key", str(pub),
-                        "--expect-package-sha256", package_sha)
+                        "--expect-package-sha256", package_sha,
+                        "--expect-artifacts-digest", digest)
     assert no_anchor[0] != 0, no_anchor[1]
     assert "RESULT OK" not in no_anchor[1] and "RESULT PARTIAL" in no_anchor[1], no_anchor[1]
     anchor_line = next(line for line in no_anchor[1].splitlines() if "ANCHOR" in line)
     assert "NOT CHECKED" in anchor_line and "未传外部锚点" in anchor_line, anchor_line
+
+    no_digest = _verify(zip_path, "--public-key", str(pub), "--expect-anchor", anchor,
+                        "--expect-package-sha256", package_sha)
+    assert no_digest[0] != 0, no_digest[1]
+    assert "RESULT OK" not in no_digest[1] and "RESULT PARTIAL" in no_digest[1], no_digest[1]
+    assert "外部 artifacts_digest" in no_digest[1], no_digest[1]
+
+
+def test_anchor_file_fallback_and_explicit_priority(conn, cfg, tmp_path, capsys):
+    _out, zip_path, manifest, _key, pub = _build_signed(conn, cfg, tmp_path)
+    record = {
+        "anchor": _anchor(manifest),
+        "package_sha256": sha256_hex(zip_path.read_bytes()),
+        "artifacts_digest": manifest["artifacts_digest"],
+    }
+    anchor_file = tmp_path / "anchor-single.json"
+    anchor_file.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+
+    code, out = _verify(zip_path, "--public-key", str(pub),
+                        "--anchor-file", str(anchor_file))
+    assert code == 0 and "RESULT OK" in out, out
+
+    # 显式参数优先：文件里故意放错包 SHA，显式值正确时仍应通过。
+    bad_record = dict(record, package_sha256="0" * 64)
+    bad_file = tmp_path / "anchor-bad-sha.json"
+    bad_file.write_text(json.dumps(bad_record, ensure_ascii=False), encoding="utf-8")
+    code, out = _verify(zip_path, "--public-key", str(pub),
+                        "--anchor-file", str(bad_file),
+                        "--expect-package-sha256", record["package_sha256"])
+    assert code == 0 and "RESULT OK" in out, out
+
+    # 组合式 anchor.json 含多个包时必须拒绝，避免套错哈希。
+    combo = tmp_path / "anchor-combined.json"
+    combo.write_text(json.dumps({"packages": {"a": record}}, ensure_ascii=False),
+                     encoding="utf-8")
+    code, out = _verify(zip_path, "--public-key", str(pub),
+                        "--anchor-file", str(combo))
+    assert code != 0 and "组合式 anchor.json" in out, out
+
+    cli_code = cli.main(["replay", str(zip_path), "--public-key", str(pub),
+                         "--anchor-file", str(anchor_file)])
+    text = capsys.readouterr().out + capsys.readouterr().err
+    assert cli_code == 0, text
+    assert "RESULT OK" in text, text
 
 
 def test_early_failure_has_only_relevant_fail_labels(conn, cfg, tmp_path):
@@ -379,6 +432,8 @@ def test_early_failure_has_only_relevant_fail_labels(conn, cfg, tmp_path):
                   "ANCHOR NOT CHECKED"):
         line = next(line for line in out.splitlines() if label in line)
         assert "早退" in line, line
+    anchor_line = next(line for line in out.splitlines() if "ANCHOR NOT CHECKED" in line)
+    assert "非锚点缺失" in anchor_line, anchor_line
 
 
 def test_external_artifacts_digest_failure_shows_internal_ok(conn, cfg, tmp_path):
@@ -454,7 +509,9 @@ def test_relative_public_key_resolves_from_caller_cwd(conn, cfg, tmp_path, monke
     monkeypatch.chdir(tmp_path)
     code, out = _verify(zip_path, "--public-key", "pub.pub", "--expect-anchor",
                         _anchor(manifest), "--expect-package-sha256",
-                        sha256_hex(zip_path.read_bytes()), cwd=tmp_path)
+                        sha256_hex(zip_path.read_bytes()),
+                        "--expect-artifacts-digest", manifest["artifacts_digest"],
+                        cwd=tmp_path)
     assert code == 0, out
     assert "pinned (key matches supplied pin" in out, out
 
@@ -486,7 +543,8 @@ def test_policies_are_in_package_and_hashed(conn, cfg, tmp_path):
     assert policy_names <= names, names
     code, out = _verify(zip_path, "--public-key", str(pub),
                         "--expect-anchor", _anchor(manifest),
-                        "--expect-package-sha256", sha256_hex(zip_path.read_bytes()))
+                        "--expect-package-sha256", sha256_hex(zip_path.read_bytes()),
+                        "--expect-artifacts-digest", manifest["artifacts_digest"])
     assert code == 0, out
     assert "ARTIFACTS OK checked=14" in out, out
 
@@ -507,7 +565,8 @@ def test_terminology_separates_findings_from_final_conclusions(conn, cfg, tmp_pa
     _out, zip_path, manifest, _key, pub = _build_signed(conn, cfg, tmp_path)
     cli_code = cli.main(["replay", str(zip_path), "--public-key", str(pub),
                          "--expect-anchor", _anchor(manifest),
-                         "--expect-package-sha256", sha256_hex(zip_path.read_bytes())])
+                         "--expect-package-sha256", sha256_hex(zip_path.read_bytes()),
+                         "--expect-artifacts-digest", manifest["artifacts_digest"]])
     text = capsys.readouterr().out + capsys.readouterr().err
     assert cli_code == 0, text
     assert "发现（未签认）" in text
