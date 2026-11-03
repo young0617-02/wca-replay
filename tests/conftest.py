@@ -25,7 +25,11 @@ RULE_PACK = "rp-2026.10.gd-pilot-standard.v4"
 def cfg(tmp_path: Path) -> Config:
     return Config.load(
         env_path=tmp_path / "nonexistent.env",
+        # 单元测试固定走 SQLite 临时库：PG 集成用例在 test_postgres_integration.py 单独跑，
+        # 不让本机 .env 的 WCA_DB_BACKEND 改变离线基线。
+        WCA_DB_BACKEND="sqlite",
         WCA_DB_PATH=str(tmp_path / "test.sqlite3"),
+        WCA_DB_IDENTITY_PATH=str(tmp_path / "db_target.json"),
         WCA_DATA_DIR=str(tmp_path / "data"),
         WCA_REPORTS_DIR=str(tmp_path / "reports"),
         WCA_PACKAGES_DIR=str(tmp_path / "packages"),

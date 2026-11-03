@@ -2,12 +2,259 @@
 
 from __future__ import annotations
 
+import csv
+import io
+import json
+import logging
+from dataclasses import replace
 from datetime import date
 
+import pytest
+
+import src.ingest as ingest
 from conftest import load_base, punch
 from src.engine import run_check
 from src.ingest import import_csv_file, import_rows
 from src.util import sha256_hex
+
+
+def test_sqlite_import_abort_rolls_back_raw_file_and_punch(conn, cfg, tmp_path, monkeypatch):
+    """SQLite：导入事务内异常必须同时回滚 raw_file 与 punch（不是只回滚派生行）。"""
+    load_base(conn, cfg)
+    before_raw = int(conn.execute("SELECT COUNT(*) c FROM raw_file").fetchone()["c"])
+    path = tmp_path / "punch.csv"
+    path.write_text("emp_id,event_ts,punch_type,device_id\n"
+                    "T-STD,2025-09-01T09:00:00+08:00,in,DEV-1\n"
+                    "T-STD,2025-09-01T18:00:00+08:00,out,DEV-1\n", encoding="utf-8")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated audit failure after ingest writes")
+
+    monkeypatch.setattr(ingest, "append_audit", boom)
+    with pytest.raises(RuntimeError, match="simulated audit failure"):
+        ingest.import_csv_file(conn, cfg, path, kind="punch", rel_path="punch.csv")
+    assert int(conn.execute("SELECT COUNT(*) c FROM punch").fetchone()["c"]) == 0
+    assert int(conn.execute("SELECT COUNT(*) c FROM raw_file").fetchone()["c"]) == before_raw
+    assert int(conn.execute("SELECT COUNT(*) c FROM ingest_issue").fetchone()["c"]) == 0
+
+
+def test_sqlite_crash_retry_matches_normal_import_triple(conn, cfg, monkeypatch):
+    """SQLite：中断回滚后重跑同一文件，指纹/摘要/结论条数与正常导入一致。
+
+    数据里专门放一条同时点同类型、不同设备的打卡（OFF-01 冲突），
+    因为冲突结论的 metric 会写入 source file_id；只有 file_id 也稳定，摘要才可能一致。
+    """
+    load_base(conn, cfg)
+    rows = [
+        punch("T-STD", "2025-09-02T09:00:00+08:00", "in", "DEV-1"),
+        punch("T-STD", "2025-09-02T18:00:00+08:00", "out", "DEV-1"),
+        punch("T-STD", "2025-09-02T18:00:00+08:00", "out", "DEV-2"),
+    ]
+    expected = import_rows(conn, cfg, "punch", rows, rel_path="inline://sqlite-crash-retry")
+    expected_out = run_check(conn, cfg, start=date(2025, 9, 2), end=date(2025, 9, 2),
+                             notes="sqlite crash expected")
+    file_id = expected.file_id
+    before_raw = int(conn.execute("SELECT COUNT(*) c FROM raw_file").fetchone()["c"]) - 1
+    conn.execute("DELETE FROM punch WHERE source_file_id = ?", (file_id,))
+    conn.execute("DELETE FROM ingest_issue WHERE file_id = ?", (file_id,))
+    conn.execute("DELETE FROM raw_file WHERE file_id = ?", (file_id,))
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated crash after sqlite ingest writes")
+
+    monkeypatch.setattr(ingest, "append_audit", boom)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        import_rows(conn, cfg, "punch", rows, rel_path="inline://sqlite-crash-retry")
+    assert int(conn.execute("SELECT COUNT(*) c FROM punch").fetchone()["c"]) == 0
+    assert int(conn.execute("SELECT COUNT(*) c FROM raw_file").fetchone()["c"]) == before_raw
+    monkeypatch.undo()
+
+    retry = import_rows(conn, cfg, "punch", rows, rel_path="inline://sqlite-crash-retry")
+    assert retry.reimported is False
+    retry_out = run_check(conn, cfg, start=date(2025, 9, 2), end=date(2025, 9, 2),
+                          notes="sqlite crash retry")
+    assert retry_out.input_fingerprint == expected_out.input_fingerprint
+    assert retry_out.conclusion_digest == expected_out.conclusion_digest
+    assert len(retry_out.findings) == len(expected_out.findings)
+    assert retry_out.counts == expected_out.counts
+
+
+def test_sqlite_reimport_after_crash_keeps_file_id_stable(conn, cfg, monkeypatch):
+    """回滚不得让 raw_file 主键跳号：否则引用 file_id 的结论摘要会漂移。"""
+    load_base(conn, cfg)
+    rows = [punch("T-STD", "2025-09-02T09:00:00+08:00", "in", "DEV-1")]
+    expected = import_rows(conn, cfg, "punch", rows, rel_path="inline://sqlite-file-id")
+    file_id = expected.file_id
+    conn.execute("DELETE FROM punch WHERE source_file_id = ?", (file_id,))
+    conn.execute("DELETE FROM ingest_issue WHERE file_id = ?", (file_id,))
+    conn.execute("DELETE FROM raw_file WHERE file_id = ?", (file_id,))
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated crash")
+
+    monkeypatch.setattr(ingest, "append_audit", boom)
+    with pytest.raises(RuntimeError):
+        import_rows(conn, cfg, "punch", rows, rel_path="inline://sqlite-file-id")
+    monkeypatch.undo()
+    retry = import_rows(conn, cfg, "punch", rows, rel_path="inline://sqlite-file-id")
+    assert retry.file_id == file_id
+
+
+def test_sqlite_first_v5_import_after_v4_chain_does_not_nest_transaction(conn, cfg):
+    """规则包从 v4 切到 v5 后的首次导入：epoch 创建不能嵌套在外层导入事务里。
+
+    SQLite 在事务内再执行 BEGIN 会直接报“cannot start a transaction within a
+    transaction”；若 epoch 创建发生在导入事务内，首次 v5 导入就会整批失败。
+    """
+    from src.evidence import verify_chain
+    from src.rules.rulepack import RULE_PACK_V5
+
+    load_base(conn, cfg)
+    cfg5 = replace(cfg, rule_pack_id=RULE_PACK_V5)
+    res = import_rows(conn, cfg5, "punch", [
+        punch("T-STD", "2025-09-02T09:00:00+08:00", "in")],
+        rel_path="inline://first-v5")
+    assert res.rows_accepted == 1
+    assert conn.execute(
+        "SELECT COUNT(*) c FROM rule_pack_epoch WHERE rule_pack_version = ?",
+        (RULE_PACK_V5,)).fetchone()["c"] == 1
+    assert verify_chain(conn, cfg5).ok
+
+
+@pytest.mark.parametrize("mode", ["executemany", "copy"])
+def test_sqlite_bulk_mode_degrades_to_single(conn, cfg, caplog, mode):
+    """SQLite 请求批量写入：必须降级为 single、日志可观测、结果与 single 一致。"""
+    load_base(conn, cfg)
+    rows = [
+        punch("T-STD", "2025-09-02T09:00:00+08:00", "in"),
+        punch("T-STD", "2025-09-02T18:00:00+08:00", "out"),
+    ]
+    rel = f"inline://sqlite-fallback-{mode}"
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="src.ingest"):
+        res = import_rows(conn, replace(cfg, import_write_mode=mode), "punch", rows,
+                          rel_path=rel)
+    assert res.write_mode == "single"
+    assert res.requested_write_mode == mode
+    assert res.degraded_from == mode
+    assert res.chunk_rows == cfg.import_batch_size
+    assert res.rows_accepted == 2
+    messages = [r.getMessage() for r in caplog.records
+                if r.name == "src.ingest" and "SQLite" in r.getMessage()]
+    assert len(messages) == 1, messages
+    assert mode in messages[0]
+    assert int(conn.execute("SELECT COUNT(*) c FROM punch").fetchone()["c"]) == 2
+
+    first = run_check(conn, cfg, start=date(2025, 9, 2), end=date(2025, 9, 2),
+                      notes=f"sqlite {mode} fallback")
+    again = import_rows(conn, cfg, "punch", rows, rel_path=rel)
+    assert again.reimported is True
+    second = run_check(conn, cfg, start=date(2025, 9, 2), end=date(2025, 9, 2),
+                       notes="sqlite single control")
+    assert first.input_fingerprint == second.input_fingerprint
+    assert first.conclusion_digest == second.conclusion_digest
+    assert len(first.findings) == len(second.findings)
+
+
+def test_run_check_appends_audit_inside_transaction(conn, cfg, monkeypatch):
+    """run_check 的审计 append 必须在 run/finding 事务内，锁才能覆盖到提交。"""
+    import src.engine as engine
+    from src.db import in_transaction
+    from src.evidence import verify_chain
+
+    load_base(conn, cfg)
+    import_rows(conn, cfg, "punch", [
+        punch("T-STD", "2025-09-02T09:00:00+08:00", "in")],
+        rel_path="inline://audit-tx")
+    original = engine.append_audit
+    seen: list[bool] = []
+
+    def wrapper(c, *args, **kwargs):
+        seen.append(in_transaction(c))
+        return original(c, *args, **kwargs)
+
+    monkeypatch.setattr(engine, "append_audit", wrapper)
+    out = run_check(conn, cfg, start=date(2025, 9, 2), end=date(2025, 9, 2),
+                    notes="audit tx")
+    assert seen == [True], "run_check 的审计 append 不能在事务提交之后才执行"
+    assert out.run_id
+    assert verify_chain(conn, cfg).ok
+
+
+def _legacy_import_csv(conn, cfg, path, *, kind: str, rel_path: str, created_at: str):
+    """测试用：复刻流式改造前的整文件读取路径（raw bytes + 解码文本 + StringIO）。"""
+    from src.db import transaction
+
+    raw = path.read_bytes()
+    digest = sha256_hex(raw)
+    text = raw.decode("utf-8-sig", errors="replace")
+    reader = csv.DictReader(io.StringIO(text))
+    header = list(reader.fieldnames or [])
+    header_digest = sha256_hex("|".join(header).encode("utf-8"))
+    with transaction(conn, immediate=True):
+        ingest._acquire_import_lock(conn, rel_path, digest)
+        file_id, reimported = ingest._register_file(
+            conn, rel_path, digest, kind, header_digest, created_at, len(header))
+        result = ingest._ingest_rows(
+            conn, cfg, file_id=file_id, kind=kind, rows=reader, actor="system:ingest",
+            rel_path=rel_path, digest=digest, created_at=created_at, start_line=2,
+            manage_transaction=False)
+        result.reimported = reimported
+        return result
+
+
+def test_stream_sha256_matches_full_read_across_chunk_boundaries(tmp_path):
+    """流式哈希换块大小（1/7/4096/1 MiB）都必须与整文件 sha256 一致。"""
+    path = tmp_path / "blob.csv"
+    data = ("中文,设备,时间\n" * 5000).encode("utf-8") + b"x" * 123
+    path.write_bytes(data)
+    expected = sha256_hex(data)
+    for chunk in (1, 7, 4096, 1 << 20):
+        assert ingest._stream_sha256(path, chunk) == expected
+
+
+def test_streaming_csv_matches_legacy_sha_rows_and_triple(conn, cfg, tmp_path):
+    """流式 sha256/解析与旧整文件路径必须给出相同 sha256、行数与三元组。
+
+    文件含 BOM、CRLF、带逗号的引号字段、中文设备名和一处非法 UTF-8 字节，
+    覆盖解码换块、行尾与 errors='replace' 的等价性。
+    """
+    load_base(conn, cfg)
+    path = tmp_path / "stream-parity.csv"
+    header = b"\xef\xbb\xbfemp_id,event_ts,punch_type,device_id\r\n"
+    lines = []
+    for i in range(20):
+        ts = f"2025-09-01T{9 + i // 6:02d}:{(i % 6) * 10:02d}:00+08:00"
+        ptype = "in" if i % 2 == 0 else "out"
+        device = ["DEV-1", '"DEV,1"', "设备一"][i % 3]
+        lines.append(f"T-STD,{ts},{ptype},{device}\r\n".encode("utf-8"))
+    # 第 19 行（0-based 18）的 device 塞一个非法字节：两条路径都必须替换而不崩。
+    lines[18] = b"T-STD,2025-09-01T13:00:00+08:00,in,\xff\r\n"
+    path.write_bytes(header + b"".join(lines))
+
+    created_at = "2025-09-02T00:00:00+08:00"
+    rel = "stream-parity.csv"
+    legacy = _legacy_import_csv(conn, cfg, path, kind="punch", rel_path=rel,
+                                created_at=created_at)
+    first = run_check(conn, cfg, start=date(2025, 9, 1), end=date(2025, 9, 1),
+                      notes="legacy full read")
+    streamed = import_csv_file(conn, cfg, path, kind="punch", rel_path=rel,
+                               created_at=created_at)
+    second = run_check(conn, cfg, start=date(2025, 9, 1), end=date(2025, 9, 1),
+                       notes="streaming read")
+
+    expected_sha = sha256_hex(path.read_bytes())
+    assert legacy.sha256 == streamed.sha256 == expected_sha
+    assert (legacy.rows_seen, legacy.rows_accepted, legacy.rows_rejected) == \
+           (streamed.rows_seen, streamed.rows_accepted, streamed.rows_rejected)
+    stored_sha = conn.execute("SELECT sha256 FROM raw_file WHERE rel_path = ?",
+                              (rel,)).fetchone()["sha256"]
+    assert stored_sha == expected_sha
+    assert streamed.reimported is True
+    assert first.input_fingerprint == second.input_fingerprint
+    assert first.conclusion_digest == second.conclusion_digest
+    assert len(first.findings) == len(second.findings)
+    assert first.counts == second.counts
 
 
 def test_row_level_traceability(conn, cfg):
@@ -96,6 +343,35 @@ def test_duplicate_identical_punch_row_is_dropped_with_issue(conn, cfg):
     assert res.rows_rejected == 1
     assert any(i.rule_id == "QUAL-DUP" for i in res.issues)
     assert conn.execute("SELECT COUNT(*) AS c FROM punch").fetchone()["c"] == 1
+
+
+def test_qual_dup_summary_keeps_issue_count_bounded_and_conclusion_same(conn, cfg):
+    """同一员工大量 QUAL-DUP：汇总一条，但引擎展开后的结论/指纹与逐行存储一致。"""
+    load_base(conn, cfg)
+    rows = [punch("T-STD", f"2025-09-02T{9 + i // 6:02d}:{(i % 6) * 10:02d}:00+08:00",
+                  "in" if i % 2 == 0 else "out", "DEV-1") for i in range(30)]
+    import_rows(conn, cfg, "punch", rows, rel_path="inline://dup-original")
+    # 0 = 关闭汇总，作为逐行存储对照；20 = 默认阈值，触发汇总。
+    before = import_rows(conn, replace(cfg, qual_dup_aggregate_threshold=0),
+                         "punch", rows, rel_path="inline://dup-file")
+    first = run_check(conn, cfg, start=date(2025, 9, 2), end=date(2025, 9, 2),
+                      notes="qual-dup individual")
+    after = import_rows(conn, replace(cfg, qual_dup_aggregate_threshold=20),
+                        "punch", rows, rel_path="inline://dup-file")
+    second = run_check(conn, cfg, start=date(2025, 9, 2), end=date(2025, 9, 2),
+                       notes="qual-dup summary")
+    assert len(before.issues) == 30
+    assert len(after.issues) == 1
+    detail = json.loads(after.issues[0].detail)
+    assert detail["qual_dup_summary"] is True
+    assert detail["count"] == 30 and detail["line_min"] == 1 and detail["line_max"] == 30
+    assert sum(meta["count"] for meta in detail["days"].values()) == detail["count"]
+    assert conn.execute(
+        "SELECT COUNT(*) c FROM ingest_issue WHERE rule_id = 'QUAL-DUP'").fetchone()["c"] == 1
+    assert first.input_fingerprint == second.input_fingerprint
+    assert first.conclusion_digest == second.conclusion_digest
+    assert len(first.findings) == len(second.findings)
+    assert first.counts == second.counts, "分级分布不得因 QUAL-DUP 汇总而变化"
 
 
 def test_unknown_employee_is_rejected(conn, cfg):

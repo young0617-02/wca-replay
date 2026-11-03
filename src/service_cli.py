@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 from .config import Config
-from .db import connect
+from .db import DB_BACKEND_SQLITE, DatabaseError, connect
 from .service_manager import (
     Report,
     ServiceManager,
@@ -51,15 +51,20 @@ def _manager(args: argparse.Namespace, op: str) -> tuple[ServiceManager, Path]:
 
 
 def checkpoint_database(app_cfg: Config, logger) -> str:
-    """所有被管理的服务都停下之后，把 WAL 落回主库：防止进程走了却留下 -wal/-shm 半成品。"""
+    """所有被管理的服务都停下之后，把 SQLite WAL 落回主库。
+
+    PostgreSQL 不归本工具收尾：没有 -wal/-shm 文件，也不该在停止服务时去动别人的库。
+    """
+    if app_cfg.db_backend != DB_BACKEND_SQLITE:
+        return "skip(postgresql)"
     if not Path(app_cfg.db_path).is_file():
         return "skip(无库文件)"
-    conn: sqlite3.Connection | None = None
+    conn = None
     try:
-        conn = connect(app_cfg.db_path, app_cfg.sqlite_synchronous)
+        conn = connect(app_cfg)
         busy, log_size, checkpointed = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
         return f"busy={busy} log={log_size} checkpointed={checkpointed}"
-    except sqlite3.Error as exc:
+    except (sqlite3.Error, DatabaseError) as exc:
         logger.warning("WAL checkpoint 失败（不影响已停止的服务）：%s", exc)
         return f"failed({type(exc).__name__})"
     finally:

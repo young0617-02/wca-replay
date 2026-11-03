@@ -1,12 +1,13 @@
--- worktime-compliance-agent · SQLite schema v1
+-- worktime-compliance-agent · schema v1（SQLite / PostgreSQL 18 共用）
 -- 设计约束：
 --   1) 金额一律以「分」整数存储，工时一律以「分钟」整数存储，禁止浮点参与判定。
 --   2) 每一条业务事实都带 (source_file_id, source_line_no)，行级可追溯（A7）。
 --   3) 结论(finding)与运行(run)分离，run 携带「规则版本 + 输入指纹 + 结论摘要」三元组（F-007）。
 --   4) 知识库条目带出处 / 生效日期 / 地域 / 版本 / ACL 谓词（F-008、F-009）。
 --   5) 审计日志为 hash 链，前一条哈希入库，篡改即可检出（F-007）。
-
-PRAGMA foreign_keys = ON;
+--
+-- 方言边界：本文件不写连接级开关；PostgreSQL 的自增列由 src/db.py 在初始化时翻译。
+-- 连接级设置（foreign_keys / WAL / synchronous / busy_timeout）只属于 SQLite 连接路径。
 
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
@@ -44,7 +45,9 @@ CREATE INDEX IF NOT EXISTS idx_ingest_issue_file ON ingest_issue(file_id, line_n
 CREATE TABLE IF NOT EXISTS org_unit (
     org_id     TEXT PRIMARY KEY,
     org_name   TEXT NOT NULL,
-    parent_id  TEXT
+    parent_id  TEXT,
+    org_path   TEXT NOT NULL DEFAULT '',   -- Phase 7 P0：物化层级路径 /ROOT/CHILD/
+    org_level  INTEGER NOT NULL DEFAULT 0  -- 根为 0，逐级 +1
 );
 
 CREATE TABLE IF NOT EXISTS employee (
@@ -65,6 +68,92 @@ CREATE TABLE IF NOT EXISTS employee (
 );
 
 -- ---------------------------------------------------------------- 事实表
+-- 特殊工时审批台账（v5 REG-01 的最小证据表）。
+-- 只登记“能核验”的字段：文号、期限、岗位范围、城市、附件哈希；
+-- 没有行 = 未覆盖，不拿 employee.contract_approved_flex 反推审批文号。
+CREATE TABLE IF NOT EXISTS worktime_approval (
+    approval_id       INTEGER PRIMARY KEY,
+    emp_id            TEXT NOT NULL REFERENCES employee(emp_id) ON DELETE CASCADE,
+    doc_no            TEXT NOT NULL,
+    regime            TEXT NOT NULL CHECK (regime IN
+                          ('comprehensive_monthly','comprehensive_quarterly',
+                           'comprehensive_yearly','flexible')),
+    valid_from        TEXT NOT NULL,
+    valid_to          TEXT NOT NULL,
+    job_codes         TEXT NOT NULL DEFAULT '[]',    -- JSON list；空列表视为未登记岗位范围
+    region_code       TEXT NOT NULL DEFAULT '',
+    attachment_sha256 TEXT NOT NULL DEFAULT '',
+    recorded_at       TEXT NOT NULL,
+    UNIQUE (emp_id, doc_no)
+);
+CREATE INDEX IF NOT EXISTS idx_approval_emp ON worktime_approval(emp_id, regime);
+
+-- ------------------------------------------------ 审批台账 P0：批文 / 版本 / 范围 / 覆盖投影
+-- 批文主表只保存文号级元数据；版本不可覆盖，发布后才生成员工覆盖投影。
+-- 附件只登记 sha256，不保存原件，不存文件路径/BLOB。
+CREATE TABLE IF NOT EXISTS approval_doc (
+    doc_id          INTEGER PRIMARY KEY,
+    doc_no          TEXT NOT NULL UNIQUE,
+    title           TEXT NOT NULL,
+    issuer          TEXT NOT NULL,
+    regime          TEXT NOT NULL CHECK (regime IN
+                        ('comprehensive_monthly','comprehensive_quarterly',
+                         'comprehensive_yearly','flexible')),
+    status          TEXT NOT NULL DEFAULT 'DRAFT'
+                        CHECK (status IN ('DRAFT','PUBLISHED','RETIRED')),
+    current_version INTEGER,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    created_by      TEXT NOT NULL,
+    updated_by      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS approval_doc_version (
+    version_id        INTEGER PRIMARY KEY,
+    doc_id            INTEGER NOT NULL REFERENCES approval_doc(doc_id) ON DELETE CASCADE,
+    version_no        INTEGER NOT NULL,
+    valid_from        TEXT NOT NULL,
+    valid_to          TEXT NOT NULL,
+    job_codes         TEXT NOT NULL,
+    region_code       TEXT NOT NULL,
+    attachment_sha256 TEXT NOT NULL,
+    change_note       TEXT NOT NULL DEFAULT '',
+    status            TEXT NOT NULL DEFAULT 'DRAFT'
+                          CHECK (status IN ('DRAFT','PUBLISHED','SUPERSEDED')),
+    published_at      TEXT,
+    published_by      TEXT,
+    created_at        TEXT NOT NULL,
+    created_by        TEXT NOT NULL,
+    UNIQUE (doc_id, version_no)
+);
+CREATE INDEX IF NOT EXISTS idx_approval_doc_version_doc ON approval_doc_version(doc_id, version_no);
+
+CREATE TABLE IF NOT EXISTS approval_doc_scope (
+    scope_id    INTEGER PRIMARY KEY,
+    version_id  INTEGER NOT NULL REFERENCES approval_doc_version(version_id) ON DELETE CASCADE,
+    scope_type  TEXT NOT NULL CHECK (scope_type IN ('org','employee')),
+    scope_value TEXT NOT NULL,
+    UNIQUE (version_id, scope_type, scope_value)
+);
+
+CREATE TABLE IF NOT EXISTS employee_approval_coverage (
+    coverage_id       INTEGER PRIMARY KEY,
+    emp_id            TEXT NOT NULL,
+    doc_id            INTEGER NOT NULL REFERENCES approval_doc(doc_id) ON DELETE CASCADE,
+    version_id        INTEGER NOT NULL REFERENCES approval_doc_version(version_id) ON DELETE CASCADE,
+    doc_no            TEXT NOT NULL,
+    version_no        INTEGER NOT NULL,
+    regime            TEXT NOT NULL,
+    valid_from        TEXT NOT NULL,
+    valid_to          TEXT NOT NULL,
+    job_codes         TEXT NOT NULL,
+    region_code       TEXT NOT NULL,
+    attachment_sha256 TEXT NOT NULL,
+    published_at      TEXT NOT NULL,
+    UNIQUE (emp_id, doc_id, version_id)
+);
+CREATE INDEX IF NOT EXISTS idx_coverage_emp ON employee_approval_coverage(emp_id, regime, valid_from, valid_to);
+
 CREATE TABLE IF NOT EXISTS punch (
     punch_id        INTEGER PRIMARY KEY,
     emp_id          TEXT NOT NULL,
@@ -83,7 +172,7 @@ CREATE INDEX IF NOT EXISTS idx_ingest_issue_emp ON ingest_issue(emp_id, work_dat
 -- O-3：打卡事实按内容唯一，而不是按「来自哪个文件」唯一。
 -- 同一批数据换个文件名重传不再二次入账（旧的幂等键只认 rel_path+sha256，改名即重复）。
 CREATE UNIQUE INDEX IF NOT EXISTS idx_punch_dedup ON punch(emp_id, event_ts, punch_type,
-                                                           IFNULL(device_id, ''));
+                                                           COALESCE(device_id, ''));
 
 CREATE TABLE IF NOT EXISTS shift_plan (
     shift_id        INTEGER PRIMARY KEY,
@@ -191,9 +280,25 @@ CREATE TABLE IF NOT EXISTS audit_event (
     ts             TEXT NOT NULL,
     payload_sha256 TEXT NOT NULL,
     prev_hash      TEXT NOT NULL,
-    entry_hash     TEXT NOT NULL
+    entry_hash     TEXT NOT NULL,
+    rule_pack_version TEXT,          -- NULL = v4 legacy 事件；v5 事件为 v5
+    segment_id     TEXT              -- NULL = legacy 段；v5 指向 rule_pack_epoch
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_entry_hash ON audit_event(entry_hash);
+CREATE INDEX IF NOT EXISTS idx_audit_segment ON audit_event(segment_id, seq);
+
+-- 规则包纪元：旧链头、切换事件、新段起点。审计链只追加，不重置旧 genesis。
+CREATE TABLE IF NOT EXISTS rule_pack_epoch (
+    epoch_id             TEXT PRIMARY KEY,
+    rule_pack_version    TEXT NOT NULL,
+    prev_rule_pack_version TEXT NOT NULL,
+    prev_head_hash       TEXT NOT NULL,
+    activation_event_seq INTEGER NOT NULL,
+    segment_start_seq    INTEGER NOT NULL,
+    segment_start_prev_hash TEXT NOT NULL,
+    switched_at          TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_epoch_pack ON rule_pack_epoch(rule_pack_version, activation_event_seq);
 
 CREATE TABLE IF NOT EXISTS evidence_package (
     package_id         TEXT PRIMARY KEY,
@@ -333,3 +438,10 @@ CREATE TABLE IF NOT EXISTS app_session (
     last_seen_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_session_user ON app_session(username, expires_at);
+
+-- 审批台账网页写操作的同步器 CSRF token：按会话 token_hash 绑定；退出/过期时删除。
+CREATE TABLE IF NOT EXISTS app_csrf (
+    token_hash  TEXT PRIMARY KEY,          -- sha256(会话令牌)
+    csrf_hash   TEXT NOT NULL,             -- sha256(CSRF token)，不存明文
+    created_at  TEXT NOT NULL
+);
