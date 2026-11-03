@@ -22,16 +22,18 @@ uv run python -m src.cli status                          # 用 `uv run` 就不�
 # 需求文档已同步修订到 v2.1：US-EV-01 / NFR-07 的验收命令就是上面这条（裁决 D-07）。
 # 下面所有命令都等价于先 `source .venv/bin/activate` 再 `python -m …`。
 uv run python -m src.cli all                             # 生成→导入→建库→校验→报表→举证包
-uv run python -m pytest tests/ -q -m "not llm"           # 471 passed / 8 skipped，无网络、无云凭证
+uv run python -m pytest tests/ -q -m "not llm"           # 481 passed / 8 skipped，无网络、无云凭证
 uv run python evals/judge.py --write-report              # 70 条评测集打分
 uv run python tools/mutation_test.py                     # 注入 31 个缺陷，看测试抓不抓得住
 uv run python tools/perf_probe.py --pg-url "$WCA_TEST_POSTGRES_URL" --employees 1000 --dense \
   --repeat 5 --export --export-repeat 10 --replay --json reports/性能探针-v5-dense-1000.json  # 结论密集四段实测
 uv run python -m src.cli replay var/packages/<run_id>.zip  # 拿包自己重放：重导输入→重跑引擎→比三元组
+uv run python -m src.cli keygen --out var/keys/ed25519.key --public-out var/keys/ed25519.pub  # 可选签名密钥
+uv run python -m src.cli export --run <run_id> --signing-key var/keys/ed25519.key  # 可选 v3 签名包
 ```
 
-核心校验链路只依赖 **Python 标准库 + pytest**；只有 Web 界面与只读接口需要 FastAPI（没装时界面测试如实 skip，
-`python -m src.cli ask` 走的是同一条链路）。
+核心校验链路只依赖 **Python 标准库 + pytest**；Ed25519 签名/验签使用 **PyNaCl**（只有显式签名或验签 v3 包时才需要），
+Web 界面与只读接口需要 FastAPI（没装时界面测试如实 skip，`python -m src.cli ask` 走的是同一条链路）。
 
 **数据库默认与回退**：PostgreSQL 18 是默认后端，`.env.example` 的 `WCA_DATABASE_URL` 留空时启动期直接报错，
 不会静默回退 SQLite；无 PostgreSQL 的离线环境必须显式设置 `WCA_DB_BACKEND=sqlite`。即使工作区有旧
@@ -46,7 +48,7 @@ uv run python -m src.cli replay var/packages/<run_id>.zip  # 拿包自己重放�
 
 | 指标 | v5 实测 |
 |---|---|
-| 测试 | 离线 **471 passed / 8 skipped / 1 deselected**（`-m "not llm"`，2026-11-03 实测；含本轮依赖升级、交付事件改名与并行新增用例）；带 PG **494 passed / 1 deselected**（2026-11-03 实测，`WCA_TEST_POSTGRES_URL` 指向维护库 `postgres`） |
+| 测试 | 离线 **481 passed / 8 skipped / 1 deselected**（`-m "not llm"`，2026-11-03 实测；含 Ed25519 签名 9 项与 keygen 参数对账 1 项）；带 PG **504 passed / 1 skipped / 1 deselected**（2026-11-03 实测，`WCA_TEST_POSTGRES_URL` 指向维护库 `postgres`） |
 | 评测（stub 离线） | 意图 Top-1 **70/70** · Hit@5 **37/37** · MRR **0.664** · 数值工具 **30/30** · 引用忠实 **70/70** · 错承诺 **0** · 越权召回 **0** |
 | 门禁分布 | ANSWERED 57 / EXPLAIN_ONLY 9 / REFUSED_ACL 3 / REFUSED_NO_EVIDENCE 1 |
 | 评测集 | 70 条（检索 29 / 数值 24 / 混合 17）；`sha256=2b8e91b1f44510c3…`；M-003 已最小改为 v5 REG-01 场景 |
@@ -175,25 +177,35 @@ V1 → V1.1 优化的前后对照（含没达成的目标）在 [`reports/优化
    **引擎不产出任何应付金额**（需求 D-03）：只出小时数与法定倍数档位，金额由 HR 负责人具名录入。
    综合计算工时与不定时工时的周期超额/豁免判定仍不套用标准工时硬判：v5 的 COMP-C01 只做周期统计，
    REG-01 只核审批覆盖，均不改变 `effective_regime`、不下违规、不出倍数。
-2. **可复核的举证包（hash 链 + 外部锚点）**
+2. **可复核、可验签的举证包（hash 链 + 外部锚点 + Ed25519）**
    审计 hash 链 + 一次导出生成「规则版本 + 输入指纹 + 结论摘要」三元组；包内含独立 `verify.py`，
    复核方不需要相信我——自己重算链即可，改一条就会在第一个断点报错。
    包内另附**对外结论集**（只收已登记具名人工结论的条目）、**责任区块**（机器算了什么、AI 碰过什么、
    人确认了什么、谁签的字）、**未覆盖清单**（本期不判什么、哪些没测，自己先说），
    以及**本次结论真正依赖的原始 CSV**（`inputs/`）。
-   所以复核方拿着包就能自己走完两步：`verify.py` 独立重算链与输入哈希（只用标准库），
+   所以复核方拿着包就能自己走完两步：`verify.py` 独立重算链、输入哈希与结论集哈希，
    `python -m src.cli replay <包>` 把包内输入喂回引擎、比对三元组——**不必回头向我索要数据**。
    `manifest.json` 另有 `manifest_checksum` 自校验和，只能发现“字段被改但校验和没同步重算”；
-   它**不是签名**，能重算校验和的人仍可整体伪造。交付时请把**四元组**另行记录在包外（邮件、
-   台账或工单）：`schema_version,rule_pack_version,input_fingerprint,conclusion_digest`；事后用
-   `python verify.py --expect-anchor 2,<规则版本>,<输入指纹>,<结论摘要>` 或
-   `python -m src.cli replay <包> --expect-anchor ...` 做外部锚点比对；环境变量
-   `WCA_EXPECT_ANCHOR` 等价。`--expect-triple` / `WCA_EXPECT_TRIPLE` 仍保留，但它**不约束 schema**，
+   它**不是签名**。需要证明来源时，用 Ed25519 私钥导出 **schema v3** 包：
+   ```powershell
+   uv run python -m src.cli keygen --out var/keys/ed25519.key --public-out var/keys/ed25519.pub
+   uv run python -m src.cli export --run <run_id> --signing-key var/keys/ed25519.key
+   ```
+   v3 的 `manifest.signature` 覆盖 schema、三元组、`manifest_checksum`（含
+   `conclusions_sha256`）与重算链头；复核方 `python verify.py --public-key fixed.pub
+   --require-signature` 验签。**包内自带公钥只能打印 `package self-check`（NOT source trust）**；
+   只有包外固定公钥 pin 才打印 `SIGNATURE OK (pinned ...)`，才叫来源可信。签名不证明结论正确，
+   也不能防私钥持有人作恶。未配置私钥时仍导出 v2 无签名包，行为不变。
+   交付时请把**四元组**另行记录在包外（邮件、台账或工单）：
+   `schema_version,rule_pack_version,input_fingerprint,conclusion_digest`，并记录签名 `key_id`；事后用
+   `python verify.py --expect-anchor ... --public-key fixed.pub` 或
+   `python -m src.cli replay <包> --expect-anchor ... --public-key fixed.pub` 做外部锚点与验签；
+   环境变量 `WCA_EXPECT_ANCHOR` 等价。`--expect-triple` / `WCA_EXPECT_TRIPLE` 仍保留，但它**不约束 schema**，
    交付验收请用四元组，否则“伪装成 v1 旧包”的降级不会被发现。
-   **交付验收必须两条一起跑**：`verify.py` 校验包体完整性、审计链、输入哈希，并与外部四元组
-   比对（比对对象是包内 schema 与三元组）；`replay` 独立重算得到实算三元组与结论条数。
-   只跑一条都不足以证明。按 `manifest.schema` 分档：新 schema（v2 及以后）缺少
-   `manifest_checksum` 直接失败；v1 旧包缺少时打印 `MANIFEST CHECKSUM MISSING` 并继续；
+   **交付验收必须两条一起跑**：`verify.py` 校验包体完整性、审计链、输入/结论集哈希与签名，并与外部
+   四元组比对；`replay` 独立重算得到实算三元组与结论条数。只跑一条都不足以证明。按
+   `manifest.schema` 分档：新 schema（v2 及以后）缺少 `manifest_checksum` 直接失败；
+   v1 旧包缺少时打印 `MANIFEST CHECKSUM MISSING` 并继续；schema 声称 v3 却缺签名直接失败；
    schema 缺失/未知按失败关闭处理。
 3. **带 ACL 的制度问答**
    权限谓词在检索层下推（SQL 的 WHERE/JOIN），未授权条目**进不了候选集**；
@@ -247,6 +259,7 @@ worktime-compliance-agent/
 │   ├── engine.py                 # 校验编排 + run 三元组
 │   ├── anomaly.py                # F-006 分级 + 复核闭环
 │   ├── evidence.py               # F-007 hash 链 + 举证包
+│   ├── signing.py                # Ed25519 签名/验签、密钥文件与 pin
 │   ├── kb/                       # F-008 语料 + F-009 ACL 谓词 + 分词
 │   ├── retrieve.py               # F-009 ACL 下推检索（BM25/exact/vector 降级）
 │   ├── llm.py                    # provider 抽象：stub / Ollama / 云 API
@@ -266,7 +279,7 @@ worktime-compliance-agent/
 │   ├── stop_services.py          # 一键优雅停止（含 --status）
 │   ├── mutation_test.py          # F-012 变异测试（MD5 基线校验 + 字节码缓存清理）
 │   └── perf_probe.py             # 性能探针：SQL/DB 调用计数 + 多次采样中位耗时（SQLite 副本或 PG 临时库）
-├── tests/                        # 375 项（离线）：判据/质量门禁/ACL/守卫/接口/界面权限/城市档/启停/CLI 表面/重放/v5 规则/纪元/探针/三档输入预算/审批 P0/审批网页/全站 CSRF/CSRF 哈希/旧台账迁移/连接后库守卫/allow-active/v6/导入事务与并发/QUAL-DUP 汇总/首次切包事务/分块与降级/COPY 中断/并发 check 审计/流式读取与哈希/审计事务边界/同 run 导出锁/临时表清理/维护策略/依赖口径/数据库身份硬失败/report 原子写/配置路径/验收
+├── tests/                        # 收集 490 项；离线 481 passed / 8 skipped / 1 deselected：判据/质量门禁/ACL/守卫/接口/界面权限/城市档/启停/CLI 表面/重放/v5 规则/纪元/探针/三档输入预算/审批 P0/审批网页/全站 CSRF/CSRF 哈希/旧台账迁移/连接后库守卫/allow-active/v6/导入事务与并发/QUAL-DUP 汇总/首次切包事务/分块与降级/COPY 中断/并发 check 审计/流式读取与哈希/审计事务边界/同 run 导出锁/临时表清理/维护策略/依赖口径/数据库身份硬失败/report 原子写/配置路径/签名与验签/验收
 └── reports/                      # 评测结果.md、变异测试.md、优化验证.md、判据修订.md、
                                   # 性能探针.json、P0-闸门.md、异常报表 CSV
 ```
@@ -277,7 +290,7 @@ worktime-compliance-agent/
 |---|---|---|
 | 导入 | `data/raw/*.csv` 或程序化 `list[dict]` | 事实表（每行带 `file_id+line_no`+文件 sha256）+ 质量问题表 + 审计事件 |
 | 校验 | 事实 + 员工主数据 + 节假日日历 + 规则包版本 | `run` 三元组、`finding`（分级/整数指标/条文/行级来源）、复核单、异常报表 CSV |
-| 举证 | 一个 `run` | zip：`manifest.json` + `findings.csv` + **`conclusions_final.csv`（只收已人工确认的条目）** + `input_files.csv` + `audit_chain.jsonl` + `quality_issues.csv` + **`responsibility.json`（责任区块）** + **`not_covered.json` / `未覆盖清单.md`** + **`inputs/`（本次结论真正依赖的原始 CSV + `inputs/manifest.json`）** + 独立 `verify.py`；重放：`python -m src.cli replay <包>` |
+| 举证 | 一个 `run` | zip：`manifest.json`（v3 含 `signature` / `conclusions_sha256`）+ `findings.csv` + **`conclusions_final.csv`（只收已人工确认的条目）** + `input_files.csv` + `audit_chain.jsonl` + `quality_issues.csv` + **`responsibility.json`（责任区块）** + **`not_covered.json` / `未覆盖清单.md`** + **`inputs/`（本次结论真正依赖的原始 CSV + `inputs/manifest.json`）** + 独立 `verify.py` + `verify-requirements.txt`；重放：`python -m src.cli replay <包>` |
 | 问答 | 一句自然语言 + 提问主体 `emp_id` | 答案 + 门禁决策（ANSWERED/EXPLAIN_ONLY/ESCALATED/REFUSED_ACL/REFUSED_NO_EVIDENCE）+ 可点开出处 + 置信/覆盖率 + 分段耗时 |
 | HTTP | 会话 Cookie（**没有** `as_emp` 这类可自报身份的参数）：`GET /ask?q=…`、`GET /evidence/{run_id}`；界面 `POST /api/import` `/api/check` `/api/review/{id}/decision` `/api/export` `/api/ask` | JSON；zip 下载（响应头带三元组与链校验结果）；权限一律在服务端判 |
 
@@ -286,6 +299,8 @@ worktime-compliance-agent/
 ```bash
 python -m src.cli check --start 2025-09-01 --end 2026-04-30
 python -m src.cli report && python -m src.cli export
+python -m src.cli keygen --out var/keys/ed25519.key --public-out var/keys/ed25519.pub
+python -m src.cli export --signing-key var/keys/ed25519.key   # v3 Ed25519 签名包
 python -m src.cli ask "国庆当天上班加班费按几倍算" --as E004
 python -m src.cli verify                        # 审计链自检
 ```
@@ -359,10 +374,10 @@ uv run python tools/start_services.py --json     # 机器可读结果（退出�
 | A3 ★ ACL 越权召回 0 | **已达成（离线实测）** | `tests/test_acl_retrieval.py` 断言打在候选集；评测 `acl_leak=0`；变异测试 M5（改成先召回再过滤）被捕获 |
 | A4 ★ 错承诺 0 | **已达成（离线实测）** | `tests/test_agent_guard.py`；评测 `wrong_commitment=0`；变异测试 M11 被捕获 |
 | A5 ★ 测试有鉴别力 | **已达成** | `python tools/mutation_test.py`：v4 时注入 20 捕获 20；v5 扩到 **31 注入 / 31 捕获**，还原 MD5 一致（工装自身曾报出一条**不存在的漏网**，修法与记录见 `reports/优化验证.md` 第四节的 `tools/mutation_test.py` 出处） |
-| A6 测试可跑且可复现 | **已达成** | v4 时点仓库副本 + **无 `.env`**，依赖走 `uv sync`：`uv run python -m src.cli all`（rc=0）→ `uv run python -m pytest tests/ -q -m "not llm"` = **197 passed / 1 deselected**（历史记录；当前工作区为 **471 passed / 8 skipped** 实测（含本轮依赖升级、交付事件改名与并行新增用例），带 PG **494 passed / 1 deselected**（2026-11-03 实测）；未见新的干净环境复跑记录，不冒充 A6 复验）；三元组与本机库逐字符一致。需求文档已同步修订到 **v2.1**（US-EV-01/NFR-07 的验收命令改为 uv，裁决 D-07），所以这不是「实现偏离需求」，是需求本身按决定改了；换 uv 之前那一趟走的是 `pip install -r requirements.txt`，那段历史保留在 `reports/干净环境复跑.md`；
+| A6 测试可跑且可复现 | **已达成** | v4 时点仓库副本 + **无 `.env`**，依赖走 `uv sync`：`uv run python -m src.cli all`（rc=0）→ `uv run python -m pytest tests/ -q -m "not llm"` = **197 passed / 1 deselected**（历史记录；当前工作区为 **481 passed / 8 skipped** 实测（含 Ed25519 签名 9 项与 keygen 参数对账 1 项），带 PG **504 passed / 1 skipped / 1 deselected**（2026-11-03 实测）；未见新的干净环境复跑记录，不冒充 A6 复验）；三元组与本机库逐字符一致。需求文档已同步修订到 **v2.1**（US-EV-01/NFR-07 的验收命令改为 uv，裁决 D-07），所以这不是「实现偏离需求」，是需求本身按决定改了；换 uv 之前那一趟走的是 `pip install -r requirements.txt`，那段历史保留在 `reports/干净环境复跑.md`；
   且 `export --sign-as → replay → 独立 verify.py` 整条复核链同一趟跑通（`reports/干净环境复跑.md`；旧命令名，现为 `--record-delivery-as`，`--sign-as` 仍保留为迁移别名、非密码学签名） |
 | A7 行级可追溯 | **已达成** | `tests/test_ingest_quality.py` + 举证包 `findings.csv` 的 `source_rel_path/source_line_no` |
-| A8 举证包可复核 | **已达成** | `test_exported_package_reproduces_same_triple`（同输入重跑）+ `tests/test_replay.py`（**把包内输入喂回引擎逐项比三元组**，改输入必须报不一致）；另 4 项守住结论集纪律、交付登记人入链、责任区块与未覆盖清单随包给出 |
+| A8 举证包可复核 | **已达成** | `test_exported_package_reproduces_same_triple`（同输入重跑）+ `tests/test_replay.py`（**把包内输入喂回引擎逐项比三元组**，改输入必须报不一致）；`tests/test_signature.py` 9 项守住 v3 签名/结论集哈希/外部 pin/旧包兼容；另 4 项守住结论集纪律、交付登记人入链、责任区块与未覆盖清单随包给出 |
 | A9 性能口径诚实 | **已达成** | `docs/口径声明.md` 每个数字标实测/设计值/未测；`tests/test_acceptance.py` 检查 |
 | A10 ★ 无虚假宣称 | **已达成** | `tests/test_acceptance.py::test_no_false_claims_in_docs_and_code` 扫 README/docs/src/evals/data，禁词命中数=0 |
 | A11 合成数据如实标注 | **部分** | 生成器与 README 已明示合成+seed；**「字段语义取得人事部门口径确认」这句不成立**（F-001 未完成，见下） |
