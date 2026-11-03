@@ -212,8 +212,9 @@ def cmd_export(args) -> int:
         print(f"登记交付事件（非密码学签名；--sign-as 为迁移期旧别名）：{recorded_by} "
               f"审计序号 {rec['audit_seq']} 链哈希 {rec['entry_hash'][:16]}…")
     signing_key = signing.load_signing_key(getattr(args, "signing_key", None))
+    omit = [x.strip() for x in str(getattr(args, "omit_fields", "") or "").split(",") if x.strip()]
     manifest = export_package(conn, cfg, run_id, include_inputs=not args.no_inputs,
-                              signing_key=signing_key)
+                              signing_key=signing_key, omit_fields=omit or None)
     inputs = manifest["inputs"]
     print(f"举证包：{manifest['package_zip']}")
     print(f"  对外结论 {manifest['counts']['final_conclusions']} 条 / 未人工确认 {manifest['counts']['unsigned_pending']} 条"
@@ -221,6 +222,8 @@ def cmd_export(args) -> int:
     print(f"  自含输入 {inputs['packed']} 个 / {inputs['total_bytes']:,} 字节"
           + (f"；缺项 {len(inputs['missing'])}：{inputs['missing']}" if inputs["missing"] else "")
           + (f"；{inputs['reason']}" if inputs["reason"] else ""))
+    if manifest.get("omitted_fields"):
+        print(f"  已裁剪字段 {manifest['omitted_fields']}（投影指纹与原始输入指纹见 manifest）")
     if inputs.get("critical"):
         print(f"  ⚠ {inputs.get('critical_message') or '自含输入已超过临界线，需人工确认'}")
     elif inputs.get("warning"):
@@ -287,6 +290,10 @@ def cmd_replay(args) -> int:
     if res.get("inputs_digest"):
         print(f"  输入摘要：{'与 manifest/签名一致' if res['inputs_digest_ok'] else '不一致'}"
               f"（{str(res['inputs_digest'])[:16]}…）")
+    if res.get("projection_fingerprint"):
+        print(f"  投影指纹：{'一致' if res['projection_ok'] else '不一致'}"
+              f"（{str(res['projection_fingerprint'])[:16]}…）"
+              + (f"；已裁剪字段 {res['omitted_fields']}" if res.get("omitted_fields") else ""))
     print(f"  钉回口径参数 {json.dumps(res['pinned_params'], ensure_ascii=False, sort_keys=True)}")
     print(f"  {res['inherited_params_note']}")
     if res.get("signature_present"):
@@ -730,6 +737,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--signing-key", dest="signing_key", default=None,
                    help="Ed25519 私钥文件（单行 Base64 seed）；不传则读 "
                         "WCA_SIGNING_KEY_FILE / WCA_SIGNING_KEY_B64，仍无则导出 v2 无签名包")
+    p.add_argument("--omit-fields", dest="omit_fields", default="",
+                   help="受控裁剪非投影列，逗号分隔 kind:field；当前仅支持 leave:paid；默认不裁剪")
     p.set_defaults(fn=cmd_export)
     p = sub.add_parser("replay", help="拿举证包自己重放：解包 -> 重导输入 -> 重跑引擎 -> 比三元组")
     p.add_argument("package", help="包 zip 或已解压的目录")

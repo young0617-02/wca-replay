@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from . import ENGINE_VERSION, signing
+from . import ENGINE_VERSION, projection, signing
 from .config import Config, PROJECT_ROOT
 from .db import (DB_BACKEND_POSTGRES, Connection, column_exists, get_meta, set_meta,
                  table_exists, transaction_if_needed)
@@ -572,6 +572,56 @@ def _minimized_responsibility(resp: dict) -> dict:
     return doc
 
 
+def _trim_input_entry(entry: dict, fields: set[str], work: Path) -> None:
+    """把登记表中的可裁剪列从导出副本移除；只允许已显式列入 omit_fields 的列。"""
+    source = Path(entry["source"])
+    target = work / entry["arcname"]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with source.open("r", encoding="utf-8-sig", newline="") as fh:
+        reader = csv.DictReader(fh)
+        header = list(reader.fieldnames or [])
+        missing = sorted(fields - set(header))
+        if missing:
+            raise ValueError(f"输入 {entry['rel_path']} 缺列，无法裁剪：{missing}")
+        keep = [name for name in header if name not in fields]
+        with target.open("w", encoding="utf-8", newline="") as out:
+            writer = csv.DictWriter(out, fieldnames=keep, lineterminator="\n")
+            writer.writeheader()
+            for row in reader:
+                writer.writerow({name: row.get(name, "") for name in keep})
+    data = target.read_bytes()
+    entry["source_sha256"] = entry["sha256"]
+    entry["sha256"] = sha256_hex(data)
+    entry["bytes"] = len(data)
+    entry["trimmed"] = True
+
+
+def _apply_omissions(collected: dict, work: Path,
+                     omit_fields: tuple[tuple[str, str], ...]) -> list[dict]:
+    """按 kind 分组裁剪；请求的 kind/field 必须实际存在，否则失败关闭。"""
+    if not omit_fields:
+        return []
+    by_kind: dict[str, set[str]] = {}
+    for kind, field in omit_fields:
+        by_kind.setdefault(kind, set()).add(field)
+    entries = collected["entries"]
+    touched: dict[str, int] = {kind: 0 for kind in by_kind}
+    for entry in entries:
+        kind = str(entry.get("kind") or "")
+        fields = by_kind.get(kind)
+        if not fields:
+            continue
+        _trim_input_entry(entry, fields, work)
+        touched[kind] += 1
+    absent = sorted(kind for kind, count in touched.items() if count == 0)
+    if absent:
+        raise ValueError(f"请求裁剪的输入种类在本次包内没有文件：{absent}")
+    collected["total_bytes"] = sum(int(e["bytes"]) for e in entries)
+    meta = [{"kind": kind, "field": field, "reason": projection.OMITTED_REASON}
+            for kind, field in omit_fields]
+    return meta
+
+
 def _write_conclusions_csv(path: Path, rows: list[dict]) -> None:
     """对外结论集：**只收已登记人工结论的条目**（US-RV-01★：无人工结论的异常不得进入）。"""
     with path.open("w", encoding="utf-8", newline="") as fh:
@@ -804,22 +854,27 @@ def collect_package_inputs(conn: Connection, cfg: Config, run_id: str,
 
 
 def export_package(conn: Connection, cfg: Config, run_id: str, *,
-                   include_inputs: bool = True, signing_key=None) -> dict:
+                   include_inputs: bool = True, signing_key=None,
+                   omit_fields: set[str] | tuple[str, ...] | None = None) -> dict:
     """导出举证包（zip + manifest），返回清单字典。同 run 并发导出会明确拒绝。
 
     `signing_key` 为 PyNaCl `SigningKey` 时写 v3 + Ed25519 签名；为 None 时保持
     既有 v2 无签名行为。私钥不进入包。
+    `omit_fields` 默认空（不裁剪）；显式传 `{"leave:paid"}` 时按投影字段清单校验后
+    只裁剪导入器可选的非投影列。
     """
     if conn.execute("SELECT 1 FROM run WHERE run_id = ?", (run_id,)).fetchone() is None:
         raise ValueError(f"未知 run_id: {run_id}")
+    omit = projection.normalize_omit_fields(omit_fields)
     cfg.ensure_dirs()
     with _export_run_lock(conn, cfg, run_id):
         return _export_package_locked(conn, cfg, run_id, include_inputs=include_inputs,
-                                      signing_key=signing_key)
+                                      signing_key=signing_key, omit_fields=omit)
 
 
 def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
-                           include_inputs: bool = True, signing_key=None) -> dict:
+                           include_inputs: bool = True, signing_key=None,
+                           omit_fields: tuple[tuple[str, str], ...] = ()) -> dict:
     """在持有同 run 导出锁时执行的实际导出。1000 行内应控制在数秒级（设计值）。"""
     run = conn.execute("SELECT * FROM run WHERE run_id = ?", (run_id,)).fetchone()
     if run is None:
@@ -948,6 +1003,7 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
             collected["total_bytes"] += approval_meta["bytes"]
             collected["approval_rows"] = approval_meta["rows"]
             collected["approval_sha256"] = approval_meta["sha256"]
+        omitted_fields = _apply_omissions(collected, work, omit_fields)
         status = input_budget_status(collected["total_bytes"])
         collected["warning"] = status in ("warning", "critical")
         collected["critical"] = status == "critical"
@@ -976,6 +1032,7 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
                      "warning": False, "warn_bytes": EXPORT_INPUTS_WARN_BYTES,
                      "critical": False, "critical_bytes": EXPORT_INPUTS_CRITICAL_BYTES,
                      "warning_message": "", "critical_message": ""}
+        omitted_fields = _apply_omissions(collected, work, omit_fields)
     inputs_manifest = work / INPUTS_MANIFEST_NAME
     inputs_doc = {"schema": "wca-package-inputs-v1", "run_id": run_id,
                   "csv_formula_escape": CSV_FORMULA_ESCAPE,
@@ -994,16 +1051,25 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
                   "reason": collected["reason"],
                   "approval_rows": int(collected.get("approval_rows", 0)),
                   "approval_source": approval_source,
+                  **({"omitted_fields": omitted_fields} if omit_fields else {}),
                   "entries": [{k: e[k] for k in ("file_id", "rel_path", "kind", "sha256",
-                                                 "bytes", "arcname", "rows") if k in e}
+                                                 "bytes", "arcname", "rows",
+                                                 "source_sha256") if k in e}
                               for e in collected["entries"]]}
     inputs_manifest.write_text(canonical_json(inputs_doc) + chr(10), encoding="utf-8")
     for e in collected["entries"]:
+        if e.get("trimmed"):
+            continue
         shutil.copyfile(e["source"], work / e["arcname"])
 
     # 输入摘要覆盖 inputs/ 下实际存在的每个文件（含 inputs/manifest.json 本身），
     # 在签名前算好并写入 manifest；签名 payload 会覆盖它，避免“只换输入不换 manifest”。
     inputs_digest = signing.compute_inputs_digest_from_dir(work) if signing_key else ""
+    # 投影指纹只在受控裁剪开启时计算/写入；默认导出保持既有字段与 replay 语义。
+    projection_fp = (projection.projection_fingerprint(
+        conn, scope_json, str(run["rule_pack_version"]),
+        rel_paths={str(f["rel_path"]) for f in files},
+        emp_ids=scope_json.get("emp_ids")) if omit_fields else "")
 
     if chain_epoch:
         verification = verify_chain(conn, cfg, upto_seq=chain_max_seq, segment=chain_epoch)
@@ -1021,6 +1087,9 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
         "run_id": run_id,
         "engine_version": run["engine_version"],
         "triple": triple,
+        **({"projection_spec": projection.PROJECTION_SPEC,
+            "projection_fingerprint": projection_fp,
+            "omitted_fields": omitted_fields} if omit_fields else {}),
         "scope_json": scope_json,
         "audit_window": {"mode": "prefix_through_last_run_event",
                          "max_seq": chain_max_seq,
@@ -1071,6 +1140,7 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
                    "approval_rows": int(collected.get("approval_rows", 0)),
                    "approval_sha256": str(collected.get("approval_sha256") or ""),
                    "approval_source": approval_source,
+                   **({"omitted_fields": omitted_fields} if omit_fields else {}),
                    "missing": collected["missing"],
                    "reason": collected["reason"],
                    "replay_command": "python -m src.cli replay <本包.zip 或解包目录>"},

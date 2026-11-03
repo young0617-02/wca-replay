@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path, PurePosixPath
 
-from . import ENGINE_VERSION, signing
+from . import ENGINE_VERSION, projection, signing
 from .config import Config
 from .db import DB_BACKEND_SQLITE, connect, init_db
 from .engine import run_check
@@ -404,6 +404,9 @@ def _base_result(package: Path | str, manifest: dict) -> dict:
         "signature_present": False, "signature_ok": False, "signature_trust": "none",
         "signature_key_id": "", "signature_reason": "",
         "inputs_digest": "", "inputs_digest_ok": False,
+        "projection_fingerprint": "", "actual_projection_fingerprint": "",
+        "projection_ok": False, "omitted_fields": [],
+        "input_fingerprint_recomputed": False,
         "ok": False, "reason": "",
     }
 
@@ -621,15 +624,52 @@ def replay(package: Path | str, *, limits: ZipLimits | None = None,
             actual = {"rule_pack_version": cfg.rule_pack_id,
                       "input_fingerprint": out.input_fingerprint,
                       "conclusion_digest": out.conclusion_digest}
+            expected_projection = manifest.get("projection_fingerprint")
+            omitted_fields = manifest.get("omitted_fields") or []
             result.update({"actual_triple": actual, "imports": imported,
                            "findings_expected": manifest["counts"]["findings"],
                            "findings_actual": len(out.findings),
-                           "counts_actual": out.counts_by_severity()})
-            mismatched = [k for k in actual if actual[k] != triple.get(k)]
+                           "counts_actual": out.counts_by_severity(),
+                           "omitted_fields": omitted_fields,
+                           "projection_fingerprint": expected_projection or "",
+                           "mismatched_fields": [k for k in actual
+                                                 if actual[k] != triple.get(k)]})
+            if omitted_fields and not expected_projection:
+                result["reason"] = "PROJECTION FAIL 包声明了 omitted_fields 但缺少 projection_fingerprint"
+                return result
+            if expected_projection:
+                try:
+                    actual_projection = projection.projection_fingerprint(
+                        conn, scope, triple["rule_pack_version"],
+                        rel_paths={str(e["rel_path"]) for e in inputs["entries"]
+                                   if str(e.get("kind")) != "approval"},
+                        emp_ids=scope.get("emp_ids"))
+                except Exception as exc:
+                    result["reason"] = (f"PROJECTION FAIL 无法重算投影指纹："
+                                        f"{type(exc).__name__}: {exc}")
+                    return result
+                result["actual_projection_fingerprint"] = actual_projection
+                if not isinstance(expected_projection, str) \
+                        or actual_projection != expected_projection:
+                    result["reason"] = "PROJECTION FAIL 投影指纹与 manifest 不一致"
+                    return result
+                result["projection_ok"] = True
+
+            if expected_projection and omitted_fields:
+                # 原始字节被主动裁剪，旧 input_fingerprint 必然不同；
+                # 用投影指纹 + 结论摘要决定是否一致，并明确标记“重新计算过”。
+                mismatched = [k for k in actual
+                              if k != "input_fingerprint" and actual[k] != triple.get(k)]
+                result["input_fingerprint_recomputed"] = (
+                    actual["input_fingerprint"] != triple.get("input_fingerprint"))
+            else:
+                mismatched = [k for k in actual if actual[k] != triple.get(k)]
             result["mismatched_fields"] = mismatched
             if not mismatched and result["findings_expected"] == result["findings_actual"]:
                 result["ok"] = True
-                result["reason"] = "三元组与结论条数逐项一致"
+                result["reason"] = ("投影指纹、结论摘要与结论条数逐项一致"
+                                    if expected_projection and omitted_fields
+                                    else "三元组与结论条数逐项一致")
             else:
                 result["reason"] = (f"重放结果与包内三元组不一致：{mismatched or '结论条数不同'}"
                                     f"（期望 {result['findings_expected']} 条 / 实得 "
