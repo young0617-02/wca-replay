@@ -516,3 +516,47 @@ replay: 发现（未签认）期望 116 / 实得 116；已确认结论期望 0 /
   0.4.x 开发包会被 `PRODUCER FAIL` 拒收，这是“同版本代码”核对，不是包损坏。
 - 0.4.1 发行物与交接包均未入库；`dist/`、`handoff/` 已 gitignore。
 
+## 11. 0.4.2 第四轮整改：证据定位摘要与 24 条实测（2026-11-04）
+
+发行物：`dist/wca-replay-0.4.2/`，7 个文件 **354,984 字节**；commit
+`26c1b806a9f95682a188033cb697cf8c0dbfa149`；wheel 309,933 字节，sha256
+`0f893dcaebab78835b882842999772815ed6a1b76f8afaf0af33fab32a1871fa`。干净 venv
+（`%TEMP%\wca-handoff-042\venv`）实测 `SHA256SUMS SIGNATURE OK` 与 5/5 文件哈希。
+
+**阻断项修复**：0.4.1 的 `conclusion_digest` 被 `metric` 里的 `evidence_*` 污染。0.4.2：
+
+1. `evidence_*` 移出 `metric`，改为 finding 的非 canonical `evidence`（tables/window/rules/
+   aggregation）；`Finding.canonical()` 仍是九字段，不含 evidence。
+2. 新增 `evidence_digest`（固定字段序、空值 `null`、路径 `/`），写入顶层 manifest、
+   `manifest_checksum` 与签名 payload；`wca-verify`/`wca replay` 输出 `EVIDENCE DIGEST OK/FAIL`。
+3. `run_id` 从 `inputs/manifest.json` 移到顶层 manifest；同一批输入跨 run 的 `inputs_digest`
+   稳定。`input_fingerprint`（内容与范围）与 `inputs_digest`（包内输入字节，不含 run_id）分工写清。
+
+**实测摘要**：第三轮旧包 `9a767794…`；删 `evidence_*` 后 `01bd4403…`；第四轮两包均
+`01bd4403…`，`evidence_digest 01cb5aeb…`，`inputs_digest 7aa35cfe…`。跨 run 包
+（`run-20261104T063013-8b0e8bc2`）`inputs_digest` 与两包相同。只补一条 evidence 注释时
+`conclusion_digest` 不变、`evidence_digest` 变为 `86e2baff…`。新版本包缺 `evidence_digest`
+或删除 evidence 列 → `EVIDENCE DIGEST FAIL`；无 producer 旧包 → `NOT CHECKED`。
+
+**24 条**：`未覆盖清单.md` 逐条列 `6 VIOLATION + 17 REVIEW + 1 DEFENSIBLE`，不再只写 6 条
+VIOLATION；`config/region_profile.json` 引用已清掉，城市改为内联标签+代码。
+
+**交接包**：`handoff/20261104-第四轮整改/`，18 个文件 / **524,230 字节**（`交付清单.txt`
+覆盖 17 个非自身文件 / 522,517 字节）。两包：
+
+| 包 | 字节 | SHA-256 | 发现/已确认 | `evidence_digest` | `inputs_digest` |
+|---|---|---|---|---|---|
+| engine-only | 72,622 | `87395373…` | 116 / 0 | `01cb5aeb…` | `7aa35cfe…` |
+| confirmed | 73,454 | `7c7b26bf…` | 116 / 2 | `01cb5aeb…` | `7aa35cfe…` |
+
+两包同 run `run-20261104T063012-71631ac6`、同三元组（`8b3b54a0…` / `01bd4403…`）；
+`wca-verify`/`wca replay` 均 `RESULT OK`。**交付方自测，不构成采信结论**。
+
+**测试**：离线 **538 passed / 8 skipped / 1 deselected**；带 PG **561 passed / 1 skipped /
+1 deselected**（相对第三轮基线 531/554 各 +7）。新增 `tests/test_evidence_digest.py` 7 项；
+`tests/test_public_materials.py` 的交接包实测改为 24 条（第四轮包存在后不再 skip）。
+
+**仍不能证明**：旧 0.4.1 包会被 0.4.2 wheel 以 `PRODUCER FAIL` 拒收；`evidence_digest`
+不是四段锚点的一部分；跨 run 稳定性只在同一临时 SQLite 库内实测；24 条中 17 REVIEW +
+1 DEFENSIBLE 不是已定性违规；法律实体性仍需外部审查；无可复现构建/第三方时间戳。
+
