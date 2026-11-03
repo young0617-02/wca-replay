@@ -22,15 +22,15 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from . import ENGINE_VERSION
+from . import ENGINE_VERSION, signing
 from .config import Config, PROJECT_ROOT
 from .db import (DB_BACKEND_POSTGRES, Connection, column_exists, get_meta, set_meta,
                  table_exists, transaction_if_needed)
 from .rules.approvals import export_approval_csv, export_coverage_csv
 from .rules.rulepack import RULE_PACK_V4, RULE_PACK_V5, RULE_PACK_V6
 from .util import (CN_TZ, CSV_FORMULA_ESCAPE, EVIDENCE_PACKAGE_SCHEMA,
-                   MANIFEST_CHECKSUM_FIELD, canonical_json, csv_safe_row, digest_of,
-                   manifest_checksum, sha256_hex)
+                   EVIDENCE_PACKAGE_SCHEMA_V3, MANIFEST_CHECKSUM_FIELD, SIGNATURE_FIELD,
+                   canonical_json, csv_safe_row, digest_of, manifest_checksum, sha256_hex)
 
 logger = logging.getLogger(__name__)
 
@@ -442,6 +442,9 @@ PACKAGE_README = (
     "选择规则见 manifest.inputs.selection_rule。verify.py 独立重算审计链与输入文件哈希；"
     "audit_chain.jsonl 是本次 run 的链前缀（到该 run 最后一条事件），边界见 manifest.audit_window。"
     "有本项目代码时用 `python -m src.cli replay <包>` 重放引擎并比对三元组。\r\n"
+    "v3 包带 manifest.signature（Ed25519）：包内公钥只能证明包内自洽，"
+    "只有用包外固定公钥（verify.py --public-key）才能证明来源可信；"
+    "验签需要 PyNaCl，版本见 verify-requirements.txt。\r\n"
 )
 
 
@@ -787,17 +790,22 @@ def collect_package_inputs(conn: Connection, cfg: Config, run_id: str,
 
 
 def export_package(conn: Connection, cfg: Config, run_id: str, *,
-                   include_inputs: bool = True) -> dict:
-    """导出举证包（zip + manifest），返回清单字典。同 run 并发导出会明确拒绝。"""
+                   include_inputs: bool = True, signing_key=None) -> dict:
+    """导出举证包（zip + manifest），返回清单字典。同 run 并发导出会明确拒绝。
+
+    `signing_key` 为 PyNaCl `SigningKey` 时写 v3 + Ed25519 签名；为 None 时保持
+    既有 v2 无签名行为。私钥不进入包。
+    """
     if conn.execute("SELECT 1 FROM run WHERE run_id = ?", (run_id,)).fetchone() is None:
         raise ValueError(f"未知 run_id: {run_id}")
     cfg.ensure_dirs()
     with _export_run_lock(conn, cfg, run_id):
-        return _export_package_locked(conn, cfg, run_id, include_inputs=include_inputs)
+        return _export_package_locked(conn, cfg, run_id, include_inputs=include_inputs,
+                                      signing_key=signing_key)
 
 
 def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
-                           include_inputs: bool = True) -> dict:
+                           include_inputs: bool = True, signing_key=None) -> dict:
     """在持有同 run 导出锁时执行的实际导出。1000 行内应控制在数秒级（设计值）。"""
     run = conn.execute("SELECT * FROM run WHERE run_id = ?", (run_id,)).fetchone()
     if run is None:
@@ -989,7 +997,7 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
         "conclusion_digest": run["conclusion_digest"],
     }
     manifest = {
-        "schema": EVIDENCE_PACKAGE_SCHEMA,
+        "schema": EVIDENCE_PACKAGE_SCHEMA_V3 if signing_key else EVIDENCE_PACKAGE_SCHEMA,
         "run_id": run_id,
         "engine_version": run["engine_version"],
         "triple": triple,
@@ -1053,9 +1061,18 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
         "disclaimer": "本包不产出应付金额（需求 D-03）；金额是 HR 负责人具名录入的人工结论，不属于引擎输出；"
                       "数据为合成数据，非任何真实个人信息。",
     }
-    # 自校验和覆盖 manifest.json 内除自身以外的全部字段；它是“防单点改动”的
-    # 自洽检查，不是签名——能重算校验和的人仍可伪造，必须靠包外三元组锚点。
+    if signing_key:
+        # 结论集文件哈希也放进 manifest；它被自校验和覆盖，进而被签名覆盖。
+        # 这样“只改 conclusions_final.csv、不动 manifest”能被 verify 的 ARTIFACT 检查发现。
+        manifest["conclusions_sha256"] = sha256_hex(conclusions_csv.read_bytes())
+    # 自校验和覆盖 manifest.json 内除自身与 signature 外的全部字段；它是
+    # “防单点改动”的自洽检查，不是签名——能重算校验和的人仍可伪造。
     manifest[MANIFEST_CHECKSUM_FIELD] = manifest_checksum(manifest)
+    if signing_key:
+        # 签名 payload 覆盖 schema/triple/manifest_checksum/实际链头；signature
+        # 自身不参与 checksum，避免“先校验和再签名”的循环。
+        manifest[SIGNATURE_FIELD] = signing.create_signature(
+            manifest, signing_key, verification.head_hash)
     manifest_path = work / "manifest.json"
     manifest_path.write_text(canonical_json(manifest) + "\n", encoding="utf-8")
     # manifest 自身的哈希，用于「重跑后比对包是否等价」
@@ -1073,6 +1090,7 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
             for e in collected["entries"]:
                 zf.write(work / e["arcname"], arcname=e["arcname"])
             zf.writestr("verify.py", VERIFY_SNIPPET)
+            zf.writestr("verify-requirements.txt", VERIFY_REQUIREMENTS)
         os.replace(tmp_zip, zip_path)
     except Exception:
         tmp_zip.unlink(missing_ok=True)
@@ -1140,16 +1158,27 @@ def _sev_label(sev: str) -> str:
     return {"DEFENSIBLE": "可申辩", "REVIEW": "需复核", "VIOLATION": "明显违规"}.get(sev, sev)
 
 
-VERIFY_SNIPPET = '''"""独立复核脚本：不依赖本项目代码，只用标准库重算 hash 链并校验包内原始输入的哈希。
+VERIFY_REQUIREMENTS = (
+    "# 仅包内 verify.py 验签需要；不验签（旧 v1/v2 包）时只用标准库。\n"
+    "pynacl==1.6.2\n"
+)
+
+
+VERIFY_SNIPPET = '''"""独立复核脚本：只用标准库重算 hash 链、校验包内输入与结论集哈希；签名存在时用 PyNaCl 验签。
 
 用法：unzip pkg-<run_id>.zip && python verify.py
 可选外部锚点：python verify.py --expect-triple rp,input_fp,conclusion_digest
 （也可用环境变量 WCA_EXPECT_TRIPLE）；不传时仍按包内自洽规则校验。
-期望输出：EPOCH OK + CHAIN OK + INPUTS OK + 三元组 + RESULT OK。
-任一校验失败都会打印 RESULT FAIL 并返回非零退出码；链与输入哈希一致只说明
-**包内自洽**，结论是否一致要重跑引擎（`python -m src.cli replay <包>`）。
+可选签名约束：--public-key <公钥文件或Base64>（可重复）作为外部 pin；--require-signature。
+签名验签依赖 PyNaCl（见包内 verify-requirements.txt）；未安装且包内有签名时失败关闭。
+期望输出：EPOCH OK + MANIFEST CHECKSUM OK + CHAIN OK + INPUTS OK + ARTIFACT OK + SIGNATURE OK。
+SIGNATURE OK 只表示签名有效：pinned 才是来源可信；package self-check 仅包内自洽，
+必须打印 NOT source trust，不能和 pinned 混成一句 OK。
+任一校验失败都会打印 RESULT FAIL 并返回非零退出码；链、输入与签名一致仍不代表结论正确，
+结论是否一致要重跑引擎（`python -m src.cli replay <包>`）。
 """
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -1159,12 +1188,20 @@ from pathlib import Path, PurePosixPath
 
 GENESES = "wca-audit-chain-v1"
 MANIFEST_CHECKSUM_FIELD = "manifest_checksum"
+SIGNATURE_FIELD = "signature"
+SIGNATURE_ALG = "Ed25519"
+SIGNATURE_REQUIRED_FIELDS = ("alg", "key_id", "created_at", "public_key_b64",
+                             "signature_b64")
 TRIPLE_KEYS = ("rule_pack_version", "input_fingerprint", "conclusion_digest")
 EVIDENCE_SCHEMA_RE = re.compile(r"^wca-evidence-package-v(\d+)$")
 
 
 def h(s):
     return hashlib.sha256(s.encode()).hexdigest()
+
+
+def digest_bytes(data):
+    return hashlib.sha256(data).hexdigest()
 
 
 def schema_version(doc):
@@ -1177,10 +1214,98 @@ def schema_version(doc):
 
 
 def checksum_of(doc):
-    """与导出方同口径：排除 manifest_checksum 自身后做规范 JSON + SHA-256。"""
-    payload = {k: v for k, v in doc.items() if k != MANIFEST_CHECKSUM_FIELD}
+    """与导出方同口径：排除 manifest_checksum 与 signature 后做规范 JSON + SHA-256。"""
+    payload = {k: v for k, v in doc.items()
+               if k not in (MANIFEST_CHECKSUM_FIELD, SIGNATURE_FIELD)}
     raw = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return h(raw)
+
+
+def decode_b64(value, label, length=None):
+    try:
+        raw = base64.b64decode(str(value).strip(), validate=True)
+    except Exception:
+        raise ValueError(label + " 不是合法 Base64")
+    if length is not None and len(raw) != length:
+        raise ValueError(label + " 长度应为 %d 字节，实际 %d" % (length, len(raw)))
+    return raw
+
+
+def key_id_for_public_key(public):
+    return "ed25519:" + digest_bytes(public)
+
+
+def signature_payload(manifest, audit_chain_head):
+    triple = manifest.get("triple") or {}
+    return {
+        "schema": manifest.get("schema"),
+        "rule_pack_version": triple.get("rule_pack_version"),
+        "input_fingerprint": triple.get("input_fingerprint"),
+        "conclusion_digest": triple.get("conclusion_digest"),
+        "manifest_checksum": manifest.get("manifest_checksum"),
+        "audit_chain_head": audit_chain_head,
+    }
+
+
+def verify_signature(manifest, audit_chain_head, pinned_public_keys):
+    """返回 present/ok/trust/key_id/reason；缺字段/坏签名/pin 不匹配都失败关闭。"""
+    block = manifest.get(SIGNATURE_FIELD)
+    result = {"present": isinstance(block, dict), "ok": False,
+              "trust": "none", "key_id": "", "reason": ""}
+    if not isinstance(block, dict):
+        result["reason"] = "缺少 manifest.signature"
+        return result
+    missing = [k for k in SIGNATURE_REQUIRED_FIELDS
+               if not isinstance(block.get(k), str) or not block.get(k)]
+    if missing:
+        result["reason"] = "manifest.signature 缺字段或为空：" + ",".join(missing)
+        return result
+    if block["alg"] != SIGNATURE_ALG:
+        result["reason"] = "不支持的签名算法：" + str(block["alg"])
+        return result
+    try:
+        public = decode_b64(block["public_key_b64"], "public_key_b64", 32)
+        signature = decode_b64(block["signature_b64"], "signature_b64", 64)
+    except ValueError as exc:
+        result["reason"] = str(exc)
+        return result
+    key_id = key_id_for_public_key(public)
+    result["key_id"] = key_id
+    if block["key_id"] != key_id:
+        result["reason"] = "key_id 与包内公钥指纹不一致"
+        return result
+    if pinned_public_keys:
+        matched = [p for p in pinned_public_keys
+                   if key_id_for_public_key(p) == key_id]
+        if not matched:
+            result["reason"] = "签名 key_id 不在外部 pin 公钥集合中"
+            return result
+        if matched[0] != public:
+            result["reason"] = "包内公钥与 pin 公钥字节不一致"
+            return result
+        public = matched[0]
+        result["trust"] = "pinned"
+    else:
+        result["trust"] = "package-self-check"
+    try:
+        from nacl.exceptions import BadSignatureError
+        from nacl.signing import VerifyKey
+    except Exception:
+        result["reason"] = "未安装 PyNaCl，无法验签（见 verify-requirements.txt）"
+        return result
+    payload = json.dumps(signature_payload(manifest, audit_chain_head), sort_keys=True,
+                         ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    try:
+        VerifyKey(public).verify(payload, signature)
+    except BadSignatureError:
+        result["reason"] = "Ed25519 签名校验失败（manifest/链头/公钥不匹配或签名被改）"
+        return result
+    except Exception as exc:
+        result["reason"] = "验签异常：%s: %s" % (type(exc).__name__, exc)
+        return result
+    result["ok"] = True
+    result["reason"] = "签名有效"
+    return result
 
 
 ANCHOR_KEYS = ("schema_version", "rule_pack_version", "input_fingerprint",
@@ -1210,10 +1335,24 @@ def parse_anchor(raw):
             "input_fingerprint": parts[2], "conclusion_digest": parts[3]}
 
 
+def load_pinned_public_keys(values):
+    """--public-key 支持文件路径或裸 Base64；多把用于轮换期并存。"""
+    out = []
+    for value in values or []:
+        path = Path(str(value))
+        try:
+            raw_text = path.read_text(encoding="utf-8") if path.is_file() else str(value)
+            out.append(decode_b64(raw_text, "公钥", 32))
+        except (OSError, ValueError) as exc:
+            raise ValueError("公钥读取失败（%s）：%s" % (value, exc))
+    return out
+
+
 def expected_anchors_from_args():
-    """解析 --expect-anchor / WCA_EXPECT_ANCHOR；无四元组时回退 --expect-triple。"""
+    """解析锚点与签名参数；无四元组时回退 --expect-triple。"""
     parser = argparse.ArgumentParser(
-        description="独立复核举证包；可选传入包外记录的三/四元组作为外部锚点。")
+        description="独立复核举证包；可选传入包外记录的三/四元组作为外部锚点，"
+                    "以及外部固定公钥做签名 pin。")
     parser.add_argument(
         "--expect-anchor",
         help="外部期望四元组：schema_version,rule_pack_version,input_fingerprint,"
@@ -1222,22 +1361,42 @@ def expected_anchors_from_args():
         "--expect-triple",
         help="外部期望三元组：rule_pack_version,input_fingerprint,conclusion_digest"
              "（不约束 schema）；也可用环境变量 WCA_EXPECT_TRIPLE")
+    parser.add_argument(
+        "--public-key", action="append", default=None, dest="public_keys",
+        help="外部固定公钥（文件路径或 Base64），可重复传入以支持轮换；"
+             "也可用环境变量 WCA_PUBLIC_KEY（逗号分隔）。不传时只做包内自洽验签")
+    parser.add_argument(
+        "--require-signature", action="store_true",
+        help="旧 v1/v2 包没有签名也判失败；v3 缺签名始终失败。"
+             "也可用环境变量 WCA_REQUIRE_SIGNATURE=1")
     args = parser.parse_args()
     raw_anchor = args.expect_anchor if args.expect_anchor is not None \
         else os.environ.get("WCA_EXPECT_ANCHOR")
     raw_triple = args.expect_triple if args.expect_triple is not None \
         else os.environ.get("WCA_EXPECT_TRIPLE")
+    pinned_values = list(args.public_keys or [])
+    env_public = os.environ.get("WCA_PUBLIC_KEY")
+    if env_public:
+        pinned_values.extend(p.strip() for p in env_public.split(",") if p.strip())
+    require_signature = bool(args.require_signature) or str(
+        os.environ.get("WCA_REQUIRE_SIGNATURE") or "").strip().lower() in (
+            "1", "true", "yes", "on")
+    try:
+        pinned = load_pinned_public_keys(pinned_values)
+    except ValueError as exc:
+        return None, None, "PIN FAIL " + str(exc), [], require_signature
     if raw_anchor:
         try:
-            return parse_anchor(raw_anchor), None, None
+            return parse_anchor(raw_anchor), None, None, pinned, require_signature
         except ValueError as exc:
-            return None, None, "ANCHOR FAIL " + str(exc)
+            return None, None, "ANCHOR FAIL " + str(exc), pinned, require_signature
     if raw_triple:
         parts = [p.strip() for p in str(raw_triple).split(",")]
         if len(parts) != 3 or any(not p for p in parts):
-            return None, None, "TRIPLE FAIL 期望三元组格式非法（需要三段逗号分隔的非空值）"
-        return None, dict(zip(TRIPLE_KEYS, parts)), None
-    return None, None, None
+            return (None, None, "TRIPLE FAIL 期望三元组格式非法（需要三段逗号分隔的非空值）",
+                    pinned, require_signature)
+        return None, dict(zip(TRIPLE_KEYS, parts)), None, pinned, require_signature
+    return None, None, None, pinned, require_signature
 
 
 def safe_path(root, arcname):
@@ -1325,7 +1484,8 @@ def main():
         print("RESULT FAIL")
         return 1
 
-    expected_anchor, expected, expected_error = expected_anchors_from_args()
+    expected_anchor, expected, expected_error, pinned_keys, require_signature = \
+        expected_anchors_from_args()
     if expected_error:
         print(expected_error)
         print("RESULT FAIL")
@@ -1366,6 +1526,7 @@ def main():
     except Exception as exc:
         ok = False
         print("CHAIN FAIL 无法读取 audit_chain.jsonl：", type(exc).__name__, str(exc))
+    chain_head = prev
     print("CHAIN", "OK" if ok and epoch_ok else "FAIL", "events=", n,
           "segment=", segment.get("epoch_id", "legacy"))
     print("TRIPLE", json.dumps(triple, sort_keys=True))
@@ -1474,7 +1635,54 @@ def main():
             inputs_ok = False
             print("INPUTS FAIL manifest.inputs.packed 不是整数")
 
-    result_ok = epoch_ok and ok and triple_ok and anchor_ok and inputs_ok
+    # 结论集字节哈希：导出时写进 manifest（进而进 checksum 与签名），
+    # 这里必须重算，才能发现“只改 conclusions_final.csv、不动 manifest”的伪造。
+    artifact_ok = True
+    declared_artifact = manifest.get("conclusions_sha256")
+    if declared_artifact is None:
+        if schema_ver >= 3:
+            artifact_ok = False
+            print("ARTIFACT FAIL v3 包缺少 manifest.conclusions_sha256")
+        else:
+            print("ARTIFACT NONE（本包未声明结论集哈希）")
+    else:
+        try:
+            actual_artifact = digest_bytes(
+                safe_path(root, "conclusions_final.csv").read_bytes())
+            if not isinstance(declared_artifact, str) or actual_artifact != declared_artifact:
+                artifact_ok = False
+                print("ARTIFACT FAIL conclusions_final.csv 与 manifest.conclusions_sha256 不一致")
+            else:
+                print("ARTIFACT OK conclusions_final.csv")
+        except Exception as exc:
+            artifact_ok = False
+            print("ARTIFACT FAIL 无法校验结论集：", type(exc).__name__, str(exc))
+
+    # 签名覆盖 schema/triple/manifest_checksum 与实际链头；包内公钥只做自洽，
+    # 外部 pin 才证明来源。任何“有签名但验不过”都不允许降级成旧包路径。
+    signature = verify_signature(manifest, chain_head, pinned_keys)
+    signature_ok = True
+    if signature["present"]:
+        if signature["ok"]:
+            if signature["trust"] == "pinned":
+                print("SIGNATURE OK (pinned key_id=%s)" % signature["key_id"])
+            else:
+                print("SIGNATURE OK (package self-check; NOT source trust, key_id=%s)"
+                      % signature["key_id"])
+        else:
+            signature_ok = False
+            print("SIGNATURE FAIL", signature["reason"])
+    elif schema_ver >= 3:
+        signature_ok = False
+        print("SIGNATURE FAIL v3 包缺少 manifest.signature")
+    elif require_signature:
+        signature_ok = False
+        print("SIGNATURE FAIL 本包无签名，且 --require-signature 要求必须有签名")
+    else:
+        print("SIGNATURE NONE（旧包无签名，仅包内自洽；来源不可证明）")
+
+    result_ok = (epoch_ok and ok and triple_ok and anchor_ok and inputs_ok
+                 and artifact_ok and signature_ok)
     print("RESULT", "OK" if result_ok else "FAIL")
     return 0 if result_ok else 1
 

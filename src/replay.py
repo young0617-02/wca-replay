@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path, PurePosixPath
 
-from . import ENGINE_VERSION
+from . import ENGINE_VERSION, signing
 from .config import Config
 from .db import DB_BACKEND_SQLITE, connect, init_db
 from .engine import run_check
@@ -401,18 +401,25 @@ def _base_result(package: Path | str, manifest: dict) -> dict:
         "pinned_params": {k: scope[k] for k in PINNED_SCOPE_PARAMS if k in scope},
         "inherited_params_note": "包内 scope 未记录的判据参数沿用代码默认值（不读本机 .env）",
         "manifest_checksum": "missing",
+        "signature_present": False, "signature_ok": False, "signature_trust": "none",
+        "signature_key_id": "", "signature_reason": "",
         "ok": False, "reason": "",
     }
 
 
 def replay(package: Path | str, *, limits: ZipLimits | None = None,
            expect_triple: str | tuple[str, str, str] | None = None,
-           expect_anchor: str | tuple[str, str, str, str] | None = None) -> dict:
+           expect_anchor: str | tuple[str, str, str, str] | None = None,
+           public_keys: list[str] | tuple[str, ...] | None = None,
+           require_signature: bool = False) -> dict:
     """重放一个举证包，返回可比对的字典（不抛异常即代表流程跑通，结论看 ok 字段）。
 
     `expect_anchor`（或 `WCA_EXPECT_ANCHOR`）是包外记录的四元组锚点，优先使用；
     它先比对 schema 版本与三元组，不一致直接返回 ok=false。`expect_triple`
     （或 `WCA_EXPECT_TRIPLE`）保留兼容，但**不约束 schema**。
+    `public_keys` 是包外固定公钥（文件路径或 Base64），可传多把支持轮换；不传时
+    验签只能证明“包内自洽”，返回值 `signature_trust=package-self-check`。
+    `require_signature=True` 时旧 v1/v2 包无签名也失败；v3 缺签名始终失败。
     """
     with unpacked(package, limits=limits) as d:
         manifest = json.loads(
@@ -495,6 +502,45 @@ def replay(package: Path | str, *, limits: ZipLimits | None = None,
                 return result
         if not chain["ok"]:
             result["reason"] = f"审计链断裂：seq={chain['broken_at_seq']} {chain['reason']}"
+            return result
+        # 结论集字节哈希：只有声明了才校验；v3 必须声明，否则无法证明结论文件未被改。
+        declared_artifact = manifest.get("conclusions_sha256")
+        if declared_artifact is None:
+            if schema_ver >= 3:
+                result["reason"] = "ARTIFACT FAIL v3 包缺少 manifest.conclusions_sha256"
+                return result
+        else:
+            try:
+                actual_artifact = sha256_hex(
+                    _package_member(d, "conclusions_final.csv").read_bytes())
+            except Exception as exc:
+                result["reason"] = ("ARTIFACT FAIL 无法读取 conclusions_final.csv："
+                                    f"{type(exc).__name__}: {exc}")
+                return result
+            if not isinstance(declared_artifact, str) or actual_artifact != declared_artifact:
+                result["reason"] = (
+                    "ARTIFACT FAIL conclusions_final.csv 与 manifest.conclusions_sha256 不一致")
+                return result
+        try:
+            pinned = signing.load_public_keys(public_keys)
+        except ValueError as exc:
+            result["reason"] = f"PIN FAIL {exc}"
+            return result
+        signature = signing.verify_signature(manifest, chain["head_hash"], pinned)
+        result.update({"signature_present": signature["present"],
+                       "signature_ok": signature["ok"],
+                       "signature_trust": signature["trust"],
+                       "signature_key_id": signature["key_id"],
+                       "signature_reason": signature["reason"]})
+        if signature["present"]:
+            if not signature["ok"]:
+                result["reason"] = f"SIGNATURE FAIL {signature['reason']}"
+                return result
+        elif schema_ver >= 3:
+            result["reason"] = "SIGNATURE FAIL v3 包缺少 manifest.signature"
+            return result
+        elif require_signature:
+            result["reason"] = "SIGNATURE FAIL 本包无签名，且 require_signature=True"
             return result
         if triple["rule_pack_version"] not in _supported_rule_packs():
             result["reason"] = (

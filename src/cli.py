@@ -11,7 +11,7 @@ import sys
 from datetime import date, datetime
 from pathlib import Path
 
-from . import ENGINE_VERSION
+from . import ENGINE_VERSION, signing
 from .agent import ComplianceAgent
 from .anomaly import review_backlog, rule_hit_counts, severity_rollup, write_anomaly_report
 from .config import Config
@@ -29,7 +29,7 @@ INGEST_ORDER = ("org", "employee", "schedule", "punch", "leave", "trip", "correc
 # 供演示脚本自洽性检查（A12）使用：命令名必须与 build_parser 中的注册保持一致
 SUBCOMMAND_NAMES = ("init", "db-target", "gen", "ingest", "kb", "check", "report", "export",
                     "replay", "ask", "verify", "covers", "start", "stop", "status", "users",
-                    "approval", "approval-doc", "approval-migrate", "all")
+                    "approval", "approval-doc", "approval-migrate", "keygen", "all")
 KIND_BY_FILE = {
     "org.csv": "org",
     "employee.csv": "employee", "schedule.csv": "schedule", "punch.csv": "punch",
@@ -211,7 +211,9 @@ def cmd_export(args) -> int:
         rec = record_delivery_event(conn, cfg, run_id, recorded_by=recorded_by)
         print(f"登记交付事件（非密码学签名；--sign-as 为迁移期旧别名）：{recorded_by} "
               f"审计序号 {rec['audit_seq']} 链哈希 {rec['entry_hash'][:16]}…")
-    manifest = export_package(conn, cfg, run_id, include_inputs=not args.no_inputs)
+    signing_key = signing.load_signing_key(getattr(args, "signing_key", None))
+    manifest = export_package(conn, cfg, run_id, include_inputs=not args.no_inputs,
+                              signing_key=signing_key)
     inputs = manifest["inputs"]
     print(f"举证包：{manifest['package_zip']}")
     print(f"  对外结论 {manifest['counts']['final_conclusions']} 条 / 未人工确认 {manifest['counts']['unsigned_pending']} 条"
@@ -226,8 +228,38 @@ def cmd_export(args) -> int:
     print(f"  三元组 {json.dumps(manifest['triple'], ensure_ascii=False, sort_keys=True)}")
     print(f"  审计链 {manifest['chain_verification']}")
     print(f"  manifest sha256={manifest['manifest_sha256'][:20]}… 结论 {manifest['counts']['findings']} 条")
-    print("  复核方重放：unzip 后 python verify.py（链+输入哈希），"
+    signature = manifest.get("signature") or {}
+    if signature:
+        print(f"  Ed25519 签名 key_id={signature.get('key_id', '')}（包内公钥只证明自洽；"
+              "来源可信需复核方用 --public-key 固定公钥）")
+    else:
+        print("  未签名（v2）；如需签名：--signing-key <私钥文件> 或 WCA_SIGNING_KEY_FILE")
+    print("  复核方重放：unzip 后 python verify.py（链+输入+结论集哈希+验签），"
           "或 python -m src.cli replay <包>（把输入喂回引擎比三元组）")
+    return 0
+
+
+def cmd_keygen(args) -> int:
+    """生成本机 Ed25519 私钥与公钥；私钥不覆盖、不进包、不打印内容。"""
+    out = Path(args.out)
+    public_out = Path(args.public_out) if args.public_out else None
+    if not args.force:
+        existing = [str(p) for p in (out, public_out)
+                    if p is not None and p.exists()]
+        if existing:
+            print("密钥文件已存在，拒绝覆盖：" + "、".join(existing)
+                  + "（确认要覆盖请加 --force）", file=sys.stderr)
+            return 1
+    key = signing.generate_keypair()
+    signing.write_private_key(out, key, force=args.force)
+    public = key.verify_key.encode()
+    if public_out is not None:
+        signing.write_public_key(public_out, public, force=args.force)
+    print(f"私钥：{out}（权限已收紧；不要提交、不要外发）")
+    if public_out is not None:
+        print(f"公钥：{public_out}")
+    print(f"key_id：{signing.key_id_for_public_key(public)}")
+    print(f"公钥 Base64：{signing.public_key_b64(public)}")
     return 0
 
 
@@ -235,7 +267,9 @@ def cmd_replay(args) -> int:
     from .replay import replay
 
     res = replay(args.package, expect_triple=getattr(args, "expect_triple", None),
-                 expect_anchor=getattr(args, "expect_anchor", None))
+                 expect_anchor=getattr(args, "expect_anchor", None),
+                 public_keys=getattr(args, "public_key", None),
+                 require_signature=bool(getattr(args, "require_signature", False)))
     if args.json:
         print(json.dumps(res, ensure_ascii=False, indent=2, sort_keys=True))
         return 0 if res["ok"] else 1
@@ -252,6 +286,16 @@ def cmd_replay(args) -> int:
           + (f"，导出时缺项 {res['inputs_missing']}" if res["inputs_missing"] else ""))
     print(f"  钉回口径参数 {json.dumps(res['pinned_params'], ensure_ascii=False, sort_keys=True)}")
     print(f"  {res['inherited_params_note']}")
+    if res.get("signature_present"):
+        trust = ("pinned（来源可信）" if res["signature_trust"] == "pinned"
+                 else "package self-check（NOT source trust，仅包内自洽）")
+        print(f"  签名：{'有效' if res['signature_ok'] else '无效'} / {trust}"
+              f" / key_id={res.get('signature_key_id') or '?'}"
+              + (f" —— {res['signature_reason']}" if not res["signature_ok"] else ""))
+    else:
+        print("  签名：无（旧包；来源不可证明）"
+              + (" —— 已要求 --require-signature" if getattr(args, "require_signature", False)
+                 else ""))
     if "actual_triple" not in res:
         print(f"  结论：{'通过' if res['ok'] else '无法重放'} —— {res['reason']}")
         return 0 if res["ok"] else 1
@@ -680,6 +724,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="迁移期旧别名，等价于 --record-delivery-as（非密码学签名）")
     p.add_argument("--no-inputs", dest="no_inputs", action="store_true",
                    help="不打包原始输入 CSV（包会因此无法离线重放）")
+    p.add_argument("--signing-key", dest="signing_key", default=None,
+                   help="Ed25519 私钥文件（单行 Base64 seed）；不传则读 "
+                        "WCA_SIGNING_KEY_FILE / WCA_SIGNING_KEY_B64，仍无则导出 v2 无签名包")
     p.set_defaults(fn=cmd_export)
     p = sub.add_parser("replay", help="拿举证包自己重放：解包 -> 重导输入 -> 重跑引擎 -> 比三元组")
     p.add_argument("package", help="包 zip 或已解压的目录")
@@ -690,7 +737,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--expect-anchor", default=None,
                    help="包外记录的外部四元组：schema_version,rule_pack_version,"
                         "input_fingerprint,conclusion_digest；也可用环境变量 WCA_EXPECT_ANCHOR")
+    p.add_argument("--public-key", action="append", default=None, dest="public_key",
+                   help="外部固定公钥（文件路径或 Base64），可重复传入以支持轮换；"
+                        "不传时验签只证明包内自洽，不能证明来源")
+    p.add_argument("--require-signature", action="store_true",
+                   help="旧 v1/v2 包无签名也判失败；v3 缺签名始终失败")
     p.set_defaults(fn=cmd_replay)
+    p = sub.add_parser("keygen", help="生成 Ed25519 签名密钥（私钥不覆盖，公钥可公开）")
+    p.add_argument("--out", default="var/keys/ed25519.key", help="私钥输出路径")
+    p.add_argument("--public-out", dest="public_out", default=None,
+                   help="公钥输出路径（可选；不给则只打印 Base64）")
+    p.add_argument("--force", action="store_true", help="允许覆盖已存在的密钥文件")
+    p.set_defaults(fn=cmd_keygen)
     p = sub.add_parser("ask", help="问一答（走同一条 API 链路）")
     p.add_argument("question"); p.add_argument("--as", dest="actor", default="E001")
     p.set_defaults(fn=cmd_ask)

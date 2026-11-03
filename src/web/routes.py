@@ -29,6 +29,7 @@ from fastapi import Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
+from .. import signing
 from ..agent import ComplianceAgent
 from ..anomaly import (build_anomalies, decide_review, review_queue, rule_hit_counts,
                        severity_rollup)
@@ -325,14 +326,21 @@ def register_web_routes(app: Any, cfg: Config, get_conn) -> None:
             # 注意：只写审计事件，不是密码学签名。
             record_delivery_event(conn, cfg, run_id, recorded_by=user.username)
             delivery_recorded = True
+        # 服务端配置了签名私钥（WCA_SIGNING_KEY_FILE / _B64）时导出 v3 签名包；
+        # 否则保持既有 v2 无签名行为。私钥不返回给前端，只回公钥指纹。
+        signing_key = signing.load_signing_key()
         try:
-            manifest = export_package(conn, cfg, run_id)
+            manifest = export_package(conn, cfg, run_id, signing_key=signing_key)
         except ExportBusyError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        signature = manifest.get("signature") or {}
         return {"package_zip": manifest["package_zip"], "triple": manifest["triple"],
                 "manifest_sha256": manifest["manifest_sha256"], "counts": manifest["counts"],
                 "chain_ok": manifest["chain_verification"]["ok"],
-                "delivery_event_recorded": delivery_recorded}
+                "delivery_event_recorded": delivery_recorded,
+                # 增量字段：既有字段语义不变；仅新增“是否签名/公钥指纹”。
+                "signed": bool(signature),
+                "signature_key_id": str(signature.get("key_id") or "")}
 
     # ------------------------------------------------------------------ 视图④：审批台账
     @app.get("/approvals", response_class=HTMLResponse, summary="审批台账：批文列表")

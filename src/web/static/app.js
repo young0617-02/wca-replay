@@ -151,9 +151,12 @@ function wcaBindReview() {
       const delivery = r.delivery_event_recorded
         ? " / 已登记交付事件（非密码学签名）"
         : " / 未登记交付事件";
+      const signed = r.signed
+        ? ` / 包已签名（${r.signature_key_id || "key_id 未知"}）`
+        : " / 包未签名（v2）";
       msg.textContent = `举证包 ${(r.package_zip || "").split(/[\\/]/).pop()}：`
         + `结论 ${r.counts.findings} 条 / 审计链 ${r.chain_ok ? "完整" : "已断"} / `
-        + `manifest ${(r.manifest_sha256 || "").slice(0, 12)}…${delivery}`;
+        + `manifest ${(r.manifest_sha256 || "").slice(0, 12)}…${signed}${delivery}`;
     } catch (e) { msg.textContent = "导出失败：" + e.message; }
   });
 }

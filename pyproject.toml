@@ -15,6 +15,7 @@ dependencies = [
     "jinja2==3.1.6",
     "psycopg==3.3.6",
     "psycopg-binary==3.3.6",
+    "pynacl==1.6.2",
 ]
 
 [dependency-groups]
@@ -37,6 +38,7 @@ constraint-dependencies = [
     "annotated-types==0.8.0",
     "anyio==4.15.1",
     "certifi==2026.10.23",
+    "cffi==2.1.1",
     "click==8.5.0",
     "colorama==0.4.6",
     "h11==0.16.0",
@@ -48,6 +50,7 @@ constraint-dependencies = [
     "pluggy==1.6.0",
     "pydantic==2.13.5",
     "pydantic-core==2.46.5",
+    "pycparser==3.12",
     "typing-extensions==4.16.0",
     "typing-inspection==0.4.4",
 ]

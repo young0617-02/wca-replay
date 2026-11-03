@@ -62,9 +62,11 @@ def digest_of(obj: object) -> str:
 
 
 MANIFEST_CHECKSUM_FIELD = "manifest_checksum"
+SIGNATURE_FIELD = "signature"
 EVIDENCE_PACKAGE_SCHEMA_V1 = "wca-evidence-package-v1"
 EVIDENCE_PACKAGE_SCHEMA_V2 = "wca-evidence-package-v2"
-# 当前导出使用 v2；v1 是既有历史包（可能没有 manifest_checksum）。
+EVIDENCE_PACKAGE_SCHEMA_V3 = "wca-evidence-package-v3"
+# 无签名导出仍是 v2；只有显式提供签名私钥时才写 v3 + signature。
 EVIDENCE_PACKAGE_SCHEMA = EVIDENCE_PACKAGE_SCHEMA_V2
 _EVIDENCE_SCHEMA_RE = re.compile(r"^wca-evidence-package-v(\d+)$")
 
@@ -96,13 +98,13 @@ def anchor_schema_version(value: object) -> int | None:
 
 
 def manifest_checksum(doc: dict) -> str:
-    """manifest 自校验和：覆盖除 `manifest_checksum` 自身以外的全部字段。
+    """manifest 自校验和：覆盖除自身与签名块以外的全部字段。
 
-    口径与包内 verify.py 独立实现必须逐字节一致：规范 JSON（key 排序、
-    无空白、保留中文）后做 SHA-256。它只能发现“单个字段被改而校验和没重算”，
-    不能替代签名或外部可信锚点。
+    `signature` 必须排除，否则“先算校验和再签名”会形成循环；签名 payload
+    会覆盖 `manifest_checksum`，因此签名仍间接覆盖除签名外的全部 manifest 字段。
     """
-    payload = {k: v for k, v in doc.items() if k != MANIFEST_CHECKSUM_FIELD}
+    payload = {k: v for k, v in doc.items()
+               if k not in (MANIFEST_CHECKSUM_FIELD, SIGNATURE_FIELD)}
     return sha256_hex(canonical_json(payload))
 
 
