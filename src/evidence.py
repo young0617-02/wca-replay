@@ -985,6 +985,10 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
     for e in collected["entries"]:
         shutil.copyfile(e["source"], work / e["arcname"])
 
+    # 输入摘要覆盖 inputs/ 下实际存在的每个文件（含 inputs/manifest.json 本身），
+    # 在签名前算好并写入 manifest；签名 payload 会覆盖它，避免“只换输入不换 manifest”。
+    inputs_digest = signing.compute_inputs_digest_from_dir(work) if signing_key else ""
+
     if chain_epoch:
         verification = verify_chain(conn, cfg, upto_seq=chain_max_seq, segment=chain_epoch)
     elif str(run["rule_pack_version"]) == RULE_PACK_V4 and audit_epoch(conn, RULE_PACK_V5):
@@ -1055,6 +1059,7 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
                    "reason": collected["reason"],
                    "replay_command": "python -m src.cli replay <本包.zip 或解包目录>"},
         "approval_source": approval_source,
+        **({"inputs_digest": inputs_digest} if signing_key else {}),
         "artifacts": [p.name for p in (findings_csv, manifest_files, chain_json, issues_csv,
                                        conclusions_csv, resp_path, nc_path, nc_md)]
                       + [INPUTS_MANIFEST_NAME] + [e["arcname"] for e in collected["entries"]],
@@ -1235,6 +1240,45 @@ def key_id_for_public_key(public):
     return "ed25519:" + digest_bytes(public)
 
 
+INPUTS_DIRNAME = "inputs"
+INPUT_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def normalize_input_path(path):
+    """包内相对路径统一为 `/`；不折叠大小写，`..` 直接拒绝。"""
+    text = str(path).replace(chr(92), "/")
+    parts = [p for p in text.split("/") if p not in ("", ".")]
+    if not parts:
+        raise ValueError("输入文件路径为空")
+    if any(p == ".." for p in parts):
+        raise ValueError("输入文件路径不允许包含 ..：" + str(path))
+    return "/".join(parts)
+
+
+def compute_inputs_digest(root):
+    """重算 inputs_digest：[[path, sha256], ...] 按路径字节序排序后 canonical JSON + SHA-256。"""
+    base = safe_path(root, INPUTS_DIRNAME)
+    if not base.is_dir():
+        raise ValueError("包内没有 inputs/ 目录")
+    entries = []
+    seen = set()
+    for path in base.rglob("*"):
+        if path.is_symlink():
+            raise ValueError("输入目录包含符号链接：" + str(path))
+        if not path.is_file():
+            continue
+        rel = normalize_input_path(path.relative_to(root).as_posix())
+        digest = digest_bytes(path.read_bytes())
+        if not INPUT_SHA256_RE.match(digest):
+            raise ValueError("输入文件 sha256 非法：" + rel)
+        if rel in seen:
+            raise ValueError("输入文件路径重复（规范化后）：" + rel)
+        seen.add(rel)
+        entries.append([rel, digest])
+    entries.sort(key=lambda item: item[0].encode("utf-8"))
+    return h(json.dumps(entries, sort_keys=True, ensure_ascii=False, separators=(",", ":")))
+
+
 def signature_payload(manifest, audit_chain_head):
     triple = manifest.get("triple") or {}
     return {
@@ -1242,6 +1286,7 @@ def signature_payload(manifest, audit_chain_head):
         "rule_pack_version": triple.get("rule_pack_version"),
         "input_fingerprint": triple.get("input_fingerprint"),
         "conclusion_digest": triple.get("conclusion_digest"),
+        "inputs_digest": manifest.get("inputs_digest"),
         "manifest_checksum": manifest.get("manifest_checksum"),
         "audit_chain_head": audit_chain_head,
     }
@@ -1635,6 +1680,30 @@ def main():
             inputs_ok = False
             print("INPUTS FAIL manifest.inputs.packed 不是整数")
 
+    # 输入摘要：v3 必须覆盖 inputs/ 下实际每个文件（含 inputs/manifest.json），
+    # 这样单独跑 verify.py 也能发现“整批换输入并同步改登记表”的伪造。
+    inputs_digest_bound = False
+    declared_inputs_digest = manifest.get("inputs_digest")
+    if declared_inputs_digest is None:
+        if schema_ver >= 3:
+            inputs_ok = False
+            print("INPUTS FAIL v3 包缺少 manifest.inputs_digest")
+        else:
+            print("INPUTS DIGEST NONE（本包未声明输入摘要）")
+    else:
+        try:
+            actual_inputs_digest = compute_inputs_digest(root)
+            if not isinstance(declared_inputs_digest, str) \
+                    or actual_inputs_digest != declared_inputs_digest:
+                inputs_ok = False
+                print("INPUTS FAIL 输入摘要与 manifest.inputs_digest 不一致")
+            else:
+                inputs_digest_bound = True
+                print("INPUTS DIGEST OK", actual_inputs_digest)
+        except Exception as exc:
+            inputs_ok = False
+            print("INPUTS FAIL 无法计算输入摘要：", type(exc).__name__, str(exc))
+
     # 结论集字节哈希：导出时写进 manifest（进而进 checksum 与签名），
     # 这里必须重算，才能发现“只改 conclusions_final.csv、不动 manifest”的伪造。
     artifact_ok = True
@@ -1680,6 +1749,11 @@ def main():
         print("SIGNATURE FAIL 本包无签名，且 --require-signature 要求必须有签名")
     else:
         print("SIGNATURE NONE（旧包无签名，仅包内自洽；来源不可证明）")
+
+    if inputs_digest_bound and signature["present"] and signature["ok"]:
+        print("INPUTS SIGNED OK (inputs_digest bound by signature)")
+    elif inputs_digest_bound:
+        print("INPUTS SELF-CHECK OK (inputs_digest matches manifest; NOT signed)")
 
     result_ok = (epoch_ok and ok and triple_ok and anchor_ok and inputs_ok
                  and artifact_ok and signature_ok)

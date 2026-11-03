@@ -306,3 +306,93 @@ def test_keygen_refuses_overwrite_then_force(tmp_path):
     assert cli.main(["keygen", "--out", str(key_path), "--public-out", str(pub_path)]) == 1
     assert cli.main(["keygen", "--out", str(key_path), "--public-out", str(pub_path),
                      "--force"]) == 0
+
+
+def _inputs_manifest(pkg: Path) -> dict:
+    return json.loads((pkg / "inputs" / "manifest.json").read_text(encoding="utf-8"))
+
+
+def _write_inputs_manifest(pkg: Path, doc: dict) -> None:
+    (pkg / "inputs" / "manifest.json").write_text(
+        json.dumps(doc, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+
+
+def test_swap_input_csv_with_synced_manifest_fails_inputs_digest(signed_packed, tmp_path):
+    """换掉 inputs CSV 并同步改登记表哈希：现有 INPUTS 逐文件检查会放过，输入摘要必须拦住。"""
+    _, _, _, zip_path, _, _ = signed_packed
+    pkg = _unpack(zip_path, tmp_path / "swap-input")
+    im = _inputs_manifest(pkg)
+    entry = next(e for e in im["entries"] if e["kind"] == "punch")
+    target = pkg / entry["arcname"]
+    original = target.read_bytes()
+    forged = original.replace(b"T-STD", b"X-STD", 1)
+    assert forged != original and len(forged) == len(original)
+    target.write_bytes(forged)
+    entry["sha256"] = hashlib.sha256(forged).hexdigest()
+    _write_inputs_manifest(pkg, im)
+
+    proc = _run_verify(pkg)
+    assert proc.returncode != 0
+    assert "INPUTS FAIL" in proc.stdout
+    assert "RESULT FAIL" in proc.stdout
+
+    res = replay(pkg)
+    assert not res["ok"]
+    assert "INPUTS FAIL" in res["reason"]
+
+
+def test_tamper_inputs_manifest_only_fails_inputs_digest(signed_packed, tmp_path):
+    """只改 inputs/manifest.json（不动 CSV/条目哈希）：登记表本身也必须被签名覆盖。"""
+    _, _, _, zip_path, _, _ = signed_packed
+    pkg = _unpack(zip_path, tmp_path / "tamper-inputs-manifest")
+    im = _inputs_manifest(pkg)
+    im["forged_note"] = "只改登记表"
+    _write_inputs_manifest(pkg, im)
+
+    proc = _run_verify(pkg)
+    assert proc.returncode != 0
+    assert "INPUTS FAIL" in proc.stdout
+    assert "RESULT FAIL" in proc.stdout
+
+
+@pytest.mark.parametrize("action", ["add", "remove"])
+def test_add_or_remove_input_file_fails_inputs_digest(signed_packed, tmp_path, action):
+    """inputs/ 多一个或少一个文件，输入摘要必须变化；不能只按登记表条目校验。"""
+    _, _, _, zip_path, _, _ = signed_packed
+    pkg = _unpack(zip_path, tmp_path / f"inputs-{action}")
+    if action == "add":
+        (pkg / "inputs" / "999-extra.csv").write_text("extra\n", encoding="utf-8")
+    else:
+        im = _inputs_manifest(pkg)
+        (pkg / im["entries"][0]["arcname"]).unlink()
+
+    proc = _run_verify(pkg)
+    assert proc.returncode != 0
+    assert "INPUTS FAIL" in proc.stdout
+    assert "RESULT FAIL" in proc.stdout
+
+
+def test_inputs_digest_normalizes_separators_and_preserves_case():
+    """规范化只统一 `/`，不折叠大小写；排序按路径字节序。"""
+    from src.signing import compute_inputs_digest, normalize_input_path
+
+    assert normalize_input_path("inputs\\Foo.CSV") == "inputs/Foo.CSV"
+    assert normalize_input_path("./inputs//a.csv") == "inputs/a.csv"
+    sha_a, sha_b = "a" * 64, "b" * 64
+    entries = [["inputs\\b.csv", sha_b], ["inputs/a.csv", sha_a]]
+    assert compute_inputs_digest(entries) == compute_inputs_digest(
+        [["inputs/a.csv", sha_a], ["inputs/b.csv", sha_b]])
+    assert compute_inputs_digest([["inputs/foo.csv", sha_a]]) != \
+        compute_inputs_digest([["inputs/Foo.csv", sha_a]])
+
+
+def test_signed_package_with_external_pin_binds_inputs(signed_packed, tmp_path):
+    """正常 v3 包 + 正确 pin：输入摘要与签名同时通过。"""
+    _, _, _, zip_path, _, key = signed_packed
+    pkg = _unpack(zip_path, tmp_path / "pinned-inputs")
+    pub = _public_file(tmp_path, key, "pinned.pub")
+    proc = _run_verify(pkg, "--public-key", str(pub))
+    assert proc.returncode == 0, proc.stdout
+    assert "INPUTS SIGNED OK" in proc.stdout
+    assert "SIGNATURE OK (pinned" in proc.stdout
+    assert "RESULT OK" in proc.stdout

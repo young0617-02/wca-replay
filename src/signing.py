@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import os
+import re
 import subprocess
 import tempfile
 from datetime import datetime
@@ -128,6 +129,67 @@ def load_public_keys(values: list[str] | tuple[str, ...] | None) -> list[bytes]:
     return out
 
 
+INPUTS_DIRNAME = "inputs"
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def normalize_input_path(path: str | Path) -> str:
+    """包内相对路径规范化为 `/` 分隔；不做小写化，大小写差异视为不同路径。"""
+    text = str(path).replace("\\", "/")
+    parts = [p for p in text.split("/") if p not in ("", ".")]
+    if not parts:
+        raise ValueError("输入文件路径为空")
+    if any(p == ".." for p in parts):
+        raise ValueError(f"输入文件路径不允许包含 ..：{path!r}")
+    return "/".join(parts)
+
+
+def compute_inputs_digest(entries: list[list[str] | tuple[str, str]]) -> str:
+    """输入摘要：[[relative_path, sha256], ...] 规范化为 `/`、按路径字节序排序后 canonical JSON + SHA-256。"""
+    normalized: list[list[str]] = []
+    seen: set[str] = set()
+    for raw_path, raw_sha in entries:
+        path = normalize_input_path(raw_path)
+        digest = str(raw_sha).strip().lower()
+        if not _SHA256_RE.match(digest):
+            raise ValueError(f"输入文件 sha256 非法：{raw_path} -> {raw_sha!r}")
+        if path in seen:
+            raise ValueError(f"输入文件路径重复（规范化后）：{path}")
+        seen.add(path)
+        normalized.append([path, digest])
+    normalized.sort(key=lambda item: item[0].encode("utf-8"))
+    return sha256_hex(canonical_json(normalized))
+
+
+def _file_sha256(path: Path) -> str:
+    import hashlib
+
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        while True:
+            chunk = fh.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def compute_inputs_digest_from_dir(root: Path | str) -> str:
+    """从包根目录的 `inputs/` 递归取实际文件，计算 `inputs_digest`。"""
+    base = Path(root) / INPUTS_DIRNAME
+    if not base.is_dir():
+        raise FileNotFoundError(f"包内没有 {INPUTS_DIRNAME}/ 目录")
+    entries: list[list[str]] = []
+    for path in base.rglob("*"):
+        if path.is_symlink():
+            raise ValueError(f"输入目录包含符号链接：{path}")
+        if not path.is_file():
+            continue
+        rel = normalize_input_path(path.relative_to(Path(root)).as_posix())
+        entries.append([rel, _file_sha256(path)])
+    return compute_inputs_digest(entries)
+
+
 def signature_payload(manifest: dict, audit_chain_head: str) -> dict:
     """签名对象；canonical JSON 后跨语言可复算。"""
     triple = manifest.get("triple") or {}
@@ -136,6 +198,7 @@ def signature_payload(manifest: dict, audit_chain_head: str) -> dict:
         "rule_pack_version": triple.get("rule_pack_version"),
         "input_fingerprint": triple.get("input_fingerprint"),
         "conclusion_digest": triple.get("conclusion_digest"),
+        "inputs_digest": manifest.get("inputs_digest"),
         "manifest_checksum": manifest.get("manifest_checksum"),
         "audit_chain_head": audit_chain_head,
     }

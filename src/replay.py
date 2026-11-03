@@ -403,6 +403,7 @@ def _base_result(package: Path | str, manifest: dict) -> dict:
         "manifest_checksum": "missing",
         "signature_present": False, "signature_ok": False, "signature_trust": "none",
         "signature_key_id": "", "signature_reason": "",
+        "inputs_digest": "", "inputs_digest_ok": False,
         "ok": False, "reason": "",
     }
 
@@ -503,6 +504,25 @@ def replay(package: Path | str, *, limits: ZipLimits | None = None,
         if not chain["ok"]:
             result["reason"] = f"审计链断裂：seq={chain['broken_at_seq']} {chain['reason']}"
             return result
+        # 输入摘要：v3 必须覆盖 inputs/ 下实际每个文件（含 inputs/manifest.json）。
+        declared_inputs_digest = manifest.get("inputs_digest")
+        if declared_inputs_digest is None:
+            if schema_ver >= 3:
+                result["reason"] = "INPUTS FAIL v3 包缺少 manifest.inputs_digest"
+                return result
+        else:
+            try:
+                actual_inputs_digest = signing.compute_inputs_digest_from_dir(d)
+            except Exception as exc:
+                result["reason"] = (f"INPUTS FAIL 无法计算输入摘要："
+                                    f"{type(exc).__name__}: {exc}")
+                return result
+            result["inputs_digest"] = declared_inputs_digest
+            if not isinstance(declared_inputs_digest, str) \
+                    or actual_inputs_digest != declared_inputs_digest:
+                result["reason"] = "INPUTS FAIL 输入摘要与 manifest.inputs_digest 不一致"
+                return result
+            result["inputs_digest_ok"] = True
         # 结论集字节哈希：只有声明了才校验；v3 必须声明，否则无法证明结论文件未被改。
         declared_artifact = manifest.get("conclusions_sha256")
         if declared_artifact is None:

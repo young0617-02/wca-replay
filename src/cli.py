@@ -284,6 +284,9 @@ def cmd_replay(args) -> int:
              if not res["chain"]["ok"] else ""))
     print(f"  包内输入 {res['inputs_packed']} 个"
           + (f"，导出时缺项 {res['inputs_missing']}" if res["inputs_missing"] else ""))
+    if res.get("inputs_digest"):
+        print(f"  输入摘要：{'与 manifest/签名一致' if res['inputs_digest_ok'] else '不一致'}"
+              f"（{str(res['inputs_digest'])[:16]}…）")
     print(f"  钉回口径参数 {json.dumps(res['pinned_params'], ensure_ascii=False, sort_keys=True)}")
     print(f"  {res['inherited_params_note']}")
     if res.get("signature_present"):
