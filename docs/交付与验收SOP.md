@@ -425,11 +425,11 @@ wca replay package/<包>.zip --public-key trusted-public-key.pub `
 - 复测方仍需自行构造 A–H 坏包并留存命令/输出/退出码；本交接包按要求不放源码、docs、reports、
   测试、数据库、私钥或旧版发行物。
 
-## 10. 0.4.0 门禁、policies 与含已确认结论包实测（2026-11-04）
+## 10. 0.4.0 四项门禁、policies 与两包交接实测（2026-11-04）
 
-发行物：`dist/wca-replay-0.4.0/`，共 **342,025 字节**；commit
-`770fecc19a77216033855aa160d73d0215b09bdb`；wheel 299,593 字节，
-sha256 `0492169186f85cbb7824757f4604d78e2b27d498aefc80e69e4e6105be680857`。
+发行物：`dist/wca-replay-0.4.0/`，共 **343,956 字节**；commit
+`482c7c0260f8881022963bbabdb7f06d06acb7f7`；wheel 300,496 字节，
+sha256 `9fdb5404c9af0befdde200f45c753d7f6188c667440ac50065e5b80f8139b5ec`。
 发行物增加 `SHA256SUMS.sig`（Ed25519，key_id
 `ed25519:5e797e1842cf49c7043ba238f2a085b08c87d0a49663440f989cdc7df9ee5bb6`）与
 `VERIFY-SIGNATURE.txt`；`SHA256SUMS` 覆盖除自身与 `.sig` 外的发行文件，签名已实测
@@ -447,37 +447,60 @@ sha256 `0492169186f85cbb7824757f4604d78e2b27d498aefc80e69e4e6105be680857`。
 **policies 进包**：0.4.0 包 `ARTIFACTS OK checked=14`（9 个原工件 + 5 个 policies 文件）；
 `policies/` 纳入 `artifact_sha256`、`artifacts_digest` 与签名，并加入 allowlist，不会误报
 `EXTRA FILE`。`policies/字段口径与条文依据-对外版.md` 保留 13 项存疑逐条；`CONFIDENCE.md`
-标注成熟度/未定项。包体从 0.3.0 的 55,876 字节增至 68,393 字节（仅必要文本）。
+标注成熟度/未定项。confirmed 包体从 0.3.0 的 55,876 字节增至 68,508 字节（engine-only 67,672；仅必要文本）。
 
-**P0-4 含已确认结论的包（临时库，不写活动库）**：
-`var/confirmed-conclusions/packages/run-20261104T040749-5d8f03ff.zip`，68,393 字节，
-sha256 `6d358b9549f4f4bb0c887a75f4327c77e309fd7b3cff55502ce980b29891c477`；
-`counts` 发现 116 / 已确认结论 2；`responsibility.signed=true`；
-`artifacts_digest=3d401d6cbd3c0700302922b34d4eae3ce273e879b4852655c0dc62d06c8ae20c`；
-包签名 key_id `ed25519:906349de4c40ba4d9aa481ad06dd87c5841fbeb6c8306e6a5783a4520529c8d4`；
-锚点 `3,rp-2026.11.gd-pilot-standard.v5,8b3b54a09aa8ede51697b899ddf2d2e738262d6a612b9bee4e34037a6aa8456e,01bd44034d61a8ead8248a1b7845b794488b46a26424c488bb525ff0d25ac10a`。
-在仓库外 `%TEMP%\wca-040-clean\venv`（新建 venv，只装本发行 wheel + 带哈希锁）实测：
+**交接包**：`handoff/20261104-第二轮整改/`，共 **18 个文件 / 499,078 字节**（其中
+`交付清单.txt` 覆盖的 17 个非自身文件合计 497,365 字节）。目录含两个包、`release/` 发行物副本、
+公钥、`anchor.json`/`anchor.txt`、单包 anchor JSON、`KEY-NOTE.txt` 与 `交付清单.txt`。
+**这是交付方自测，不构成采信结论**。
+
+**P0-4 两个包（临时库，不写活动库）**：
+
+| 包 | 字节 | SHA-256 | `artifacts_digest` | 发现/已确认 | `responsibility.signed` |
+|---|---|---|---|---|---|
+| engine-only | 67,672 | `bd112ebc0ac9dd77217cb59c88257d6f46b770d80460a87596958b5aa38f17f4` | `1cfd209b47e44e8e700259f4c1b4943c4e1831f7f277771c0dfc0c8841124365` | 116 / 0 | false |
+| confirmed | 68,508 | `656a5658413580674f3db2c3dec86545bf9d5b7c7b235c7be17382ebbe9ca7be` | `773907ea9690635c14f076efa9750fa569d16491c61ba796e6a9679f4c163dad` | 116 / 2 | true |
+
+两包同 run、同输入、同三元组；confirmed 多 2 条 `APPROVED`（`OT-D01 / E012`）与责任签署。
+锚点（两包相同）：
+`3,rp-2026.11.gd-pilot-standard.v5,8b3b54a09aa8ede51697b899ddf2d2e738262d6a612b9bee4e34037a6aa8456e,01bd44034d61a8ead8248a1b7845b794488b46a26424c488bb525ff0d25ac10a`；
+包签名 key_id `ed25519:a8f9a5cdb3c392d25e34e9866a8c72345d07cff7c4d77ea5da0bf865579fe7dc`。
+
+在仓库外 `%TEMP%\wca-handoff-040\venv`（新建 venv，只装本发行 wheel + 带哈希锁）实测，
+`import src` 指向 `site-packages`、`BUILD_COMMIT=482c7c0`：
 
 ```text
-wca-verify ... --expect-anchor ... --expect-package-sha256 ... --expect-artifacts-digest ...
-COUNTS 发现（未签认） 116 条 / 已确认结论 2 条
+# engine-only
+ARTIFACTS OK checked=14
+ARTIFACTS DIGEST manifest-internal OK / external OK
+COUNTS 发现（未签认） 116 条 / 已确认结论 0 条
 SIGNATURE OK / pinned (key matches supplied pin; independent key_id verification not done)
 PACKAGE SHA256 ... / external=OK
-ARTIFACTS DIGEST manifest-internal OK / external OK
 ANCHOR CHECK OK
 RESULT OK
+replay: 已确认结论（包内）期望 0 / 实际 0 条；RESULT OK
 
-wca replay ...
-= input_fingerprint / = conclusion_digest
-发现（未签认） 期望 116 / 实得 116
-已确认结论（包内）期望 2 / 实际 2 条（replay 不重建人工确认）
-RESULT OK
+# confirmed
+COUNTS 发现（未签认） 116 条 / 已确认结论 2 条
+replay: 已确认结论（包内）期望 2 / 实际 2 条；RESULT OK
 ```
 
-- 证据路径：`var/confirmed-conclusions/`（临时 SQLite、包、公钥、私钥均不入库；`var/` 已 gitignore）。
+**四种缺失组合（最终 wheel，confirmed 包）**：
+
+```text
+无公钥:       RESULT PARTIAL —— 缺少/未通过 外部公钥 pin            exit 2
+无锚点:       ANCHOR NOT CHECKED（未传外部锚点）
+              RESULT PARTIAL —— 缺少/未通过 外部锚点              exit 2
+无包 SHA:     PACKAGE SHA256 ... external=NOT CHECKED（未传外部期望值）
+              RESULT PARTIAL —— 缺少/未通过 外部包 SHA-256        exit 2
+无工件摘要:   ARTIFACTS DIGEST manifest-internal OK / external NOT CHECKED（未传外部期望值）
+              RESULT PARTIAL —— 缺少/未通过 外部 artifacts_digest exit 2
+```
+
+- 证据路径：`var/handoff-packages/`（临时 SQLite、两包、公私钥均不入库；`var/` 已 gitignore）。
 - **仍不能证明**：人工确认的业务正确性、确认人身份与审批权限；`replay` 不重建人工确认，只核对
   包内 `conclusions_final.csv` 行数与 manifest `counts.final_conclusions`。
 - `SHA256SUMS.sig` 只签 SHA256SUMS，不覆盖 `.sig` 自身；公钥/锚点/包 SHA 同时被替换仍会失守。
-- `producer.commit` 必须等于发行 wheel 的 `BUILD_COMMIT`。用旧提交 `d796aff` 或 `31a10a7` 导出的
-  0.4.0 开发包，会被本发行物（`770fecc`）以 `PRODUCER FAIL` 拒收；这是“同版本代码”核对，不是包损坏。
-- 0.4.0 发行物未入库；`dist/` 已 gitignore。
+- `producer.commit` 必须等于发行 wheel 的 `BUILD_COMMIT`（本发行物 `482c7c0`）；用旧提交导出的
+  0.4.0 开发包会被 `PRODUCER FAIL` 拒收，这是“同版本代码”核对，不是包损坏。
+- 0.4.0 发行物与交接包均未入库；`dist/`、`handoff/` 已 gitignore。
