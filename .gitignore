@@ -9,6 +9,9 @@ var/
 var/uploads/
 reports/*.csv
 reports/变异测试-现场/
+# 性能/迁移对照 JSON 是跑出来的临时产物（含本机路径/时点），默认不入库
+reports/性能探针-*.json
+reports/迁移对照-*.json
 .env
 *.sqlite3
 *.sqlite3-shm
