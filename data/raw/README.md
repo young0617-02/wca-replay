@@ -36,3 +36,21 @@ python -m src.cli ingest
 
 `org → employee → schedule → punch → leave → trip → correction`
 （员工引用组织、打卡引用员工，顺序错了会整行拒收；`cli ingest` 已按此顺序执行。）
+
+## v5 审批台账（不在本目录）
+
+本目录只有 7 个事实 CSV，**不含** E006 的审批台账。活动库最新 v5 的 **115 条**结论包含一行
+人工录入的 E006 台账；全新库如果只跑 `init + ingest`，会得到 **116 条**（多一条 `REG-01 / E006`）。
+这不是判据差异，是输入少一行。
+
+要让全新库也得到 115 条，导入员工主数据后执行这条最小录入命令（幂等，可重复执行）：
+
+```powershell
+python -m src.cli approval --emp E006 --doc-no "深人社函〔2025〕E006-EPOCH-01号" `
+  --regime comprehensive_monthly --valid-from 2025-01-01 --valid-to 2026-12-31 `
+  --job-codes warehouse_shift --region 440600 `
+  --attachment-sha256 eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee `
+  --recorded-at 2026-11-02T18:15:51.023185+08:00
+```
+
+该行只用于演示数据完整性；它不改变员工申报工时制，也不产出金额或违法定性。

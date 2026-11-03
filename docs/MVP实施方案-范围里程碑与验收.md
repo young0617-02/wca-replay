@@ -46,7 +46,7 @@
 | G2 | 宣称类禁词零命中 | **达** | `tests/test_acceptance.py` 全仓命中 0；豁免按 DEC-01 做**文件级**收窄，只留需求文档与项目定义两个白名单，并由 `test_normative_exempt_list_is_minimal` 防扩张 |
 | G3 | 错承诺 0 / 越权召回 0 / 越权直连全拒 | **达** | 评测 `wrong_commitment=0 / acl_leak=0`；`test_web_authz.py` 10 项（未登录 401、OP 复核 403、EM 直连受限接口 403 且召回 0） |
 | G4 | 变异捕获 ≥5/5，还原哈希一致 | **达（v4 + 界面 + S7 + 自含输入后复跑）** | 注入 20 捕获 20、还原 MD5 一致（M18 结论集、M19 签发具名、M20 包漏主数据），报告 `reports/变异测试.md` |
-| G5 | 评审者无凭证一次跑通确定性测试 | **达** | 无 `.env` 的副本 + `uv sync`：`cli all` rc=0、`uv run python -m pytest tests/ -q -m "not llm"` **193 passed / 1 deselected**（历史两轮回 pip 通道 175 passed，计数未回改），同趟跑通 `export --sign-as → replay → 独立 verify.py`（`reports/干净环境复跑.md`）；此前基线的 4 failed 是支撑文档缺失，GAP-08 已补 |
+| G5 | 评审者无凭证一次跑通确定性测试 | **达** | 无 `.env` 的副本 + `uv sync`：`cli all` rc=0、`uv run python -m pytest tests/ -q -m "not llm"` **197 passed / 1 deselected**（历史：pip 那两轮 175、换 uv 那一趟 193，计数都不回改），同趟跑通 `export --sign-as → replay → 独立 verify.py`（`reports/干净环境复跑.md`）；此前基线的 4 failed 是支撑文档缺失，GAP-08 已补 |
 | G6 | 每个数字标三态；字段语义明示"公开资料，未经 HR 访谈核对" | **达** | `docs/口径声明.md` 按 v4 与干净环境数字刷新；该行本身写在文档抬头，禁词测试守住不出现"口径已获人事确认"类表述 |
 | G7 | 界面 **2.0 人日**内 3 视图 + 登录（原 2.5，DEC-02 排期再分配让出 0.5） | **达**（2026-10-08，`src/web/`） | 3 视图 + 登录落地；真实浏览器复验过登录、跨权 403、金额不出现三件事 |
 | G8 | 总投入守住 19.5 人日 | **可控但零余量** | 剩余 10.5 人日已逐步切分（§4）；**缓冲 0.5 → 0.0**（佛山入范围吃掉缓冲，见技术方案 §6.2） |
@@ -181,7 +181,7 @@
 | RV-03 人工待答队列 | **达** | `review_item(source_type='answer')`；干净环境待复核 87 条 |
 | EX-01 外部离线重放一致 | **达（自验）** | 包内 `inputs/` 自带本次结论依赖的原始 CSV；`python -m src.cli replay <包>` 在干净环境里把三元组逐项比回（`reports/干净环境复跑.md` 第三节），改一个打卡时间必须报 `≠`（`tests/test_replay.py` 7 项 + 变异体 M20）。**由第二人独立执行一次**仍未做——那是人手问题，不是能力缺口 |
 | EX-02 包内区分 AI 与人工 | **达** | `responsibility.json` + `test_responsibility_block_separates_machine_and_human`（★） |
-| EV-01 无凭证复跑 | **达** | 无 `.env` 副本 + `uv sync`：**193 passed / 1 deselected**（需求 v2.1 的验收命令原文），云轨用例是 skip 不是 fail |
+| EV-01 无凭证复跑 | **达** | 无 `.env` 副本 + `uv sync`：**197 passed / 1 deselected**（需求 v2.1 的验收命令原文），云轨用例是 skip 不是 fail |
 | EV-02 ≥60 条三档评测集 | **达** | 70 条 = 检索 29 / 数值 24 / 混合 16 + 跨城隔离回归 1；`sha256=acd71386…` |
 | EV-03 七项指标 | **达**（stub 轨） | `evals/judge.py` 七项全绿并带口径；**云轨整列仍是未测** |
 | EV-04 变异测试 | **达** | 注入 20 捕获 20、还原 MD5 一致（v4 + 界面 + S7 + 自含输入后重跑） |
@@ -223,7 +223,7 @@
 | **S4 外发最小化 + 云轨** | W-D 11/02–11/08 | **1.0** | GAP-07 构造 outbound 白名单视图；GAP-06 注册 `llm` marker、补 `llm_unavailable` 打桩、`HttpProvider` 超时与错误码 | `src/llm.py`、`src/agent.py`、`pytest.ini`、`tests/test_llm_cloud.py` | ① `pytest -m "not llm" -q` 全绿且**确实跳过了 LLM 用例**；② 打桩超时/401 → 明确降级码，不产出带出处答案；③ 外发 payload 扫描无姓名/证件号/原始打卡行/金额 |
 | **S5 界面** ✅已完成 10/08 | W-E（提前做完，缓冲回补 0.3） | **2.0**（原 2.5 让出 0.5，DEC-02） | GAP-04/05：登录与会话、3 视图、写接口、路由白名单测试；导出与签发按钮直接调用 CLI 同一函数（**单一入口**，不再单写双通道 diff 测试）；复核台含 1 个金额录入字段（DEC-05） | `src/web/`（Jinja2 模板）、`app_user/app_session`、`tests/test_web_authz.py` | ① 同输入界面与脚本结论一致（由单一入口保证 + 一条常规哈希可查断言）；② OP/未登录 POST 复核 → 401/403；③ 金额类问答页面 0 个金额数字；④ EM 直连受限接口 → 403；⑤ **交叉断言**：RV 录入金额后，问答视图与送云 payload 仍无任何金额数字（DEC-05）；⑥ 依赖清单（现 `pyproject.toml`/`uv.lock`）无 node/构建依赖 |
 | **S6 评测重算 + 真模型（条件项）** | W-F 11/16–11/22 | **1.3** | GAP-10：摘除范围外题、金额题改期望、补**广州与佛山**题；`--write-report` 重跑；**仅当 DEC-04 的 `base_url`/模型名已填**才跑云轨并分档披露，否则云轨整节标"未测" | `evals/golden_set_v1.jsonl`、`reports/评测结果.md`、`reports/判据修订.md` | ① ≥60 条三档且抽 10 条可指条文；② 七项指标齐、每项带三态；③ 错承诺 = 0、越权召回 = 0（红线非 0 退出码非 0）；④ stub 轨数字与云轨数字**分开写**，不得混成一套对外 |
-| **S7 收口与复跑** ✅已完成 10/08 | W-G（提前做完） | **0.9**（原 1.0，取消独立彩排） | 补 EX-02 责任区块（`responsibility.json`）+ **三市版未覆盖清单**（`not_covered.json` / `未覆盖清单.md`）+ 对外结论集（`conclusions_final.csv`）+ 签发入口统一；干净 venv 复跑；README 与口径声明交叉比对；判据冻结声明 | `docs/演示脚本-30分钟.md`、`README.md`、`.env.example`、`reports/干净环境复跑.md`、`reports/性能探针.json`、`tests/test_cli_surface.py` | ① **达**：无 `.env` 副本 + 一次装依赖（前两轮 pip、第三轮起只走 uv）→ `cli all` rc=0，`pytest -m "not llm"` 由 175 passed 增至 **193 passed / 1 deselected**，三元组与本机库逐字符一致，`replay` 同样在新环境比回；② **达**：演示脚本每条命令机械校验存在（`test_demo_script_commands_are_real` + CLI 表面 21 项）；③ **达**：禁词命中 0；④ **EV-07 盲跑计时本期不做**，已如实标"未做/未测"；⑤ 额外收获：干净环境挖出并修掉 `cli all` 的 `AttributeError`（测试全绿但 README 第一条命令跑不通） |
+| **S7 收口与复跑** ✅已完成 10/08 | W-G（提前做完） | **0.9**（原 1.0，取消独立彩排） | 补 EX-02 责任区块（`responsibility.json`）+ **三市版未覆盖清单**（`not_covered.json` / `未覆盖清单.md`）+ 对外结论集（`conclusions_final.csv`）+ 签发入口统一；干净 venv 复跑；README 与口径声明交叉比对；判据冻结声明 | `docs/演示脚本-30分钟.md`、`README.md`、`.env.example`、`reports/干净环境复跑.md`、`reports/性能探针.json`、`tests/test_cli_surface.py` | ① **达**：无 `.env` 副本 + 一次装依赖（前两轮 pip、第三轮起只走 uv）→ `cli all` rc=0，`pytest -m "not llm"` 由 175 passed 增至 193、当前 **197 passed / 1 deselected**，三元组与本机库逐字符一致，`replay` 同样在新环境比回；② **达**：演示脚本每条命令机械校验存在（`test_demo_script_commands_are_real` + CLI 表面 21 项）；③ **达**：禁词命中 0；④ **EV-07 盲跑计时本期不做**，已如实标"未做/未测"；⑤ 额外收获：干净环境挖出并修掉 `cli all` 的 `AttributeError`（测试全绿但 README 第一条命令跑不通） |
 | 缓冲 | — | **0.0** | **已被三市挤占，归零**。只做减，不做加；只在 S3 条件回补成立时回补至 0.3 | — | 任何一步超支立即触发 §7 砍序，无吸收空间 |
 
 ### 4.3 依赖顺序（不得倒置）

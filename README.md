@@ -15,31 +15,84 @@
 
 ```bash
 uv sync                                                  # 唯一的依赖通道：按 uv.lock 精确重建 .venv（校验 sha256）
+cp .env.example .env                                     # 默认 PostgreSQL 18：先填 WCA_DATABASE_URL
+# 无 PostgreSQL 的离线环境：显式设置 WCA_DB_BACKEND=sqlite（SQLite 只是回退）
 uv run python -m src.cli status                          # 用 `uv run` 就不用记 .venv 的路径
 # 依赖只走 uv（2026-10-09 决定）。`uv sync` 建的 .venv 里没有 pip；
 # 需求文档已同步修订到 v2.1：US-EV-01 / NFR-07 的验收命令就是上面这条（裁决 D-07）。
 # 下面所有命令都等价于先 `source .venv/bin/activate` 再 `python -m …`。
-cp .env.example .env                                     # 不填也能跑：默认全离线
 uv run python -m src.cli all                             # 生成→导入→建库→校验→报表→举证包
-uv run python -m pytest tests/ -q -m "not llm"           # 193 项，约 45 秒，无网络、无云凭证
+uv run python -m pytest tests/ -q -m "not llm"           # 471 passed / 8 skipped，无网络、无云凭证
 uv run python evals/judge.py --write-report              # 70 条评测集打分
-uv run python tools/mutation_test.py                     # 注入 20 个缺陷，看测试抓不抓得住
-uv run python tools/perf_probe.py --export --amplify 1000  # 规模与导出耗时（在库副本上测）
+uv run python tools/mutation_test.py                     # 注入 31 个缺陷，看测试抓不抓得住
+uv run python tools/perf_probe.py --pg-url "$WCA_TEST_POSTGRES_URL" --employees 1000 --dense \
+  --repeat 5 --export --export-repeat 10 --replay --json reports/性能探针-v5-dense-1000.json  # 结论密集四段实测
 uv run python -m src.cli replay var/packages/<run_id>.zip  # 拿包自己重放：重导输入→重跑引擎→比三元组
 ```
 
 核心校验链路只依赖 **Python 标准库 + pytest**；只有 Web 界面与只读接口需要 FastAPI（没装时界面测试如实 skip，
 `python -m src.cli ask` 走的是同一条链路）。
+
+**数据库默认与回退**：PostgreSQL 18 是默认后端，`.env.example` 的 `WCA_DATABASE_URL` 留空时启动期直接报错，
+不会静默回退 SQLite；无 PostgreSQL 的离线环境必须显式设置 `WCA_DB_BACKEND=sqlite`。即使工作区有旧
+`var/worktime.sqlite3`，没有显式 WCA 配置也不会悄悄采用它。配置 URL 与 `WCA_DB_IDENTITY_PATH` 指向的库不一致时，
+`init/ingest/check/export` 一律拒绝，只有显式 `python -m src.cli db-target --reset --confirm <配置库名>`
+才允许切换。
 向量检索默认**不启用**（未下载 embedding 模型），启用不了时代码会如实降级成 BM25 并在结果里标注。
 
 演示路径与讲解词：`docs/演示脚本-30分钟.md`。
 
-## 现在就能看到的结果（本机实测，2026-10-08，规则包 v4）
+## v5 质量门禁结果（测试计数 2026-11-03；性能数字 2026-11-02；规则包 `rp-2026.11.gd-pilot-standard.v5`）
+
+| 指标 | v5 实测 |
+|---|---|
+| 测试 | 离线 **471 passed / 8 skipped / 1 deselected**（`-m "not llm"`，2026-11-03 实测；含本轮依赖升级、交付事件改名与并行新增用例）；带 PG **494 passed / 1 deselected**（2026-11-03 实测，`WCA_TEST_POSTGRES_URL` 指向维护库 `postgres`） |
+| 评测（stub 离线） | 意图 Top-1 **70/70** · Hit@5 **37/37** · MRR **0.664** · 数值工具 **30/30** · 引用忠实 **70/70** · 错承诺 **0** · 越权召回 **0** |
+| 门禁分布 | ANSWERED 57 / EXPLAIN_ONLY 9 / REFUSED_ACL 3 / REFUSED_NO_EVIDENCE 1 |
+| 评测集 | 70 条（检索 29 / 数值 24 / 混合 17）；`sha256=2b8e91b1f44510c3…`；M-003 已最小改为 v5 REG-01 场景 |
+| 变异测试 | **注入 31 个缺陷，捕获 31，还原 MD5 全部一致**；覆盖 REG-01、COMP-C01、SHIFT-01、OFF-01、纪元与审批台账 |
+| PG 真实 12 人数据 | 校验 **706.2 ms** 中位（650.9–777.9）· 导出 **206.4 ms** · replay **977.9 ms** · 导入 punch 3,900 行 **4,848 ms** |
+| PG 1,000 员工月（合成 baseline） | 校验 **9,964.8 ms**（30,000 员工日）· 导出 **228.7 ms** · replay **8,454.7 ms** · 导入 44,000 行 **53,357.8 ms**；包内 5 输入 / 3,610,263 字节 |
+| PG 1,000 员工月（结论密集） | **1,700 条结论**（400/1,000/300）· 校验 P50 **12,804.8 ms** / P95 **14,884.4 ms** · 导出 P50 **677.0 ms** / P95 **1,451.2 ms**（10 次，1,700 行）· replay P50 **12,132.8 ms** / P95 **14,192.6 ms**，`ok=true` · 导入 4 文件 **46,097.5 ms** |
+| PG 3,000 员工月（空台账，Phase 6） | **5,100 条结论**（1,200/3,000/900）· 输入 5 个 / 10,881,463 字节 · 包 **731,659 字节** · 导出 P50 **2,234.7 ms** / P95 **2,456.1 ms**（n=10）· replay + verify 一致 |
+| PG 3,000 员工月（450 行非空台账） | **4,650 条结论**（1,200/2,550/900；REG-01 150 / COMP-C01 600）· 台账 **450 行 / 450 人**（P0001–P0450 覆盖，P0451–P0600 保留未覆盖）· 输入 **5 个 / 10,966,963 字节**（审批 CSV 85,593 字节）· 余量 **1,615,949 字节**，**距 10.5 MiB 告警线仅 43,085 字节** · 包 **729,492 字节** · 导出首轮 P50 **6,896.1 ms** / P95 **7,830.3 ms**（前 6 次冷、后 4 次约 2 s），热缓存复测 P50 **1,928.4 ms** / P95 **2,140.9 ms**（n=10）· replay + verify 一致 |
+| PG 3,000 员工月（600 行全量台账） | **4,500 条结论**（1,200/2,400/900；REG-01 **0** / COMP-C01 600）· 台账 **600 行 / 600 人** · 输入 **5 个 / 10,995,463 字节**（审批 CSV 114,093 字节）· 余量 **1,587,449 字节**，**距 10.5 MiB 告警线 14,585 字节、未触发告警** · 包 **729,729 字节** · 导出 P50 **8,154.6 ms** / P95 **8,664.6 ms**（前 7 次冷、后 3 次约 2 s）· replay + verify 一致 |
+| PG 导入 A/B（132,900 行 punch） | single 三轮中位 **229,650.9 ms**、executemany 5,000 **44,842.3 ms**、COPY **24,574.4 ms**；COPY 快 **9.35×**；三组 employee 3,000 / punch 132,900 / shift_plan 66,000 / raw_file 4 与 input_fingerprint、conclusion_digest、5,100 条结论逐项一致。**加固验证（REV-31）发现：同文件并发 raw_file 唯一冲突、中断后 raw_file 不回滚、跨文件重复 issue 膨胀； COPY/executemany 都不具备切默认条件，默认保持 single**（`reports/导入性能AB.md`） |
+
+v5 性能数字来自一次性 PG 库（12 人档为备份恢复数据，1,000/3,000 档为可复现合成数据），不是 SQLite 副本口径；
+设计值只对“导出 ≤3 s / 1,000 行”有既有口径：结论密集 1,000 档实测 **1,700 行、P95 1,451.2 ms，达成**；
+baseline 1,000 档是 **0 条结论**，228.7 ms 不能单独当作该口径的证据。
+Phase 5 在 8 MiB 下曾阻断 3,000 自含导出；Phase 6 用 **12 MiB 受控实验**完成自含导出 + replay + verify。
+**12 MiB 是实验默认值，不是 SLA**；实测 3,000 + 450 行非空台账余量约 **1.54 MiB**。
+Phase 7 已加 **10.5 MiB（11,010,048 字节）告警线**；Phase 8（REV-25）再加 **11.5 MiB（12,058,624 字节）临界线**。
+三档语义：低于 10.5 MiB 为 ok；10.5–11.5 MiB 为 warning（3,000 规模常态提示）；11.5–12 MiB 为 critical
+（接近硬上限，manifest/CLI/日志要求人工确认，仍允许导出）；超过 12 MiB 仍拒绝，不静默截断。
+manifest/inputs 新增 `critical_bytes/critical/critical_message`；老包缺这些字段仍可 replay/verify。
+**600 人全量台账实测**输入 10,995,463 字节，距 10.5 MiB 14,585 字节，未触发。
+**3,000 行台账实测**（REV-24/25）：审批 CSV 576,105 字节 / 3,000 行，自含输入 **11,493,475 字节**，
+落在 warning 档（超 10.5 MiB 483,427），距 11.5 MiB 余 **565,149**、距 12 MiB 余 **1,089,437**；
+包 1,135,356 字节，6,900 条结论，replay 6,900/6,900 一致。**这是实验值，不是 SLA**。
+原始 JSON：`reports/性能探针-v5-pg-12.json`、`reports/性能探针-v5-pg-1000.json`、
+`reports/性能探针-v5-dense-1000.json`、`reports/性能探针-v5-dense-3000-check.json`、
+`reports/性能探针-v5-dense-3000-export-boundary.json`、`reports/性能探针-v5-dense-3000-selfcontained.json`、
+`reports/性能探针-v5-dense-3000-approval-selfcontained.json`、
+`reports/性能探针-v5-dense-3000-approval-export-warm.json`、
+`reports/性能探针-v5-dense-3000-approval600-selfcontained.json`；
+评测与变异原始记录：`reports/评测结果.md`、`reports/变异测试.md`。
+
+**演示数据边界（v5）**：`data/raw` 的 7 个事实 CSV **不含**审批台账。活动库最新 v5 的 115 条结论包含
+一行人工录入的 E006 台账；全新库只跑 `init + ingest` 得 116 条，多一条 `REG-01 / E006`。要复现 115 条，
+按 [`data/raw/README.md`](data/raw/README.md) 的“v5 审批台账”一节执行 `python -m src.cli approval` 最小录入；
+这是输入差异，不是判据差异。
+
+## v4 历史结果（2026-10-08，规则包 `rp-2026.10.gd-pilot-standard.v4`）
+
+> 以下是 v4 时点的历史数字，**不是 v5 实测**；保留用于版本对照。
 
 | 指标 | 实测 |
 |---|---|
-| 测试 | `193 passed / 1 deselected`（`-m "not llm"`，离线；唯一被筛掉的用例需要真实云凭证） |
-| 干净环境复跑 | 三轮，全部在**无 `.env`** 的仓库副本里跑：前两轮走 pip（175 passed），第三轮起**只走 uv**（`uv sync` → **193 passed / 1 deselected**，43.9 s），`cli all` rc=0、三元组与本机库逐字符一致，`export --sign-as → replay → 独立 verify.py` 整条复核链同样在新环境跑通（`reports/干净环境复跑.md`） |
+| 测试 | `197 passed / 1 deselected`（`-m "not llm"`，离线；唯一被筛掉的用例需要真实云凭证） |
+| 干净环境复跑 | 三轮，全部在**无 `.env`** 的仓库副本里跑：前两轮走 pip（175 passed），第三轮起**只走 uv**（`uv sync` → 193 → **197 passed / 1 deselected**），`cli all` rc=0、三元组与本机库逐字符一致，`export --sign-as`（旧命令名，现 `--record-delivery-as`，非密码学签名）`→ replay → 独立 verify.py` 整条复核链同样在新环境跑通（`reports/干净环境复跑.md`） |
 | 三元组跨环境一致 | 干净环境重跑得同一 `输入指纹 f5021119…` / `结论摘要 95f01ab2…`（与本机演示库逐字符一致） |
 | 变异测试 | 注入 20 个缺陷，**捕获 20**，还原 MD5 全部一致（M18 无人工结论混进结论集、M19 签发人不具名、M20 包漏主数据） |
 | 意图 Top-1 / Hit@5 / MRR | 70/70 · 37/37 · 0.664（含三市分档题与跨城隔离回归题）|
@@ -76,17 +129,53 @@ V1 → V1.1 优化的前后对照（含没达成的目标）在 [`reports/优化
 
 ---
 
+## 审批台账 P0（服务层，2026-11-02）
+
+- **数据模型**：`approval_doc`（批文主表）+ `approval_doc_version`（版本）+ `approval_doc_scope`（org/employee 范围）+ `employee_approval_coverage`（员工覆盖投影）；`org_unit` 扩展 `org_path/org_level` 用于组织子树展开。
+- **发布流程**：先建 DRAFT，再 `publish_doc` 展开范围、检测同员工同工时制的重叠覆盖，成功后生成投影；同批文新版本发布时旧版本转 `SUPERSEDED`，不覆盖历史。
+- **原子 CSV 导入**：`import_drafts_csv` 整批校验、单事务写入；任一行非法则全部回滚，不留半份台账。
+- **权限**：新增 `AU` 只读角色；AD 可写/发布，AU 只能读批文与覆盖投影；写操作在 service 层拒绝 AU。`config/users.json` 已增加 AU 演示账号 `au1`（只存 scrypt 哈希）。
+- **附件**：只登记 64 位 SHA-256，不保存原件、文件路径或 BLOB。
+- **审计与冲突**：草稿/导入/编辑/发布写审计事件；同名同版本、批文主数据改写、重叠覆盖均显式拒绝，**不复用旧的静默 `upsert_approval`**。
+- **网页入口（2026-11-03）**：`/approvals` 列表（状态/文号/生效期/版本数）、`/approvals/{doc_no}` 详情（版本链/scope/附件哈希）、`/approvals/coverage` 员工覆盖；AD 另有 `/approvals/new`、`/approvals/{doc_no}/edit`、`/approvals/import`。AU 读可、写页面与 POST 均 403；**所有会话写接口（import/check/review/export/ask/logout + 审批四入口）强制 CSRF**；CSV 上限 1 MiB / 2,000 行，超限明确拒绝；发布复用 `publish_doc` 的加锁路径。详见 `docs/审批台账-P0界面与权限方案.md`。
+- **CSRF 存储**：`app_csrf` 只存 `sha256(CSRF token)`，页面通过 `wca_csrf` cookie + meta 下发；旧明文表由 `init_db` 整表重建，不留明文。
+- **边界**：网页入口只提供审批台账，不提供外部审批 API/附件原件上传（仍只登记 SHA-256）；只读 CLI `approval-doc` 已加；旧台账迁移/对照工具 `approval-migrate` 已加（默认 dry-run、`--apply` 仅临时库，活动库一律拒绝），但未在活动库执行；REG-01 的切换放到独立 v6 规则包（见下节），旧 `worktime_approval` 在 v5 下保持原样。
+
+---
+
+## v6 规则包（REG-01 切换覆盖投影，2026-11-02，实验性）
+
+- 版本串 `rp-2026.11.gd-pilot-standard.v6`；**默认仍是 v5**，v6 需显式 `WCA_RULE_PACK` 启用。
+- v6 的 REG-01 改读 `employee_approval_coverage`；旧 `worktime_approval` 在 v6 下**不再参与计算**，只保留 legacy 输入与回放。
+- v6 首次写入 v5 库时追加 `rule_pack.epoch.start`；v5 genesis 不重置，v5 旧包继续 legacy 回放。
+- v6 `input_fingerprint` 纳入覆盖投影摘要（员工、批文号、版本、生效期、工时制、岗位/城市、附件哈希、发布时间）。
+- v6 包内 `inputs/000-approval.csv` 来源改为覆盖投影，manifest 记录 `approval_source=v6-coverage`；replay 从该 CSV 重建投影后重算三元组。
+- 旧 `worktime_approval` 仍有数据时，v6 check 通过 `CheckOutcome.warnings` 与 CLI stderr 输出显式警告：“旧台账未迁移，v6 只采信覆盖投影”；**该告警不进 `run.scope_json`/输入指纹**，否则包内 replay 在无旧表的临时库里无法复现三元组（REV-21）。
+- finding 的 `rule_version` 与产出它的规则包一致：v6 新结论标 v6，v5/v4 旧结论保持原值；**不批量改写历史 finding**（REV-20）。
+- 旧台账迁移/对照：`python -m src.cli approval-migrate` 默认 dry-run，输出行数/员工集合/丢弃与合并原因/REG-01 v5↔v6 命中差异；`--apply` 默认只允许 `wca_test_* / wca_perf_* / wca_migrate_* / wca_drill_* / wca_tmp_*` 与 `wca_worktime_v5`，活动库 `wca_worktime` 一律拒绝。临时库实测 600 行 → 600 批文/600 版本/600 覆盖，dry-run 未写库（REV-22）。
+- 受控活动库切换（REV-26，**未执行**）：`--allow-active` 必须同时给 `--backup-path`、`--backup-sha256`、`--confirm-active wca_worktime`、`--confirm-apply wca_worktime`；连接后只认 `current_database()`，备份缺失/校验失败/确认串不符/连错库均拒绝。活动库备份副本 `wca_drill_restore_v6_20261103` 已完整演练：迁移 1 行 → 1 批文/1 版本/1 覆盖，v5/v6 REG-01 命中均 4、only_v5/only_v6 均 0；v6 check 115 条，export 8 个输入 / 301,910 字节，包 53,738 字节；replay 115/115，verify 三 OK。
+- 临时库全链路（`wca_drill_v6_20261102_3`）：init 329.3 ms → 迁移 1,514.0 ms → v6 check 45,771.1 ms（3,000 员工/90,000 天/4,500 条，REG-01 0）→ export 8,946.6 ms（包 724,071 字节，自含输入 10,996,675 字节）→ replay 38,449.3 ms（4,500/4,500，三元组一致）→ verify.py 155.7 ms（`EPOCH OK` / `CHAIN OK` / `INPUTS OK`）。
+- PG v6 自含包专项测试已加入 `tests/test_postgres_integration.py`（条件定义，离线不新增 skip）：实测 `inputs_bytes=843`、`package_bytes=13102`、`check_ms=143.1`、`export_ms=133.1`、`findings=7`。
+- 等价性：临时库上 450 行旧台账构造等价投影后，v5 与 v6 的 REG-01 命中员工集合 **100% 相同**（均为 P0451–P0600 这 150 人）。
+- 告警线已落定方案 C（REV-25）：10.5 MiB warning + 11.5 MiB critical + 12 MiB 硬上限；三档语义与实测见上节和 `reports/告警线方案分析.md`。
+- v6 质量门禁重跑（REV-27）：评测 **70/70 逐题与 v5 一致**、错承诺 0、越权 0；变异 **31/31**、13 个文件还原 MD5 一致。详见 `reports/评测-v6.md`、`reports/变异测试.md`。
+
+---
+
 ## 它能做什么
 
-1. **举证级工时合规校验**（价值核心，规则包 `rp-2026.10.gd-pilot-standard.v4`）
-   16 条确定性规则，只判 **8 小时标准工时**：工作日延长工时、休息日与补休、法定节假日当天 300%、
+1. **举证级工时合规校验**（价值核心，规则包 `rp-2026.11.gd-pilot-standard.v5`）
+   22 条确定性规则（v4 的 18 条 + v5 新增 4 条）：工作日延长工时、休息日与补休、法定节假日当天 300%、
    每日/每月加班上限、每周至少休息一日、周 40/44 小时、跨零点切分、夜间时段、数据质量、
-   内部制度预警、年度日历未核标记、**工时制未覆盖标记（SCOPE-02/03）**。
+   内部制度预警、年度日历未核标记、**工时制未覆盖标记（SCOPE-02/03）**；
+   v5 另加 **审批台账覆盖（REG-01）**、**综合工时完整周期统计（COMP-C01）**、
+   **多段班次不可拼接（SHIFT-01）**、**离线补传冲突（OFF-01）**。
    每条异常给三级分级（**可申辩 / 需复核 / 明显违规**）+ 触发规则 ID + 条文依据 + 原始行号。
    城市分三档（`config/region_profile.json`）：广州、佛山适用《广东省工资支付条例》第 20 条，深圳适用特区条例第 18 条，未建档城市只出国家层面结论并记 `SCOPE-04`。
    **引擎不产出任何应付金额**（需求 D-03）：只出小时数与法定倍数档位，金额由 HR 负责人具名录入。
-   综合计算工时与不定时工时的周期超额/豁免判定**已退出本期范围**，命中只记未覆盖，不套用标准工时硬判。
-2. **不可篡改的举证包**
+   综合计算工时与不定时工时的周期超额/豁免判定仍不套用标准工时硬判：v5 的 COMP-C01 只做周期统计，
+   REG-01 只核审批覆盖，均不改变 `effective_regime`、不下违规、不出倍数。
+2. **可复核的举证包（hash 链 + 外部锚点）**
    审计 hash 链 + 一次导出生成「规则版本 + 输入指纹 + 结论摘要」三元组；包内含独立 `verify.py`，
    复核方不需要相信我——自己重算链即可，改一条就会在第一个断点报错。
    包内另附**对外结论集**（只收已登记具名人工结论的条目）、**责任区块**（机器算了什么、AI 碰过什么、
@@ -94,6 +183,18 @@ V1 → V1.1 优化的前后对照（含没达成的目标）在 [`reports/优化
    以及**本次结论真正依赖的原始 CSV**（`inputs/`）。
    所以复核方拿着包就能自己走完两步：`verify.py` 独立重算链与输入哈希（只用标准库），
    `python -m src.cli replay <包>` 把包内输入喂回引擎、比对三元组——**不必回头向我索要数据**。
+   `manifest.json` 另有 `manifest_checksum` 自校验和，只能发现“字段被改但校验和没同步重算”；
+   它**不是签名**，能重算校验和的人仍可整体伪造。交付时请把**四元组**另行记录在包外（邮件、
+   台账或工单）：`schema_version,rule_pack_version,input_fingerprint,conclusion_digest`；事后用
+   `python verify.py --expect-anchor 2,<规则版本>,<输入指纹>,<结论摘要>` 或
+   `python -m src.cli replay <包> --expect-anchor ...` 做外部锚点比对；环境变量
+   `WCA_EXPECT_ANCHOR` 等价。`--expect-triple` / `WCA_EXPECT_TRIPLE` 仍保留，但它**不约束 schema**，
+   交付验收请用四元组，否则“伪装成 v1 旧包”的降级不会被发现。
+   **交付验收必须两条一起跑**：`verify.py` 校验包体完整性、审计链、输入哈希，并与外部四元组
+   比对（比对对象是包内 schema 与三元组）；`replay` 独立重算得到实算三元组与结论条数。
+   只跑一条都不足以证明。按 `manifest.schema` 分档：新 schema（v2 及以后）缺少
+   `manifest_checksum` 直接失败；v1 旧包缺少时打印 `MANIFEST CHECKSUM MISSING` 并继续；
+   schema 缺失/未知按失败关闭处理。
 3. **带 ACL 的制度问答**
    权限谓词在检索层下推（SQL 的 WHERE/JOIN），未授权条目**进不了候选集**；
    答案必须带可点开出处、证据覆盖率与置信度门禁；「该付多少加班费」这类重大事项**只解释规则、
@@ -164,8 +265,8 @@ worktime-compliance-agent/
 │   ├── start_services.py         # 一键启动
 │   ├── stop_services.py          # 一键优雅停止（含 --status）
 │   ├── mutation_test.py          # F-012 变异测试（MD5 基线校验 + 字节码缓存清理）
-│   └── perf_probe.py             # 性能探针：SQL 计数 + 多次采样中位耗时（在库副本上测）
-├── tests/                        # 193 项：判据/质量门禁/ACL/守卫/接口/界面权限/城市档/启停/CLI 表面/重放/依赖口径/验收（含文档链接自检）
+│   └── perf_probe.py             # 性能探针：SQL/DB 调用计数 + 多次采样中位耗时（SQLite 副本或 PG 临时库）
+├── tests/                        # 375 项（离线）：判据/质量门禁/ACL/守卫/接口/界面权限/城市档/启停/CLI 表面/重放/v5 规则/纪元/探针/三档输入预算/审批 P0/审批网页/全站 CSRF/CSRF 哈希/旧台账迁移/连接后库守卫/allow-active/v6/导入事务与并发/QUAL-DUP 汇总/首次切包事务/分块与降级/COPY 中断/并发 check 审计/流式读取与哈希/审计事务边界/同 run 导出锁/临时表清理/维护策略/依赖口径/数据库身份硬失败/report 原子写/配置路径/验收
 └── reports/                      # 评测结果.md、变异测试.md、优化验证.md、判据修订.md、
                                   # 性能探针.json、P0-闸门.md、异常报表 CSV
 ```
@@ -192,10 +293,10 @@ python -m src.cli verify                        # 审计链自检
 ## 一键启动 / 一键停止（`tools/`，配置化服务清单）
 
 ```bash
-python tools/start_services.py            # 检测在跑？→ 先全停 → 再按顺序起
-python tools/stop_services.py             # 优雅停止 + 端口核对 + WAL 落盘
-python tools/stop_services.py --status    # 只看状态，不动任何东西
-python tools/start_services.py --json     # 机器可读结果（退出码 0/1/2）
+uv run python tools/start_services.py            # 检测在跑？→ 先全停 → 再按顺序起
+uv run python tools/stop_services.py             # 优雅停止 + 端口核对 + WAL 落盘
+uv run python tools/stop_services.py --status    # 只看状态，不动任何东西
+uv run python tools/start_services.py --json     # 机器可读结果（退出码 0/1/2）
 ```
 
 服务清单在 `config/services.json`（加/减服务只改这个文件，不改代码）。要点：
@@ -257,17 +358,17 @@ python tools/start_services.py --json     # 机器可读结果（退出码 0/1/2
 | A2 ★ 标准答案有可复核条文 | **已达成** | `tests/test_acceptance.py::test_golden_set_citations_resolve_to_corpus`；条文号在 `docs/字段口径与条文依据.md` 第三节 |
 | A3 ★ ACL 越权召回 0 | **已达成（离线实测）** | `tests/test_acl_retrieval.py` 断言打在候选集；评测 `acl_leak=0`；变异测试 M5（改成先召回再过滤）被捕获 |
 | A4 ★ 错承诺 0 | **已达成（离线实测）** | `tests/test_agent_guard.py`；评测 `wrong_commitment=0`；变异测试 M11 被捕获 |
-| A5 ★ 测试有鉴别力 | **已达成** | `python tools/mutation_test.py`：注入 20 捕获 20，还原 MD5 一致（工装自身曾报出一条**不存在的漏网**，修法与记录见 `reports/优化验证.md` 第四节的 `tools/mutation_test.py` 出处） |
-| A6 测试可跑且可复现 | **已达成** | 仓库副本 + **无 `.env`**，依赖走 `uv sync`：`uv run python -m src.cli all`（rc=0）→ `uv run python -m pytest tests/ -q -m "not llm"` = **193 passed / 1 deselected**；三元组与本机库逐字符一致。需求文档已同步修订到 **v2.1**（US-EV-01/NFR-07 的验收命令改为 uv，裁决 D-07），所以这不是「实现偏离需求」，是需求本身按决定改了；换 uv 之前那一趟走的是 `pip install -r requirements.txt`，那段历史保留在 `reports/干净环境复跑.md`；
-  且 `export --sign-as → replay → 独立 verify.py` 整条复核链同一趟跑通（`reports/干净环境复跑.md`） |
+| A5 ★ 测试有鉴别力 | **已达成** | `python tools/mutation_test.py`：v4 时注入 20 捕获 20；v5 扩到 **31 注入 / 31 捕获**，还原 MD5 一致（工装自身曾报出一条**不存在的漏网**，修法与记录见 `reports/优化验证.md` 第四节的 `tools/mutation_test.py` 出处） |
+| A6 测试可跑且可复现 | **已达成** | v4 时点仓库副本 + **无 `.env`**，依赖走 `uv sync`：`uv run python -m src.cli all`（rc=0）→ `uv run python -m pytest tests/ -q -m "not llm"` = **197 passed / 1 deselected**（历史记录；当前工作区为 **471 passed / 8 skipped** 实测（含本轮依赖升级、交付事件改名与并行新增用例），带 PG **494 passed / 1 deselected**（2026-11-03 实测）；未见新的干净环境复跑记录，不冒充 A6 复验）；三元组与本机库逐字符一致。需求文档已同步修订到 **v2.1**（US-EV-01/NFR-07 的验收命令改为 uv，裁决 D-07），所以这不是「实现偏离需求」，是需求本身按决定改了；换 uv 之前那一趟走的是 `pip install -r requirements.txt`，那段历史保留在 `reports/干净环境复跑.md`；
+  且 `export --sign-as → replay → 独立 verify.py` 整条复核链同一趟跑通（`reports/干净环境复跑.md`；旧命令名，现为 `--record-delivery-as`，`--sign-as` 仍保留为迁移别名、非密码学签名） |
 | A7 行级可追溯 | **已达成** | `tests/test_ingest_quality.py` + 举证包 `findings.csv` 的 `source_rel_path/source_line_no` |
-| A8 举证包可复核 | **已达成** | `test_exported_package_reproduces_same_triple`（同输入重跑）+ `tests/test_replay.py`（**把包内输入喂回引擎逐项比三元组**，改输入必须报不一致）；另 4 项守住结论集纪律、签发人入链、责任区块与未覆盖清单随包给出 |
+| A8 举证包可复核 | **已达成** | `test_exported_package_reproduces_same_triple`（同输入重跑）+ `tests/test_replay.py`（**把包内输入喂回引擎逐项比三元组**，改输入必须报不一致）；另 4 项守住结论集纪律、交付登记人入链、责任区块与未覆盖清单随包给出 |
 | A9 性能口径诚实 | **已达成** | `docs/口径声明.md` 每个数字标实测/设计值/未测；`tests/test_acceptance.py` 检查 |
 | A10 ★ 无虚假宣称 | **已达成** | `tests/test_acceptance.py::test_no_false_claims_in_docs_and_code` 扫 README/docs/src/evals/data，禁词命中数=0 |
 | A11 合成数据如实标注 | **部分** | 生成器与 README 已明示合成+seed；**「字段语义取得人事部门口径确认」这句不成立**（F-001 未完成，见下） |
 | A12 演示脚本自洽 | **待盲跑** | 脚本内命令已机械校验存在；仍需真人按脚本盲跑一遍计时 |
 
-## 当前状态（2026-10-08，规则包 v4）
+## 当前状态（2026-11-02，规则包 v5）
 
 - **P0 闸门 OW-02 条文依据**：**通过**——J1~J6 全部核到条号级 + 原文逐字摘录 + 生效/修订日期 + 可点开 URL，
   核对日期 2026-10-08，13 项未核实单独列出（见 `docs/字段口径与条文依据.md` 第五节与 `reports/P0-闸门.md`）。
@@ -282,8 +383,10 @@ python tools/start_services.py --json     # 机器可读结果（退出码 0/1/2
   评测集按新判据重算（70 条，含三市题与跨城隔离回归）、支撑文档补齐、
   **Web 界面 3 视图 + 最小登录**（`src/web/`：服务端判权、scrypt 口令、HttpOnly 会话、身份取自会话）、
   **举证包收口**：新增对外结论集 `conclusions_final.csv`（只收已登记具名人工结论）、责任区块
-  `responsibility.json`（机器/AI/人/签发人各做了什么）、`not_covered.json` + `未覆盖清单.md`，
-  签发入口 CLI 与界面共用同一个 `sign_package`；**举证包再自含本次结论依赖的原始 CSV（`inputs/`）**，
+  `responsibility.json`（机器/AI/人/交付登记人各做了什么）、`not_covered.json` + `未覆盖清单.md`，
+  交付事件登记入口为 `record_delivery_event()`（CLI `--record-delivery-as`；旧别名
+  `sign_package()`/`--sign-as`），**只写 `evidence.sign` 审计事件，不做密码学签名**；
+  **举证包再自含本次结论依赖的原始 CSV（`inputs/`）**，
   新增 `python -m src.cli replay <包>` 把输入喂回引擎重比三元组（US-EX-01 由「要别人做」变成「我已自验」）。
 - **干净环境复跑已做**（`reports/干净环境复跑.md`）：新建 venv、仓库副本里**不放 `.env`**、数据现场生成，
   两条命令跑通且三元组与本机库一致。这一趟还挖出并修掉一个真实缺陷：`src.cli all` 因手工拼参数包
@@ -297,20 +400,34 @@ python tools/start_services.py --json     # 机器可读结果（退出码 0/1/2
 ## 界面（P6）：3 视图 + 最小登录
 
 ```bash
-python tools/start_services.py        # 起 API：http://127.0.0.1:8000
-python tools/stop_services.py         # 优雅停止
+uv run python tools/start_services.py   # 起 API：http://127.0.0.1:9763（必须用 uv run，见下）
+uv run python tools/stop_services.py    # 优雅停止
 ```
+
+Web 监听与 TLS 相关配置（默认值都在 `.env.example`）：
+
+| 变量 | 默认值 | 用途 |
+|---|---|---|
+| `WCA_HOST` | `127.0.0.1` | `src.api_server` 读取的进程环境变量；服务管理器的实际绑定以 `config/services.json` 的 `host` 为准（启动时注入同名变量）。默认只绑本机。改成 `0.0.0.0`/局域网地址时，启动期会检查配置账号与数据库 `app_user`，仍有 `wca-demo-*` 演示口令就拒绝启动。直接 `uvicorn` CLI 以 `--host` 为准，本变量不参与绑定。 |
+| `WCA_HTTPS_MODE` | `false` | 反向代理终止 TLS 时**必须显式设为 `true`**：即使请求 scheme 是 `http`，会话 Cookie 也带 `Secure`。它只影响 Cookie/传输判定，不会改变 `scope["server"]` 的绑定判定。 |
+| `WCA_HSTS` | `false` | 只有真实 HTTPS（`scheme=https`）且显式 `true` 才下发 `Strict-Transport-Security`；HTTP 部署保持 `false`，默认不加 `includeSubDomains`。 |
+
+请求层还有一道演示口令闸门：直接 `uvicorn src.api:app --host 0.0.0.0` 启动时，`create_app` 拿不到真实绑定地址，因此请求层以 **ASGI `scope["server"]` 的服务端地址**判定——非回环/通配绑定会复检配置与数据库，命中演示口令（或检查本身不可用）返回 **503**，不提供服务。`scope["server"]` 缺失或非法时同样 **503 失败关闭**。**`Host` / `X-Forwarded-Host` 只写日志，不参与放行判断**，请求方伪造 `Host: 127.0.0.1` 不能绕过。注意：若反向代理从本机回环连入，`scope["server"]` 可能显示回环地址；公网代理场景仍应先改掉演示口令，不能只依赖这道闸。
 
 | 视图 | 路径 | 谁能用 | 干什么 |
 |---|---|---|---|
 | ① 导入与异常 | `/` | OP / AD | 上传 CSV → 质量门禁与异常清单（可展开到 `文件:行号`）；选**城市档**发起校验 |
-| ② 复核台 | `/review` | RV / AD | 逐条登记具名人工结论、**录入金额**、签发并导出举证包 |
+| ② 复核台 | `/review` | RV / AD | 逐条登记具名人工结论、**录入金额**、登记交付事件并导出举证包（非密码学签名） |
 | ③ 制度问答 | `/qa` | 全部角色 | 带可点开出处与证据覆盖率的解释；金额类只解释不给数；页面标"内容由 AI 生成" |
 
 演示账号（`config/users.json`，库里只存 scrypt 哈希；口令仅对应本机合成数据）：
 `op1/wca-demo-op1`（OP+EM，绑 E001）、`rv1/wca-demo-rv1`（RV，绑主管 E008）、
 `em1/wca-demo-em1`（EM，绑 E004）、`ad1/wca-demo-ad1`（AD，绑 E002）。
 **先跑过 `python -m src.cli all`** 再登录：账号要绑定已导入的员工主数据，空库登录会被明确拒绝并说明原因。
+
+一条必须记住的坑：**别用系统/全局 python 直接跑 `tools/start_services.py`**。
+它会把 `<python>` 换成"自己是谁就用谁"，于是服务子进程继承那个环境、死在 `ImportError` 上。
+现在预检会**在启动之前**拦住并给出处置命令（`missing-interpreter-deps`），不再等 30 秒后误指"端口被占"。
 
 三条刻意的取舍：
 - 权限只在服务端判——用 OP 会话直连 `/review` 或复核接口是 **403**，不是"前端把按钮藏了"；
