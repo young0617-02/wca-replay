@@ -304,7 +304,7 @@ handoff/20261104-验收演练/                                     372,067
 
 ## 8. 0.3.0 发行物与盲跑缺陷修复实测（2026-11-04）
 
-发行物：`dist/wca-replay-0.3.0/`，共 **323,828 字节**；commit
+发行物：`dist/wca-replay-0.3.0/`，共 **324,316 字节**（验收 README 按独立验算口径补正后重算）；commit
 `c36547bc01ffbd1d2e7d15f17f8a4913760b9436`；构建时间 `2026-11-04T01:41:10+08:00`。
 wheel `worktime_compliance_agent-0.3.0-py3-none-any.whl`（284,798 字节，
 sha256 `37660716c100dd67ceb0c5c3711a29402b05cf53bc6b222105117f6aa1d8e629`）。

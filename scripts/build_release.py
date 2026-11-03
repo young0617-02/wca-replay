@@ -132,15 +132,18 @@ py -3.12 -m venv .venv-clean
 `--require-hashes` 要求锁定清单里每个包都带哈希；安装失败即说明依赖与清单不一致，
 不要绕过。wheel 用 `--no-deps` 安装，避免 pip 重新解析依赖树。
 
-## 3. 字节层：独立 `verify.py`
+## 3. 字节层：独立 `wca-verify`（不执行包内代码）
 
 ```powershell
-.venv-clean\\Scripts\\wca-verify.exe <包.zip> --public-key <固定公钥文件> --expect-anchor "<四/五段>"
+.venv-clean\\Scripts\\wca-verify.exe <包.zip> --public-key <固定公钥文件> --expect-anchor "<四/五段>" `
+  --expect-package-sha256 <包SHA256> --expect-artifacts-digest <artifacts_digest>
 ```
 
-期望末尾出现：`ANCHOR CHECK OK`、`INPUTS DIGEST OK`、`ARTIFACT OK`、
-`SIGNATURE OK (pinned ...)`、`RESULT OK`。它证明包字节、输入摘要、结论集哈希、
-签名与外部锚点一致；**不证明结论正确**。
+期望：`MANIFEST CHECKSUM OK`、`ARTIFACTS OK`、`VERIFY SCRIPT OK`、`FINDINGS DIGEST OK`、
+`COUNTS 发现（未签认）... / 已确认结论 ...`、`CHAIN OK`、`INPUTS DIGEST OK`、
+`SIGNATURE OK / pinned`、`ANCHOR CHECK OK`、`RESULT OK`。它证明包字节、工件绑定、
+发现反算摘要、输入摘要、签名与外部锚点一致；**不证明结论正确**。
+不传 `--expect-anchor` 只输出 `ANCHOR NOT CHECKED` + `RESULT PARTIAL`（exit 2）。
 
 ## 4. 字段层：同版本 `replay`
 
@@ -148,8 +151,8 @@ py -3.12 -m venv .venv-clean
 .venv-clean\\Scripts\\wca.exe replay <包.zip> --public-key <固定公钥文件> --expect-anchor "<四/五段>"
 ```
 
-期望：`审计链：完整`、`签名：有效 / pinned（来源可信）`，未裁剪包三元组逐项 `=`，
-`重放结果：一致`。裁剪包会显示 `≠ input_fingerprint`（预期），
+期望：`工件逐文件：OK`、`发现摘要：一致`、三元组逐项 `=`、
+`发现（未签认）`条数一致、`RESULT OK`。裁剪包会显示 `≠ input_fingerprint`（预期），
 但投影指纹与结论摘要必须一致。
 
 ## 5. 版本核对（决定“该用哪个版本复算”）
@@ -170,7 +173,8 @@ py -3.12 -m venv .venv-clean
 
 ## 6. 仍不覆盖什么
 
-- `verify.py` 只证明字节/签名/锚点，不跑引擎，不重算投影。
+- `wca-verify` 只证明字节/工件绑定/发现反算摘要/签名/锚点，不跑引擎，不重算投影。
+- 包内 `verify.py` 只是便利脚本，不是信任依据；不校验工件绑定与 findings 反算摘要。
 - `replay` 依赖本发行物这一版代码与仓库默认口径；包内未记录的参数沿用代码默认值，
   不读你的本机 `.env`。
 - 公钥与包外锚点同时被替换仍会失守；发行物不解决信任根分发问题。
