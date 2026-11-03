@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path, PurePosixPath
 
-from . import ENGINE_VERSION, producer, projection, signing
+from . import ENGINE_VERSION, package_verify, producer, projection, signing
 from .config import Config
 from .db import DB_BACKEND_SQLITE, connect, init_db
 from .engine import run_check
@@ -414,6 +414,11 @@ def _base_result(package: Path | str, manifest: dict) -> dict:
         "producer": dict(manifest["producer"]) if isinstance(
             manifest.get("producer"), dict) else {},
         "producer_ok": True, "producer_reason": "",
+        "artifact": {}, "findings_binding": {},
+        "anchor_checked": False, "partial": False,
+        "package_sha256": "", "package_sha256_ok": True,
+        "artifacts_digest": "", "artifacts_digest_ok": True,
+        "final_conclusions_expected": 0, "final_conclusions_packaged": 0,
         "input_fingerprint_recomputed": False,
         "ok": False, "reason": "",
     }
@@ -423,7 +428,9 @@ def replay(package: Path | str, *, limits: ZipLimits | None = None,
            expect_triple: str | tuple[str, str, str] | None = None,
            expect_anchor: str | tuple[str, ...] | None = None,
            public_keys: list[str] | tuple[str, ...] | None = None,
-           require_signature: bool = False) -> dict:
+           require_signature: bool = False,
+           expect_package_sha256: str | None = None,
+           expect_artifacts_digest: str | None = None) -> dict:
     """重放一个举证包，返回可比对的字典（不抛异常即代表流程跑通，结论看 ok 字段）。
 
     `expect_anchor`（或 `WCA_EXPECT_ANCHOR`）是包外记录的四元组锚点，优先使用；
@@ -433,6 +440,17 @@ def replay(package: Path | str, *, limits: ZipLimits | None = None,
     验签只能证明“包内自洽”，返回值 `signature_trust=package-self-check`。
     `require_signature=True` 时旧 v1/v2 包无签名也失败；v3 缺签名始终失败。
     """
+    pkg_path = Path(package)
+    package_sha = package_verify._sha256_file(pkg_path) if pkg_path.is_file() else ""
+    if expect_package_sha256:
+        if not package_sha or str(expect_package_sha256).strip().lower() != package_sha:
+            result = _base_result(package, {})
+            result["package_sha256"] = package_sha
+            result["package_sha256_ok"] = False
+            result["reason"] = ("PACKAGE SHA256 FAIL 目录形态无法比较包文件哈希"
+                                if not package_sha else
+                                "PACKAGE SHA256 FAIL 包文件哈希与外部记录不一致")
+            return result
     with unpacked(package, limits=limits) as d:
         manifest = json.loads(
             _package_member(d, "manifest.json").read_text(encoding="utf-8"))
@@ -469,6 +487,29 @@ def replay(package: Path | str, *, limits: ZipLimits | None = None,
         if not producer_ok:
             result["reason"] = producer_reason
             return result
+        result["package_sha256"] = package_sha
+        if schema_ver >= 2:
+            artifact = package_verify.check_artifacts(d, manifest, schema_ver)
+            result["artifact"] = artifact
+            result["artifacts_digest"] = artifact.get("artifacts_digest", "")
+            if not artifact["ok"]:
+                result["reason"] = artifact["reason"]
+                return result
+            findings_binding = package_verify.check_findings(d, manifest)
+            result["findings_binding"] = findings_binding
+            result["final_conclusions_expected"] = int(
+                (manifest.get("counts") or {}).get("final_conclusions") or 0)
+            result["final_conclusions_packaged"] = int(findings_binding.get("final_rows", 0))
+            if not findings_binding["ok"]:
+                result["reason"] = findings_binding["reason"]
+                return result
+        if expect_artifacts_digest:
+            expected_artifacts = str(expect_artifacts_digest).strip().lower()
+            if expected_artifacts != result["artifacts_digest"]:
+                result["artifacts_digest_ok"] = False
+                result["reason"] = (
+                    "ARTIFACTS DIGEST FAIL manifest.artifacts_digest 与外部记录不一致")
+                return result
 
         raw_anchor = expect_anchor if expect_anchor is not None \
             else os.environ.get("WCA_EXPECT_ANCHOR")
@@ -693,16 +734,20 @@ def replay(package: Path | str, *, limits: ZipLimits | None = None,
             result["mismatched_fields"] = mismatched
             if not mismatched and result["findings_expected"] == result["findings_actual"]:
                 result["ok"] = True
-                result["reason"] = ("投影指纹、结论摘要与结论条数逐项一致"
+                result["reason"] = ("投影指纹、结论摘要与发现（未签认）条数逐项一致"
                                     if expected_projection and omitted_fields
-                                    else "三元组与结论条数逐项一致")
+                                    else "三元组与发现（未签认）条数逐项一致")
             else:
-                result["reason"] = (f"重放结果与包内三元组不一致：{mismatched or '结论条数不同'}"
+                result["reason"] = (f"重放结果与包内三元组不一致：{mismatched or '发现（未签认）条数不同'}"
                                     f"（期望 {result['findings_expected']} 条 / 实得 "
                                     f"{result['findings_actual']} 条）")
             conn.close()
         finally:
             shutil.rmtree(work, ignore_errors=True)
+        result["anchor_checked"] = bool(expected_anchor)
+        result["partial"] = not result["anchor_checked"]
+        if result["partial"] and result["ok"]:
+            result["reason"] += "；ANCHOR NOT CHECKED（未做外部锚点校验，不能算完整验收）"
         return result
 
 

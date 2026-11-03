@@ -166,11 +166,12 @@ def cmd_check(args) -> int:
                     notes=args.notes or "cli check")
     print(f"run_id={out.run_id}")
     print(f"  规则版本 {cfg.rule_pack_id} / 引擎 {ENGINE_VERSION}")
-    print(f"  员工 {out.employees} 人 / 工作日事实 {out.days} 条 / 结论 {len(out.findings)} 条")
+    print(f"  员工 {out.employees} 人 / 工作日事实 {out.days} 条 / "
+          f"发现（未签认）{len(out.findings)} 条 / 已确认结论 0 条")
     counts = out.counts_by_severity()
     print(f"  分级：明显违规 {counts['VIOLATION']}，需复核 {counts['REVIEW']}，可申辩 {counts['DEFENSIBLE']}")
     print(f"  输入指纹 {out.input_fingerprint[:20]}…")
-    print(f"  结论摘要 {out.conclusion_digest[:20]}…")
+    print(f"  发现摘要（conclusion_digest）{out.conclusion_digest[:20]}…")
     for warning in out.warnings:
         print(f"  ⚠ {warning}", file=sys.stderr)
     print(f"  耗时 {out.elapsed_us / 1000:.1f} ms")
@@ -217,8 +218,9 @@ def cmd_export(args) -> int:
                               signing_key=signing_key, omit_fields=omit or None)
     inputs = manifest["inputs"]
     print(f"举证包：{manifest['package_zip']}")
-    print(f"  对外结论 {manifest['counts']['final_conclusions']} 条 / 未人工确认 {manifest['counts']['unsigned_pending']} 条"
-          f"（无人工结论的异常不进结论集）")
+    print(f"  已确认结论 {manifest['counts']['final_conclusions']} 条 / "
+          f"发现（未签认）{manifest['counts']['findings']} 条"
+          f"（其中未人工确认 {manifest['counts']['unsigned_pending']} 条；无人工结论的异常不进结论集）")
     print(f"  自含输入 {inputs['packed']} 个 / {inputs['total_bytes']:,} 字节"
           + (f"；缺项 {len(inputs['missing'])}：{inputs['missing']}" if inputs["missing"] else "")
           + (f"；{inputs['reason']}" if inputs["reason"] else ""))
@@ -230,15 +232,17 @@ def cmd_export(args) -> int:
         print(f"  ⚠ {inputs.get('warning_message') or '自含输入已接近上限'}")
     print(f"  三元组 {json.dumps(manifest['triple'], ensure_ascii=False, sort_keys=True)}")
     print(f"  审计链 {manifest['chain_verification']}")
-    print(f"  manifest sha256={manifest['manifest_sha256'][:20]}… 结论 {manifest['counts']['findings']} 条")
+    print(f"  manifest sha256={manifest['manifest_sha256'][:20]}… "
+          f"发现（未签认）{manifest['counts']['findings']} 条 / "
+          f"已确认结论 {manifest['counts']['final_conclusions']} 条")
     signature = manifest.get("signature") or {}
     if signature:
         print(f"  Ed25519 签名 key_id={signature.get('key_id', '')}（包内公钥只证明自洽；"
               "来源可信需复核方用 --public-key 固定公钥）")
     else:
         print("  未签名（v2）；如需签名：--signing-key <私钥文件> 或 WCA_SIGNING_KEY_FILE")
-    print("  复核方重放：unzip 后 python verify.py（链+输入+结论集哈希+验签），"
-          "或 python -m src.cli replay <包>（把输入喂回引擎比三元组）")
+    print("  复核方：用发行 wheel 的 wca-verify（不执行包内 verify.py）做字节层/工件绑定，"
+          "再用 wca replay 把输入喂回引擎比三元组；包内 verify.py 只是便利脚本，不是信任依据")
     return 0
 
 
@@ -272,9 +276,13 @@ def cmd_replay(args) -> int:
     res = replay(args.package, expect_triple=getattr(args, "expect_triple", None),
                  expect_anchor=getattr(args, "expect_anchor", None),
                  public_keys=getattr(args, "public_key", None),
-                 require_signature=bool(getattr(args, "require_signature", False)))
+                 require_signature=bool(getattr(args, "require_signature", False)),
+                 expect_package_sha256=getattr(args, "expect_package_sha256", None),
+                 expect_artifacts_digest=getattr(args, "expect_artifacts_digest", None))
     if args.json:
         print(json.dumps(res, ensure_ascii=False, indent=2, sort_keys=True))
+        if res.get("partial"):
+            return 2
         return 0 if res["ok"] else 1
     print(f"重放举证包 {res['package']}（run {res['run_id']}）")
     if (res.get("manifest_checksum") == "missing"
@@ -313,16 +321,36 @@ def cmd_replay(args) -> int:
         print("  签名：无（旧包；来源不可证明）"
               + (" —— 已要求 --require-signature" if getattr(args, "require_signature", False)
                  else ""))
+    artifact = res.get("artifact") or {}
+    if artifact:
+        print(f"  工件逐文件：{'OK' if artifact.get('ok') else 'FAIL'} "
+              f"checked={artifact.get('checked', 0)}"
+              + (f"；{artifact.get('reason')}" if not artifact.get("ok") else ""))
+    findings_binding = res.get("findings_binding") or {}
+    if findings_binding:
+        print(f"  发现摘要：{'一致' if findings_binding.get('ok') else '不一致'}"
+              f"（findings.csv {findings_binding.get('rows', 0)} 行，"
+              f"反算 {str(findings_binding.get('actual_digest', ''))[:16]}…）")
+    if not res.get("anchor_checked"):
+        print("  ANCHOR NOT CHECKED（未传 --expect-anchor；不能算完整验收）")
     if "actual_triple" not in res:
-        print(f"  结论：{'通过' if res['ok'] else '无法重放'} —— {res['reason']}")
-        return 0 if res["ok"] else 1
+        print(f"  RESULT {'PARTIAL' if res.get('partial') else 'FAIL'}"
+              f" —— {res['reason']}")
+        return 2 if res.get("partial") else 1
     for key in ("rule_pack_version", "input_fingerprint", "conclusion_digest"):
         same = res["expected_triple"][key] == res["actual_triple"][key]
         print(f"  {'=' if same else '≠'} {key}: 期望 {str(res['expected_triple'][key])[:20]}… "
               f"实得 {str(res['actual_triple'][key])[:20]}…")
-    print(f"  结论条数 期望 {res['findings_expected']} / 实得 {res['findings_actual']} "
+    print(f"  发现（未签认） 期望 {res['findings_expected']} / 实得 {res['findings_actual']} "
           f"分级 {res['counts_actual']}")
+    print(f"  已确认结论（包内）期望 {res.get('final_conclusions_expected', 0)} / "
+          f"实际 {res.get('final_conclusions_packaged', 0)} 条"
+          "（replay 不重建人工确认，只核对包内结论集行数）")
+    if res.get("partial"):
+        print(f"  RESULT PARTIAL —— {res['reason']}")
+        return 2
     print(f"  重放结果：{'一致' if res['ok'] else '不一致'} —— {res['reason']}")
+    print(f"  RESULT {'OK' if res['ok'] else 'FAIL'}")
     return 0 if res["ok"] else 1
 
 
@@ -757,6 +785,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="包外记录的四/五元组：schema_version,rule_pack_version,"
                         "input_fingerprint,conclusion_digest[,projection_fingerprint]；"
                         "也可用环境变量 WCA_EXPECT_ANCHOR")
+    p.add_argument("--expect-package-sha256", dest="expect_package_sha256", default=None,
+                   help="包外记录的 zip 文件 SHA-256；目录形态无法比较")
+    p.add_argument("--expect-artifacts-digest", dest="expect_artifacts_digest", default=None,
+                   help="包外记录的 manifest.artifacts_digest（包根工件清单摘要）")
     p.add_argument("--public-key", action="append", default=None, dest="public_key",
                    help="外部固定公钥（文件路径或 Base64），可重复传入以支持轮换；"
                         "不传时验签只证明包内自洽，不能证明来源")

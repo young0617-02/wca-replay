@@ -222,8 +222,11 @@ def import_csv_file(conn: Connection, cfg: Config, path: Path | str, *,
         # 否则进程中断会把 raw_file 留在库中，punch 却已回滚。
         with transaction(conn, immediate=True):
             _acquire_import_lock(conn, rel, digest)
+            # CSV 通道只有读到数据行后才知道真实行数；先登记 0，读完再更新。
+            # 不能用 len(header)：那是列数，会让 raw_file.row_count / input_fingerprint
+            # 与导出 input_files.csv 的 row_count 语义错位。
             file_id, reimported = _register_file(
-                conn, rel, digest, kind, header_digest, created_at, len(header))
+                conn, rel, digest, kind, header_digest, created_at, 0)
             if missing:
                 issue = Issue("QUAL-HDR", SEV_REJECT, 1, "header", ",".join(missing),
                               f"表头缺少必需列 {missing}，整个文件被拒收")
@@ -241,6 +244,8 @@ def import_csv_file(conn: Connection, cfg: Config, path: Path | str, *,
                                   actor=actor, rel_path=rel, digest=digest,
                                   created_at=created_at, start_line=2,
                                   manage_transaction=False)
+            conn.execute("UPDATE raw_file SET row_count = ? WHERE file_id = ?",
+                         (result.rows_seen, file_id))
             result.reimported = reimported
             return result
 

@@ -199,6 +199,9 @@ def _legacy_import_csv(conn, cfg, path, *, kind: str, rel_path: str, created_at:
             conn, cfg, file_id=file_id, kind=kind, rows=reader, actor="system:ingest",
             rel_path=rel_path, digest=digest, created_at=created_at, start_line=2,
             manage_transaction=False)
+        # 与当前 CSV 路径同一语义：row_count 是数据行数，不是表头列数。
+        conn.execute("UPDATE raw_file SET row_count = ? WHERE file_id = ?",
+                     (result.rows_seen, file_id))
         result.reimported = reimported
         return result
 

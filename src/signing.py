@@ -118,14 +118,40 @@ def write_public_key(path: Path | str, public_key: bytes, *, force: bool = False
     return target
 
 
+def _looks_like_path(text: str) -> bool:
+    """区分“写错的公钥路径”和“不是 Base64 的裸文本”。
+
+    Base64 字母表本身含 `/`，所以必须先尝试解码，再按路径形态报错：
+    这样 `keys/pub.pub` 会报“文件不存在”，而不是误报“不是合法 Base64”。
+    """
+    stripped = text.strip()
+    return (stripped.startswith((".", "~", "/")) or "\\" in stripped
+            or stripped.lower().endswith((".pub", ".pem", ".key", ".txt")))
+
+
 def load_public_keys(values: list[str] | tuple[str, ...] | None) -> list[bytes]:
-    """--public-key 支持文件路径或裸 Base64；可重复传多把（轮换）。"""
+    """--public-key 支持文件路径或裸 Base64；可重复传多把（轮换）。
+
+    文件路径按调用方当前工作目录解析；文件不存在时给出明确路径错误，
+    不再把路径字符串当成 Base64 去报“不是合法 Base64”。
+    """
     out: list[bytes] = []
     for value in values or []:
-        text = str(value)
+        text = str(value).strip()
         path = Path(text)
-        raw_text = path.read_text(encoding="utf-8") if path.is_file() else text
-        out.append(_decode_b64(raw_text, "公钥", 32))
+        if path.is_file():
+            try:
+                raw_text = path.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise ValueError(f"公钥文件读取失败（{path.resolve()}）：{exc}") from exc
+            out.append(_decode_b64(raw_text, "公钥", 32))
+            continue
+        try:
+            out.append(_decode_b64(text, "公钥", 32))
+        except ValueError as exc:
+            if _looks_like_path(text):
+                raise ValueError(f"公钥文件不存在或不可读：{path.resolve()}") from exc
+            raise
     return out
 
 
@@ -190,10 +216,37 @@ def compute_inputs_digest_from_dir(root: Path | str) -> str:
     return compute_inputs_digest(entries)
 
 
+def artifact_digest(entries: dict[str, str] | list[list[str]]) -> str:
+    """工件清单摘要：`[[相对路径, sha256], ...]` 按路径 UTF-8 字节序排序后 canonical JSON。
+
+    与 `compute_inputs_digest` 同口径，但只收包根工件（不收 `inputs/` 下的输入）。
+    """
+    items = entries.items() if isinstance(entries, dict) else entries
+    normalized: list[list[str]] = []
+    seen: set[str] = set()
+    for raw_path, raw_sha in items:
+        path = str(raw_path).replace("\\", "/")
+        if not path or "/" in path or path in (".", ".."):
+            raise ValueError(f"工件相对路径非法（必须是包根文件名）：{raw_path!r}")
+        digest = str(raw_sha).strip().lower()
+        if not _SHA256_RE.match(digest):
+            raise ValueError(f"工件 sha256 非法：{raw_path} -> {raw_sha!r}")
+        if path in seen:
+            raise ValueError(f"工件路径重复：{path}")
+        seen.add(path)
+        normalized.append([path, digest])
+    normalized.sort(key=lambda item: item[0].encode("utf-8"))
+    return sha256_hex(canonical_json(normalized))
+
+
 def signature_payload(manifest: dict, audit_chain_head: str) -> dict:
-    """签名对象；canonical JSON 后跨语言可复算。"""
+    """签名对象；canonical JSON 后跨语言可复算。
+
+    v2/v3 新包若带 `artifacts_digest` / `verify_script_sha256`，一并进入签名载荷；
+    修订前旧包没有这两个字段，继续用旧 7 字段载荷（避免历史签名失效）。
+    """
     triple = manifest.get("triple") or {}
-    return {
+    payload = {
         "schema": manifest.get("schema"),
         "rule_pack_version": triple.get("rule_pack_version"),
         "input_fingerprint": triple.get("input_fingerprint"),
@@ -202,6 +255,10 @@ def signature_payload(manifest: dict, audit_chain_head: str) -> dict:
         "manifest_checksum": manifest.get("manifest_checksum"),
         "audit_chain_head": audit_chain_head,
     }
+    if "artifacts_digest" in manifest or "verify_script_sha256" in manifest:
+        payload["artifacts_digest"] = manifest.get("artifacts_digest")
+        payload["verify_script_sha256"] = manifest.get("verify_script_sha256")
+    return payload
 
 
 def _payload_bytes(manifest: dict, audit_chain_head: str) -> bytes:

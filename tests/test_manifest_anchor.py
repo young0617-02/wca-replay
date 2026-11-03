@@ -320,11 +320,12 @@ def test_replay_missing_checksum_continues_as_old_package(packed):
 def test_replay_external_anchor_mismatch_reports_fields(packed):
     _, zip_path, _ = packed
     original = copy.deepcopy(_zip_manifest(zip_path)["triple"])
-    forged_digest = "0" * 64 if original["conclusion_digest"] != "0" * 64 else "1" * 64
+    forged_fp = "0" * 64 if original["input_fingerprint"] != "0" * 64 else "1" * 64
 
     def mutate(files):
+        # 改 input_fingerprint：findings 工件与反算摘要仍自洽，只有包外锚点能戳穿。
         doc = json.loads(files["manifest.json"])
-        doc["triple"]["conclusion_digest"] = forged_digest
+        doc["triple"]["input_fingerprint"] = forged_fp
         doc["manifest_checksum"] = _checksum(doc)
         files["manifest.json"] = json.dumps(
             doc, ensure_ascii=False, sort_keys=True).encode("utf-8")
@@ -333,7 +334,7 @@ def test_replay_external_anchor_mismatch_reports_fields(packed):
     forged = _rezip(zip_path, zip_path.parent / "replay-external-forged.zip", mutate)
     res = replay(forged, expect_triple=_triple_arg(original))
     assert not res["ok"]
-    assert res["external_mismatched_fields"] == ["conclusion_digest"]
+    assert res["external_mismatched_fields"] == ["input_fingerprint"]
     assert res["expected_external_triple"] == original
     assert "外部三元组" in res["reason"]
     assert cli.main(["replay", str(forged), "--expect-triple",
@@ -352,9 +353,10 @@ def test_replay_external_anchor_match_keeps_normal_behavior(packed):
 def test_cli_replay_expect_triple_and_help(packed):
     _, zip_path, _ = packed
     original = _zip_manifest(zip_path)["triple"]
-    assert cli.main(["replay", str(zip_path)]) == 0
+    # P0-3：没有 --expect-anchor 时不再给完整通过，只给 PARTIAL（exit 2）。
+    assert cli.main(["replay", str(zip_path)]) == 2
     assert cli.main(["replay", str(zip_path), "--expect-triple",
-                     _triple_arg(original)]) == 0
+                     _triple_arg(original)]) == 2
 
     parser = cli.build_parser()
     sub = next(action for action in parser._actions

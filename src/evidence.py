@@ -439,12 +439,14 @@ PACKAGE_README = (
     "结论摘要必须逐字节一致。\r\n"
     "本包不含任何应付金额：引擎只输出小时数与法定倍数档位，金额由 HR 负责人在复核台具名录入。\r\n"
     "包内 inputs/ 带本次结论真正依赖的原始 CSV；v5 另带审批台账 approval_ledger.csv，"
-    "选择规则见 manifest.inputs.selection_rule。verify.py 独立重算审计链与输入文件哈希；"
-    "audit_chain.jsonl 是本次 run 的链前缀（到该 run 最后一条事件），边界见 manifest.audit_window。"
-    "有本项目代码时用 `python -m src.cli replay <包>` 重放引擎并比对三元组。\r\n"
-    "v3 包带 manifest.signature（Ed25519）：包内公钥只能证明包内自洽，"
-    "只有用包外固定公钥（verify.py --public-key）才能证明来源可信；"
-    "验签需要 PyNaCl，版本见 verify-requirements.txt。\r\n"
+    "选择规则见 manifest.inputs.selection_rule。audit_chain.jsonl 是本次 run 的链前缀"
+    "（到该 run 最后一条事件），边界见 manifest.audit_window。"
+    "包内 verify.py 只是便利脚本，**不是信任依据**；正式验收应使用发行 wheel 的 "
+    "wca-verify（独立实现，不执行包内代码），再用 wca replay 重放引擎比对三元组。\r\n"
+    "v3 包带 manifest.signature（Ed25519）与 artifact_sha256/artifacts_digest/"
+    "verify_script_sha256：包内公钥只能证明包内自洽，只有用包外固定公钥"
+    "（wca-verify --public-key）才能证明来源可信；验签需要 PyNaCl，版本见 "
+    "verify-requirements.txt。\r\n"
 )
 
 
@@ -637,13 +639,16 @@ def _write_conclusions_csv(path: Path, rows: list[dict]) -> None:
 
 
 
-def _not_covered_markdown(nc: dict) -> str:
+def _not_covered_markdown(nc: dict, *, findings_count: int = 0,
+                          final_count: int = 0) -> str:
     """把未覆盖清单渲染成给人读的 Markdown（数据来自 config/not_covered.json，不写死在代码里）。"""
     NL = chr(10)
     scope = nc["scope"]
     out = [
         "# 未覆盖清单（本期不做 / 未验证）",
         "",
+        f"- 本轮包内：发现（未签认）{findings_count} 条 / 已确认结论 {final_count} 条"
+        "（以 manifest.counts.findings / final_conclusions 为准）",
         "- 覆盖工时制：" + str(scope["worktime_regimes_covered"]),
         "- 不覆盖工时制：" + str(scope["worktime_regimes_excluded"]),
         "  - 原因：" + str(scope["excluded_reason"]),
@@ -672,6 +677,8 @@ EXPORT_INPUTS_WARN_BYTES = 11_010_048   # 10.5 MiB
 EXPORT_INPUTS_CRITICAL_BYTES = 12_058_624   # 11.5 MiB
 INPUTS_DIRNAME = "inputs"
 INPUTS_MANIFEST_NAME = f"{INPUTS_DIRNAME}/manifest.json"
+README_FILE = "README.txt"
+VERIFY_REQUIREMENTS_FILE = "verify-requirements.txt"
 
 
 def input_budget_status(total_bytes: int, cap_bytes: int | None = None,
@@ -982,7 +989,8 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
     nc_path = work / "not_covered.json"
     nc_path.write_text(canonical_json(nc) + chr(10), encoding="utf-8")
     nc_md = work / "未覆盖清单.md"
-    nc_md.write_text(_not_covered_markdown(nc))
+    nc_md.write_text(_not_covered_markdown(nc, findings_count=len(findings),
+                                          final_count=len(resp["human_confirmations"])))
 
     # 8) 输入自含（US-EX-01）：把本次结论真正依赖的原始 CSV 一起打包，让重放不需要另外索要数据
     inputs_dir = work / INPUTS_DIRNAME
@@ -1062,6 +1070,18 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
             continue
         shutil.copyfile(e["source"], work / e["arcname"])
 
+    # 工件逐文件哈希：把包根 CSV/JSON/MD 与 README/verify 依赖绑定到 manifest。
+    # 这些字段会被 manifest_checksum 覆盖；新签名包还会把它们放进签名载荷。
+    artifact_sha256 = {
+        p.name: sha256_hex(p.read_bytes()) for p in (
+            findings_csv, manifest_files, issues_csv, conclusions_csv,
+            resp_path, nc_path, nc_md)
+    }
+    artifact_sha256[README_FILE] = sha256_hex(PACKAGE_README.encode("utf-8"))
+    artifact_sha256[VERIFY_REQUIREMENTS_FILE] = sha256_hex(
+        VERIFY_REQUIREMENTS.encode("utf-8"))
+    verify_script_sha256 = sha256_hex(VERIFY_SNIPPET.encode("utf-8"))
+    artifacts_digest = signing.artifact_digest(artifact_sha256)
     # 输入摘要覆盖 inputs/ 下实际存在的每个文件（含 inputs/manifest.json 本身），
     # 在签名前算好并写入 manifest；签名 payload 会覆盖它，避免“只换输入不换 manifest”。
     inputs_digest = signing.compute_inputs_digest_from_dir(work) if signing_key else ""
@@ -1087,6 +1107,9 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
         "run_id": run_id,
         "engine_version": run["engine_version"],
         "producer": producer.producer_info(cfg.rule_pack_id),
+        "artifact_sha256": artifact_sha256,
+        "artifacts_digest": artifacts_digest,
+        "verify_script_sha256": verify_script_sha256,
         "triple": triple,
         **({"projection_spec": projection.PROJECTION_SPEC,
             "projection_fingerprint": projection_fp,
@@ -1116,6 +1139,9 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
             "final_conclusions": len(resp["human_confirmations"]),
             "unsigned_pending": resp["unsigned_findings_excluded_from_conclusions"],
             "ai_answered_questions": resp["ai_participation_count"],
+            # rule_version 是“单条规则版本”，不等于 rule pack 版本；v5 包里可以同时有
+            # 未改判据的 v4 规则与 v5 规则。把分布写进 manifest，避免被误读成版本漂移。
+            "rule_versions": _rule_version_counts(findings),
         },
         "chain_verification": verification.as_dict(),
         "responsibility": {k: resp[k] for k in
@@ -1149,6 +1175,7 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
         **({"inputs_digest": inputs_digest} if signing_key else {}),
         "artifacts": [p.name for p in (findings_csv, manifest_files, chain_json, issues_csv,
                                        conclusions_csv, resp_path, nc_path, nc_md)]
+                      + [README_FILE, VERIFY_REQUIREMENTS_FILE, "verify.py"]
                       + [INPUTS_MANIFEST_NAME] + [e["arcname"] for e in collected["entries"]],
         "disclaimer": "本包不产出应付金额（需求 D-03）；金额是 HR 负责人具名录入的人工结论，不属于引擎输出；"
                       "数据为合成数据，非任何真实个人信息。",
@@ -1174,15 +1201,15 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
     tmp_zip = cfg.packages_dir / f".{run_id}.{os.getpid()}.zip.tmp"
     try:
         with zipfile.ZipFile(tmp_zip, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr("README.txt", PACKAGE_README)
+            zf.writestr(README_FILE, PACKAGE_README.encode("utf-8"))
             for p in (manifest_path, findings_csv, manifest_files, chain_json, issues_csv,
                       conclusions_csv, resp_path, nc_path, nc_md):
                 zf.write(p, arcname=p.name)
             zf.write(inputs_manifest, arcname=INPUTS_MANIFEST_NAME)
             for e in collected["entries"]:
                 zf.write(work / e["arcname"], arcname=e["arcname"])
-            zf.writestr("verify.py", VERIFY_SNIPPET)
-            zf.writestr("verify-requirements.txt", VERIFY_REQUIREMENTS)
+            zf.writestr("verify.py", VERIFY_SNIPPET.encode("utf-8"))
+            zf.writestr(VERIFY_REQUIREMENTS_FILE, VERIFY_REQUIREMENTS.encode("utf-8"))
         os.replace(tmp_zip, zip_path)
     except Exception:
         tmp_zip.unlink(missing_ok=True)
@@ -1250,13 +1277,25 @@ def _sev_label(sev: str) -> str:
     return {"DEFENSIBLE": "可申辩", "REVIEW": "需复核", "VIOLATION": "明显违规"}.get(sev, sev)
 
 
+def _rule_version_counts(findings) -> dict[str, int]:
+    """单条规则版本分布；它不等于 rule pack 版本，必须原样公开。"""
+    out: dict[str, int] = {}
+    for f in findings:
+        version = str(f["rule_version"])
+        out[version] = out.get(version, 0) + 1
+    return dict(sorted(out.items()))
+
+
 VERIFY_REQUIREMENTS = (
     "# 仅包内 verify.py 验签需要；不验签（旧 v1/v2 包）时只用标准库。\n"
     "pynacl==1.6.2\n"
 )
 
 
-VERIFY_SNIPPET = '''"""独立复核脚本：只用标准库重算 hash 链、校验包内输入与结论集哈希；签名存在时用 PyNaCl 验签。
+VERIFY_SNIPPET = r'''"""包内便利复核脚本（不是信任依据）；正式验收请用发行 wheel 的 wca-verify。
+
+本脚本只用标准库重算 hash 链、校验包内输入与结论集哈希；签名存在时用 PyNaCl 验签。
+它不校验工件绑定与 findings 反算摘要，且运行在已解压目录上；不要把它的 OK 当成独立验收。
 
 用法：unzip pkg-<run_id>.zip && python verify.py
 可选外部锚点：python verify.py --expect-triple rp,input_fp,conclusion_digest
@@ -1368,7 +1407,7 @@ def compute_inputs_digest(root):
 
 def signature_payload(manifest, audit_chain_head):
     triple = manifest.get("triple") or {}
-    return {
+    payload = {
         "schema": manifest.get("schema"),
         "rule_pack_version": triple.get("rule_pack_version"),
         "input_fingerprint": triple.get("input_fingerprint"),
@@ -1377,6 +1416,10 @@ def signature_payload(manifest, audit_chain_head):
         "manifest_checksum": manifest.get("manifest_checksum"),
         "audit_chain_head": audit_chain_head,
     }
+    if "artifacts_digest" in manifest or "verify_script_sha256" in manifest:
+        payload["artifacts_digest"] = manifest.get("artifacts_digest")
+        payload["verify_script_sha256"] = manifest.get("verify_script_sha256")
+    return payload
 
 
 def verify_signature(manifest, audit_chain_head, pinned_public_keys):

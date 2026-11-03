@@ -17,6 +17,8 @@ handoff/
 # 不能写进 .gitignore——hatchling 会按忽略规则把它排除在 wheel 之外。
 reports/*.csv
 reports/变异测试-现场/
+# 第三方盲跑交付物/整改材料属于外部输入，默认不入库
+reports/第三方盲跑-*/
 # 性能/迁移对照 JSON 是跑出来的临时产物（含本机路径/时点），默认不入库
 reports/性能探针-*.json
 reports/迁移对照-*.json
