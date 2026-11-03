@@ -10,12 +10,12 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import uuid
 from dataclasses import dataclass, field
 
 from . import ENGINE_VERSION
 from .config import Config
+from .db import Connection, transaction_if_needed
 from .evidence import append_audit
 from .guard import allowed_surface, enforce, offenders
 from .kb.acl import Principal
@@ -96,7 +96,7 @@ class Answer:
 
 
 class ComplianceAgent:
-    def __init__(self, conn: sqlite3.Connection, cfg: Config,
+    def __init__(self, conn: Connection, cfg: Config,
                  provider: Provider | None = None) -> None:
         self.conn = conn
         self.cfg = cfg
@@ -311,40 +311,45 @@ class ComplianceAgent:
         qid = kw["qid"]
         needs_review = kw["needs_review"]
         review_id = None
-        self.conn.execute(
-            "INSERT INTO question_log(qid, asked_at, actor_emp_id, question, intent, tier, answer, "
-            "confidence_permille, evidence_coverage_permille, gate_decision, needs_review, "
-            "citation_ids, numeric_tokens, allowed_numbers, provider, model, tokens_in_est, "
-            "tokens_out_est, tool_calls_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (
-                qid, kw["asked_at"], kw["actor_emp_id"], kw["question"], kw["plan"].intent,
-                _tier_of(kw["plan"].intent, bool(kw["retrieval"].hits)), kw["text"],
-                kw["confidence"], kw["coverage"], kw["gate"], int(needs_review),
-                json.dumps([c.doc_id for c in kw["citations"]], ensure_ascii=False),
-                json.dumps(kw["found"], ensure_ascii=False),
-                json.dumps(kw["allowed"][:200], ensure_ascii=False),
-                kw["provider"], kw["model"], int(kw["tokens_in"]), int(kw["tokens_out"]),
-                json.dumps(kw["tool_calls"], ensure_ascii=False),
-            ),
-        )
-        timer.add("total", int(timer.total_us()))
-        record_spans(self.conn, qid, timer)
-        if needs_review:
-            cur = self.conn.execute(
-                "INSERT INTO review_item(source_type, source_id, status, note) VALUES('answer', ?, 'OPEN', ?)",
-                (qid, "问答门禁自动开单：需人工复核后回复员工"),
+        # 问答落库（问题日志/span/复核单）与审计事件同事务：审计 append 失败时
+        # 不让问题日志单独留下；并发 append 的 advisory lock 持有到本次提交。
+        with transaction_if_needed(self.conn):
+            self.conn.execute(
+                "INSERT INTO question_log(qid, asked_at, actor_emp_id, question, intent, tier, answer, "
+                "confidence_permille, evidence_coverage_permille, gate_decision, needs_review, "
+                "citation_ids, numeric_tokens, allowed_numbers, provider, model, tokens_in_est, "
+                "tokens_out_est, tool_calls_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    qid, kw["asked_at"], kw["actor_emp_id"], kw["question"], kw["plan"].intent,
+                    _tier_of(kw["plan"].intent, bool(kw["retrieval"].hits)), kw["text"],
+                    kw["confidence"], kw["coverage"], kw["gate"], int(needs_review),
+                    json.dumps([c.doc_id for c in kw["citations"]], ensure_ascii=False),
+                    json.dumps(kw["found"], ensure_ascii=False),
+                    json.dumps(kw["allowed"][:200], ensure_ascii=False),
+                    kw["provider"], kw["model"], int(kw["tokens_in"]), int(kw["tokens_out"]),
+                    json.dumps(kw["tool_calls"], ensure_ascii=False),
+                ),
             )
-            review_id = int(cur.lastrowid)
-        append_audit(
-            self.conn, run_id=None, actor=f"employee:{kw['actor_emp_id']}", action="agent.answer",
-            payload={"qid": qid, "intent": kw["plan"].intent, "gate": kw["gate"],
-                     "confidence_permille": kw["confidence"],
-                     "evidence_coverage_permille": kw["coverage"],
-                     "citations": [c.doc_id for c in kw["citations"]],
-                     "violations": kw["violations"], "provider": kw["provider"],
-                     "engine_version": ENGINE_VERSION},
-            ts=kw["asked_at"], cfg=self.cfg,
-        )
+            timer.add("total", int(timer.total_us()))
+            record_spans(self.conn, qid, timer)
+            if needs_review:
+                cur = self.conn.execute(
+                    "INSERT INTO review_item(source_type, source_id, status, note) "
+                    "VALUES('answer', ?, 'OPEN', ?) RETURNING review_id",
+                    (qid, "问答门禁自动开单：需人工复核后回复员工"),
+                )
+                review_id = int(cur.fetchone()["review_id"])
+            append_audit(
+                self.conn, run_id=None, actor=f"employee:{kw['actor_emp_id']}",
+                action="agent.answer",
+                payload={"qid": qid, "intent": kw["plan"].intent, "gate": kw["gate"],
+                         "confidence_permille": kw["confidence"],
+                         "evidence_coverage_permille": kw["coverage"],
+                         "citations": [c.doc_id for c in kw["citations"]],
+                         "violations": kw["violations"], "provider": kw["provider"],
+                         "engine_version": ENGINE_VERSION},
+                ts=kw["asked_at"], cfg=self.cfg,
+            )
         return Answer(
             qid=qid, question=kw["question"], actor_emp_id=kw["actor_emp_id"],
             intent=kw["plan"].intent, answer=kw["text"], gate_decision=kw["gate"],
@@ -446,6 +451,6 @@ def _tier_of(intent: str, has_hits: bool) -> str:
     return "retrieval"
 
 
-def answer_from_log(conn: sqlite3.Connection, qid: str) -> dict | None:
+def answer_from_log(conn: Connection, qid: str) -> dict | None:
     row = conn.execute("SELECT * FROM question_log WHERE qid = ?", (qid,)).fetchone()
     return dict(row) if row else None

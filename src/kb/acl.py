@@ -8,8 +8,9 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from dataclasses import dataclass, field
+
+from ..db import Connection
 
 ACL_PUBLIC = "public"
 ACL_OWN_ORG = "own_org"
@@ -29,7 +30,7 @@ class Principal:
     roles: tuple[str, ...] = field(default_factory=tuple)
 
     @classmethod
-    def from_db(cls, conn: sqlite3.Connection, emp_id: str) -> "Principal":
+    def from_db(cls, conn: Connection, emp_id: str) -> "Principal":
         row = conn.execute(
             "SELECT emp_id, org_id, is_manager, region_code FROM employee WHERE emp_id = ?",
             (emp_id,),

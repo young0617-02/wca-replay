@@ -182,4 +182,5 @@ def test_cfg_rejects_region_outside_profile(cfg):
     from dataclasses import replace  # noqa: F401  仅确认可用
 
     with pytest.raises(ValueError, match="不在城市档位表"):
-        Config.load(env_path="nonexistent.env", WCA_REGION_CODE="310100")
+        Config.load(env_path="nonexistent.env", WCA_DB_BACKEND="sqlite",
+                    WCA_REGION_CODE="310100")

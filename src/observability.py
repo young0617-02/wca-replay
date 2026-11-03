@@ -8,11 +8,11 @@
 
 from __future__ import annotations
 
-import sqlite3
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
+from .db import Connection
 from .util import percentile
 
 
@@ -84,7 +84,7 @@ def stats_for(samples: dict[str, list[int]]) -> list[SegmentStats]:
     return out
 
 
-def spans_for_qid(conn: sqlite3.Connection, qid: str) -> dict[str, list[int]]:
+def spans_for_qid(conn: Connection, qid: str) -> dict[str, list[int]]:
     rows = conn.execute("SELECT segment, duration_us FROM span WHERE qid = ? ORDER BY span_id",
                         (qid,)).fetchall()
     out: dict[str, list[int]] = {}
@@ -93,13 +93,13 @@ def spans_for_qid(conn: sqlite3.Connection, qid: str) -> dict[str, list[int]]:
     return out
 
 
-def record_spans(conn: sqlite3.Connection, qid: str, timer: Timer) -> None:
+def record_spans(conn: Connection, qid: str, timer: Timer) -> None:
     for seg, vals in timer.samples().items():
         for v in vals:
             conn.execute("INSERT INTO span(qid, segment, duration_us) VALUES(?,?,?)", (qid, seg, v))
 
 
-def collect_all_spans(conn: sqlite3.Connection, segment_prefix: str | None = None) -> dict[str, list[int]]:
+def collect_all_spans(conn: Connection, segment_prefix: str | None = None) -> dict[str, list[int]]:
     if segment_prefix:
         rows = conn.execute(
             "SELECT segment, duration_us FROM span WHERE segment LIKE ? ORDER BY span_id",

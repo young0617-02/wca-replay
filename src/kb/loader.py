@@ -7,12 +7,11 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
 from ..rules.findings import SEV_LABEL_ZH
-from ..db import transaction
+from ..db import Connection, transaction
 from ..util import sha256_hex
 from .acl import ACL_SELF, parse_acl_orgs
 from .tokenize import tokenize
@@ -29,6 +28,23 @@ class KbBuildResult:
 
 REQUIRED_FIELDS = ("doc_id", "doc_type", "title", "body", "source_citation", "version", "acl_scope")
 
+# 双后端共用的 UPSERT：SQLite 3.24+/PostgreSQL 9.5+ 都支持 ON CONFLICT。
+KB_DOC_UPSERT_SQL = (
+    "INSERT INTO kb_doc(doc_id, doc_type, category, title, article_no, body, source_citation, "
+    "source_url, issuing_authority, doc_no, effective_from, effective_to, region_code, version, "
+    "acl_scope, acl_org_ids, acl_emp_id, confidence_note, body_sha256) "
+    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+    "ON CONFLICT(doc_id) DO UPDATE SET doc_type = excluded.doc_type, "
+    "category = excluded.category, title = excluded.title, article_no = excluded.article_no, "
+    "body = excluded.body, source_citation = excluded.source_citation, "
+    "source_url = excluded.source_url, issuing_authority = excluded.issuing_authority, "
+    "doc_no = excluded.doc_no, effective_from = excluded.effective_from, "
+    "effective_to = excluded.effective_to, region_code = excluded.region_code, "
+    "version = excluded.version, acl_scope = excluded.acl_scope, "
+    "acl_org_ids = excluded.acl_org_ids, acl_emp_id = excluded.acl_emp_id, "
+    "confidence_note = excluded.confidence_note, body_sha256 = excluded.body_sha256"
+)
+
 
 def load_corpus_rows(path: Path | None = None) -> list[dict]:
     p = path or CORPUS_PATH
@@ -44,13 +60,10 @@ def load_corpus_rows(path: Path | None = None) -> list[dict]:
     return rows
 
 
-def _insert_corpus(conn: sqlite3.Connection, rows: list[dict]) -> None:
+def _insert_corpus(conn: Connection, rows: list[dict]) -> None:
     for doc in rows:
         conn.execute(
-            "INSERT INTO kb_doc(doc_id, doc_type, category, title, article_no, body, source_citation, "
-            "source_url, issuing_authority, doc_no, effective_from, effective_to, region_code, version, "
-            "acl_scope, acl_org_ids, acl_emp_id, confidence_note, body_sha256) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            KB_DOC_UPSERT_SQL,
             (
                 doc["doc_id"], doc["doc_type"], doc.get("category", ""), doc["title"],
                 doc.get("article_no", ""), doc["body"], doc["source_citation"],
@@ -63,12 +76,14 @@ def _insert_corpus(conn: sqlite3.Connection, rows: list[dict]) -> None:
             ),
         )
         for org in parse_acl_orgs(doc.get("acl_org_ids", [])):
-            conn.execute("INSERT OR IGNORE INTO kb_doc_org(doc_id, org_id) VALUES(?,?)",
-                         (doc["doc_id"], org))
+            conn.execute(
+                "INSERT INTO kb_doc_org(doc_id, org_id) VALUES(?,?) "
+                "ON CONFLICT(doc_id, org_id) DO NOTHING",
+                (doc["doc_id"], org))
 
 
 
-def build_kb(conn: sqlite3.Connection, *, corpus_path: Path | None = None,
+def build_kb(conn: Connection, *, corpus_path: Path | None = None,
              include_personnel: bool = True) -> KbBuildResult:
     rows = load_corpus_rows(corpus_path)
     corpus_sha = sha256_hex((corpus_path or CORPUS_PATH).read_bytes())
@@ -89,7 +104,7 @@ def build_kb(conn: sqlite3.Connection, *, corpus_path: Path | None = None,
                          personnel_docs=personnel, corpus_sha256=corpus_sha)
 
 
-def build_personnel_docs(conn: sqlite3.Connection) -> int:
+def build_personnel_docs(conn: Connection) -> int:
     """为每个员工派生两条个人数据条目：考勤汇总（主管可见）与薪酬明细（仅本人）。
 
     这是 A3 的靶子：非授权主体问「某某的考勤/薪酬」时，这两条必须进不了候选集。
@@ -132,10 +147,7 @@ def build_personnel_docs(conn: sqlite3.Connection) -> int:
             f"不经检索链路外发。可见性：仅本人与授权薪酬岗。"
         )
         conn.execute(
-            "INSERT OR REPLACE INTO kb_doc(doc_id, doc_type, category, title, article_no, body, "
-            "source_citation, source_url, issuing_authority, doc_no, effective_from, effective_to, "
-            "region_code, version, acl_scope, acl_org_ids, acl_emp_id, confidence_note, body_sha256) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            KB_DOC_UPSERT_SQL,
             (f"personnel.attendance.{e['emp_id']}", "personnel_data", "attendance_summary",
              f"考勤汇总 · {e['emp_id']}", "", att_body,
              f"系统内合成考勤数据（员工 {e['emp_id']}），生成种子见 data/generator",
@@ -144,10 +156,7 @@ def build_personnel_docs(conn: sqlite3.Connection) -> int:
              "合成个人数据：用于验证 ACL 谓词下推", sha256_hex(att_body.encode("utf-8"))),
         )
         conn.execute(
-            "INSERT OR REPLACE INTO kb_doc(doc_id, doc_type, category, title, article_no, body, "
-            "source_citation, source_url, issuing_authority, doc_no, effective_from, effective_to, "
-            "region_code, version, acl_scope, acl_org_ids, acl_emp_id, confidence_note, body_sha256) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            KB_DOC_UPSERT_SQL,
             (f"personnel.payroll.{e['emp_id']}", "personnel_data", "payroll_detail",
              f"薪酬明细（受限） · {e['emp_id']}", "", pay_body,
              f"系统内合成薪酬基数（员工 {e['emp_id']}）", "", "合成数据", "", "", "",
@@ -156,15 +165,17 @@ def build_personnel_docs(conn: sqlite3.Connection) -> int:
              "合成个人数据：薪酬明细仅本人可见，主管也不可召回",
              sha256_hex(pay_body.encode("utf-8"))),
         )
-        conn.execute("INSERT OR IGNORE INTO kb_doc_org(doc_id, org_id) VALUES(?,?)",
+        conn.execute("INSERT INTO kb_doc_org(doc_id, org_id) VALUES(?,?) "
+                     "ON CONFLICT(doc_id, org_id) DO NOTHING",
                      (f"personnel.attendance.{e['emp_id']}", e["org_id"]))
-        conn.execute("INSERT OR IGNORE INTO kb_doc_org(doc_id, org_id) VALUES(?,?)",
+        conn.execute("INSERT INTO kb_doc_org(doc_id, org_id) VALUES(?,?) "
+                     "ON CONFLICT(doc_id, org_id) DO NOTHING",
                      (f"personnel.payroll.{e['emp_id']}", e["org_id"]))
         created += 2
     return created
 
 
-def index_terms(conn: sqlite3.Connection) -> int:
+def index_terms(conn: Connection) -> int:
     docs = conn.execute("SELECT doc_id, title, article_no, body FROM kb_doc").fetchall()
     total = 0
     for d in docs:
@@ -173,13 +184,14 @@ def index_terms(conn: sqlite3.Connection) -> int:
         for tok in tokenize(f"{d['title']} {d['article_no']}") * 2 + tokenize(d["body"]):
             counts[tok] = counts.get(tok, 0) + 1
         for term, tf in counts.items():
-            conn.execute("INSERT OR REPLACE INTO kb_term(term, doc_id, tf) VALUES(?,?,?)",
+            conn.execute("INSERT INTO kb_term(term, doc_id, tf) VALUES(?,?,?) "
+                         "ON CONFLICT(term, doc_id) DO UPDATE SET tf = excluded.tf",
                          (term, d["doc_id"], tf))
             total += 1
     return total
 
 
-def get_doc(conn: sqlite3.Connection, doc_id: str) -> dict | None:
+def get_doc(conn: Connection, doc_id: str) -> dict | None:
     row = conn.execute("SELECT * FROM kb_doc WHERE doc_id = ?", (doc_id,)).fetchone()
     if row is None:
         return None
@@ -188,7 +200,7 @@ def get_doc(conn: sqlite3.Connection, doc_id: str) -> dict | None:
     return doc
 
 
-def citation_ids_missing(conn: sqlite3.Connection, doc_ids: list[str]) -> list[str]:
+def citation_ids_missing(conn: Connection, doc_ids: list[str]) -> list[str]:
     """规则/评测集引用的 doc_id 必须真的在库里——A2 的结构化保障。"""
     if not doc_ids:
         return []

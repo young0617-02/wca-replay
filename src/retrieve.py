@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import json
 import math
-import sqlite3
 from dataclasses import dataclass, field
 
 from .config import Config
+from .db import Connection, Row
 from .kb.acl import Principal, acl_predicate
 from .kb.tokenize import expand_query, tokenize
 from .observability import Timer
@@ -75,7 +75,7 @@ class RetrievalResult:
         return not self.hits
 
 
-def retrieve(conn: sqlite3.Connection, cfg: Config, principal: Principal, query: str,
+def retrieve(conn: Connection, cfg: Config, principal: Principal, query: str,
              *, top_k: int | None = None, backend: str | None = None,
              timer: Timer | None = None, doc_types: list[str] | None = None) -> RetrievalResult:
     top_k = top_k if top_k is not None else cfg.retrieval_top_k
@@ -88,7 +88,7 @@ def retrieve(conn: sqlite3.Connection, cfg: Config, principal: Principal, query:
     return result
 
 
-def _retrieve(conn: sqlite3.Connection, cfg: Config, principal: Principal, query: str,
+def _retrieve(conn: Connection, cfg: Config, principal: Principal, query: str,
               *, top_k: int, backend: str, doc_types: list[str] | None) -> RetrievalResult:
     if backend == BACKEND_VECTOR:
         # 向量后端需要本地 embedding 模型；未启用时如实降级，不假装命中
@@ -101,7 +101,7 @@ def _retrieve(conn: sqlite3.Connection, cfg: Config, principal: Principal, query
     return _bm25(conn, cfg, principal, query, top_k=top_k, doc_types=doc_types)
 
 
-def _acl_sql(conn: sqlite3.Connection, cfg: Config, principal: Principal,
+def _acl_sql(conn: Connection, cfg: Config, principal: Principal,
              doc_types: list[str] | None) -> tuple[str, str, list]:
     """构造把 ACL 写进 WHERE 的检索 SQL。返回 (SQL, ACL 谓词, 参数)。"""
     pred, pred_params = acl_predicate(principal, alias="d")
@@ -136,7 +136,7 @@ def _acl_sql(conn: sqlite3.Connection, cfg: Config, principal: Principal,
     return base, pred, params
 
 
-def _bm25(conn: sqlite3.Connection, cfg: Config, principal: Principal, query: str,
+def _bm25(conn: Connection, cfg: Config, principal: Principal, query: str,
           *, top_k: int, doc_types: list[str] | None) -> RetrievalResult:
     q_terms = sorted(set(tokenize(expand_query(query))))
     if not q_terms:
@@ -150,7 +150,7 @@ def _bm25(conn: sqlite3.Connection, cfg: Config, principal: Principal, query: st
 
     lengths: dict[str, int] = {}
     tf: dict[str, dict[str, int]] = {}
-    docs: dict[str, sqlite3.Row] = {}
+    docs: dict[str, Row] = {}
     for r in rows:
         docs.setdefault(r["doc_id"], r)
         tf.setdefault(r["doc_id"], {})[r["term"]] = int(r["tf"])
@@ -196,7 +196,7 @@ def _bm25(conn: sqlite3.Connection, cfg: Config, principal: Principal, query: st
     return result
 
 
-def _exact(conn: sqlite3.Connection, cfg: Config, principal: Principal, query: str,
+def _exact(conn: Connection, cfg: Config, principal: Principal, query: str,
            *, top_k: int, doc_types: list[str] | None) -> RetrievalResult:
     """精确匹配档：条文号/标题/正文子串。用于「向量不可用时的第二档降级」。"""
     pred, pred_params = acl_predicate(principal, alias="d")
@@ -207,7 +207,7 @@ def _exact(conn: sqlite3.Connection, cfg: Config, principal: Principal, query: s
     params = list(pred_params) + (list(doc_types) if doc_types else [])
     rows = conn.execute(sql, params).fetchall()
     text = query.strip()
-    scored: list[tuple[int, sqlite3.Row]] = []
+    scored: list[tuple[int, Row]] = []
     for r in rows:
         pts = 0
         if r["article_no"] and r["article_no"] in text:
@@ -231,7 +231,7 @@ def _exact(conn: sqlite3.Connection, cfg: Config, principal: Principal, query: s
     )
 
 
-def _hit_of(r: sqlite3.Row, score: int) -> Hit:
+def _hit_of(r: Row, score: int) -> Hit:
     body = r["body"]
     return Hit(
         doc_id=r["doc_id"], score_permille=int(score), title=r["title"], doc_type=r["doc_type"],
