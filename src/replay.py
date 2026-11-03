@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path, PurePosixPath
 
-from . import ENGINE_VERSION, projection, signing
+from . import ENGINE_VERSION, producer, projection, signing
 from .config import Config
 from .db import DB_BACKEND_SQLITE, connect, init_db
 from .engine import run_check
@@ -411,6 +411,9 @@ def _base_result(package: Path | str, manifest: dict) -> dict:
         "inputs_digest": "", "inputs_digest_ok": False,
         "projection_fingerprint": "", "actual_projection_fingerprint": "",
         "projection_ok": False, "omitted_fields": [],
+        "producer": dict(manifest["producer"]) if isinstance(
+            manifest.get("producer"), dict) else {},
+        "producer_ok": True, "producer_reason": "",
         "input_fingerprint_recomputed": False,
         "ok": False, "reason": "",
     }
@@ -460,6 +463,12 @@ def replay(package: Path | str, *, limits: ZipLimits | None = None,
             return result
         result["expected_triple"] = triple
         scope = manifest.get("scope_json") if isinstance(manifest.get("scope_json"), dict) else {}
+        producer_ok, producer_reason = producer.check_manifest_producer(manifest)
+        result["producer_ok"] = producer_ok
+        result["producer_reason"] = producer_reason
+        if not producer_ok:
+            result["reason"] = producer_reason
+            return result
 
         raw_anchor = expect_anchor if expect_anchor is not None \
             else os.environ.get("WCA_EXPECT_ANCHOR")

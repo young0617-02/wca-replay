@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from . import ENGINE_VERSION, projection, signing
+from . import ENGINE_VERSION, producer, projection, signing
 from .config import Config, PROJECT_ROOT
 from .db import (DB_BACKEND_POSTGRES, Connection, column_exists, get_meta, set_meta,
                  table_exists, transaction_if_needed)
@@ -1086,6 +1086,7 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
         "schema": EVIDENCE_PACKAGE_SCHEMA_V3 if signing_key else EVIDENCE_PACKAGE_SCHEMA,
         "run_id": run_id,
         "engine_version": run["engine_version"],
+        "producer": producer.producer_info(cfg.rule_pack_id),
         "triple": triple,
         **({"projection_spec": projection.PROJECTION_SPEC,
             "projection_fingerprint": projection_fp,
@@ -1579,6 +1580,11 @@ def main():
         print("RESULT FAIL")
         return 1
     print("MANIFEST SCHEMA v" + str(schema_ver), "OK")
+    producer = manifest.get("producer")
+    if isinstance(producer, dict):
+        print("PRODUCER", producer.get("version"), producer.get("commit"),
+              "python=" + str(producer.get("python")),
+              "rule_pack=" + str(producer.get("rule_pack_version")))
 
     checksum_present = MANIFEST_CHECKSUM_FIELD in manifest
     if schema_ver >= 2 and not checksum_present:

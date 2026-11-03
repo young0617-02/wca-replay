@@ -7,6 +7,11 @@ __pycache__/
 .pytest_cache/
 var/
 var/uploads/
+# 发行物是本地构建产物（含 wheel/锁文件/校验和），不入库；
+# 构建命令见 scripts/build_release.py 与 docs/交付与验收SOP.md
+dist/
+# 注意：`src/_release_info.py` 是 build_release.py 的临时文件，构建结束即删除，
+# 不能写进 .gitignore——hatchling 会按忽略规则把它排除在 wheel 之外。
 reports/*.csv
 reports/变异测试-现场/
 # 性能/迁移对照 JSON 是跑出来的临时产物（含本机路径/时点），默认不入库

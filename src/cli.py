@@ -285,6 +285,13 @@ def cmd_replay(args) -> int:
     print(f"  审计链：{'完整' if res['chain']['ok'] else '断裂'}，{res['chain']['length']} 条"
           + (f"（seq={res['chain']['broken_at_seq']} {res['chain']['reason']}）"
              if not res["chain"]["ok"] else ""))
+    producer = res.get("producer") or {}
+    if producer:
+        print(f"  导出代码：version={producer.get('version')} "
+              f"commit={producer.get('commit')} python={producer.get('python')} "
+              f"rule_pack={producer.get('rule_pack_version')}")
+    else:
+        print("  导出代码：包内未记录 producer（旧包；无法核对导出代码版本）")
     print(f"  包内输入 {res['inputs_packed']} 个"
           + (f"，导出时缺项 {res['inputs_missing']}" if res["inputs_missing"] else ""))
     if res.get("inputs_digest"):

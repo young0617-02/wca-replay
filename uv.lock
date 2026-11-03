@@ -679,7 +679,7 @@ wheels = [
 [[package]]
 name = "worktime-compliance-agent"
 version = "0.2.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
     { name = "httpx" },

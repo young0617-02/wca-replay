@@ -126,9 +126,19 @@ def test_requires_python_is_satisfied_by_this_interpreter():
 
 @pytest.mark.parametrize("doc", ["README.md", "docs/演示脚本-30分钟.md"])
 def test_uv_is_the_only_install_channel_and_docs_respect_it(doc):
-    """依赖只走 uv：只有 ```bash 代码块里的行算「可执行命令」，正述历史的散文不算。"""
+    """依赖只走 uv，且项目必须能构建出供第三方验算的 wheel。
+
+    历史断言是 `tool.uv.package = false`（“不是可安装包、别构建”）；发行物需求
+    要求 `uv build` 产出 wheel，因此改为断言构建后端/入口点存在。开发环境仍只走
+    `uv sync`，README 命令块里不允许出现 pip 安装通道。
+    """
     py = _pyproject()
-    assert py["tool"]["uv"].get("package") is False, "本项目不是可安装包，别让它去构建"
+    build = py.get("build-system") or {}
+    assert build.get("build-backend") == "hatchling.build", \
+        "发行物需要可构建 wheel（hatchling 后端）"
+    scripts = py.get("project", {}).get("scripts") or {}
+    assert scripts.get("wca-verify") == "src.verify_pkg:main", \
+        "wheel 必须提供 wca-verify 入口，第三方才不用源码就能跑包内 verify.py"
     readme = (ROOT / doc).read_text(encoding="utf-8")
     assert "uv sync" in readme, f"{doc} 必须以 uv sync 作为依赖入口"
     in_shell, runnable = False, []
