@@ -4,8 +4,10 @@
 
 ## 0. 前提与边界
 
+- **信任依据是发行 wheel 的 `wca-verify`**，不是包内 `verify.py`。`wca-verify` 自己实现校验，**不执行**包内代码；包内 `verify.py` 只是便利脚本，运行在已解压目录上，不能当成独立验收。
+- `wca-verify` 与 `wca replay` 都来自同版本发行物（`dist/wca-replay-<版本>/`），需要 Python 3.12、带哈希的 `requirements.lock.txt`，以及**包外固定公钥 + 四/五段锚点**。
 - 包内 `verify.py` 只用标准库 + PyNaCl（`verify-requirements.txt` 固定 `pynacl==1.6.2`）；未装 PyNaCl 会 `SIGNATURE FAIL`（失败关闭）。
-- `replay` 需要**本仓库同版本代码**或**同版本发行 wheel**（`dist/wca-replay-<版本>/`，见 §5）；`verify.py` 不需要代码，只需要 Python 与 PyNaCl。没有同版本代码/发行物时，不能只凭 `verify.py` 说“结论正确”。
+- **不传 `--expect-anchor` 不再给完整通过**：`wca-verify` / `wca replay` 会输出 `ANCHOR NOT CHECKED` 与 `RESULT PARTIAL`（exit 2）。这是“部分通过”，不是验收 OK；理由见 §5.3。
 - 默认导出不裁剪；只有显式 `--omit-fields leave:paid` 才有裁剪包，才需要第五段投影锚点。
 
 ## 1. 交付方
@@ -19,38 +21,43 @@ uv run python -m src.cli export --run <run_id> --signing-key var/keys/ed25519.ke
 1. 私钥留在交付方受控目录；`key_id` 以输出为准。轮换保留旧 `.pub`，旧包用旧公钥验。
 2. 从包内 manifest 取锚点，写到包外邮件/工单/台账：普通包记四段
    `schema_version,rule_pack_version,input_fingerprint,conclusion_digest`；裁剪包记五段（末尾加 `projection_fingerprint`）。
-3. 同时记包文件 SHA-256、`key_id`、交付时间、验收人。锚点不要写回包内。
-4. 交付物：zip 包、公开公钥、四/五段锚点记录。私钥、原始数据库、内部路径不交付。
+3. 同时记包文件 SHA-256、`manifest.artifacts_digest`（包根工件清单摘要）、`key_id`、交付时间、验收人。
+   锚点不要写回包内；`package_sha256` 只对 zip 有效。
+4. 交付物：zip 包、公开公钥、四/五段锚点记录、包文件 SHA-256 与 `artifacts_digest`。私钥、原始数据库、内部路径不交付。
 
-## 2. 验收方
+## 2. 验收方（0.3.0 起）
 
 ```powershell
-Expand-Archive <包>.zip -DestinationPath <解包目录>
-Set-Location <解包目录>
-python -m pip install -r verify-requirements.txt
-python verify.py --public-key <固定公钥文件> --expect-anchor "<四/五段>"
+# 在发行物目录安装 wheel + 锁定依赖后（见 §5）
+wca-verify <包>.zip --public-key <固定公钥文件> --expect-anchor "<四/五段>" `
+  --expect-package-sha256 <包SHA256> --expect-artifacts-digest <artifacts_digest>
+wca replay <包>.zip --public-key <固定公钥文件> --expect-anchor "<四/五段>" `
+  --expect-package-sha256 <包SHA256> --expect-artifacts-digest <artifacts_digest>
 
-Set-Location <项目根目录>
-uv run python -m src.cli replay <包>.zip --public-key <固定公钥文件> --expect-anchor "<四/五段>"
+# 包内 verify.py 仅作便利脚本（解包后运行；不是信任依据）
+python verify.py --public-key <固定公钥文件> --expect-anchor "<四/五段>"
 ```
 
-- `verify.py` 期望：`ANCHOR CHECK OK`、`INPUTS OK`、`INPUTS DIGEST OK`、`ARTIFACT OK`、`SIGNATURE OK (pinned ...)`、`RESULT OK`。它证明字节/输入摘要/结论集哈希/签名/锚点一致；**不证明结论正确**，也不重算投影。
-- `replay` 期望：`投影指纹：一致`、`= conclusion_digest`、`重放结果：一致`；裁剪包会显示 `≠ input_fingerprint`，这是预期。它证明规则字段能复算同一结论，并校验投影/签名/输入摘要。
-- 五段：最后一段是 `projection_fingerprint`，必须与包内相等；四段旧调用完全不变。未裁剪包没有投影字段，传五段按失败关闭：`ANCHOR FAIL 包内无 projection_fingerprint，第五段无法校验`。
-- 两段结果合并：只跑 `verify.py` 看不到结论是否可复算；只跑 `replay` 没有独立包体复核且依赖本仓库代码；两者都跑才覆盖字节层 + 字段层 + 外部锚点。
+- `wca-verify` 期望：`MANIFEST CHECKSUM OK`、`ARTIFACTS OK`、`VERIFY SCRIPT OK`、`FINDINGS DIGEST OK`、`COUNTS 发现（未签认）... / 已确认结论 ...`、`CHAIN OK`、`INPUTS DIGEST OK`、`SIGNATURE OK / pinned`、`ANCHOR CHECK OK`、`RESULT OK`。它**不执行包内 `verify.py`**；包内脚本被替换会报 `VERIFY SCRIPT FAIL`。
+- `wca replay` 期望：`工件逐文件：OK`、`发现摘要：一致`、三元组逐项 `=`、`发现（未签认）` 条数一致、`RESULT OK`；裁剪包会显示 `≠ input_fingerprint`，这是预期。
+- **没有 `--expect-anchor`**：两个工具都输出 `ANCHOR NOT CHECKED` 与 `RESULT PARTIAL`（exit 2），不能当作验收通过；只传 `--expect-triple` 也只是 legacy 外部比对，仍不给 `RESULT OK`。
+- `--expect-package-sha256` 只对 zip 有效；目录包传它按失败关闭。`--expect-artifacts-digest` 比对 manifest 的包根工件清单摘要。
+- 五段：最后一段是 `projection_fingerprint`，必须与包内相等；四段旧调用不变。未裁剪包没有投影字段，传五段按失败关闭：`ANCHOR FAIL 包内无 projection_fingerprint，第五段无法校验`。
+- 两段结果合并：`wca-verify` 覆盖字节层 + 工件绑定 + 发现反算摘要 + 签名 + 外部锚点；`wca replay` 再证明规则字段能复算同一结论。包内 `verify.py` 只作便利脚本，不能替代任何一段。
 
 ## 3. 谁保管什么 / 漏一步会漏什么
 
 | 角色 | 必须保管 | 漏做/做错的后果 |
 |---|---|---|
 | 交付方 | 私钥、旧公钥、锚点记录、原始包 | 私钥丢失无法补签；锚点没留，验收方无法发现整包替换/降级 |
-| 验收方 | 包外固定公钥、四/五段锚点、包 SHA-256 | 只用包内公钥 → 仅 `package self-check`，攻击者重签仍 OK |
+| 验收方 | 包外固定公钥、四/五段锚点、包 SHA-256、`artifacts_digest` | 只用包内公钥 → 仅 `package self-check`，攻击者重签仍 OK；漏 `artifacts_digest` 无法发现工件清单被整组替换 |
 | 双方 | 交付时间、`key_id`、验收人 | 轮换后无法说明旧包该用哪把公钥 |
 
 - **只用四段**：裁剪包第五段不在包外记录里，无法用包外锚点独立发现投影被换；只能现场 `replay` 才知道。
-- **不 pin 公钥**：攻击者用自己的密钥重签，`verify.py` 仍可能 `RESULT OK`，只打印 `package self-check (NOT source trust)`。
-- **只跑 `verify.py`**：无法证明结论可由输入复算；必须再跑 `replay`。
-- **只跑 `replay`**：没有独立字节层复核，且依赖项目代码；不能替代包内独立脚本。
+- **不 pin 公钥**：攻击者用自己的密钥重签，`wca-verify` 仍可能输出 `package self-check (NOT source trust)`。
+- **只跑包内 `verify.py`**：它不是信任依据，也不校验工件绑定/发现反算摘要；必须用 `wca-verify`。
+- **只跑 `wca-verify`**：能证明字节层、工件绑定、发现摘要、签名与锚点，但不能证明规则字段能复算结论；必须再跑 `wca replay`。
+- **只跑 `wca replay`**：没有独立字节层复核与包外锚点；不能替代 `wca-verify`。
 
 ## 4. 本轮可复现演练（临时库，产物不入库）
 
@@ -147,7 +154,7 @@ py -3.12 -m venv .venv-clean
 
 | 字段 | 含义 | 验收要求 |
 |---|---|---|
-| `version` | 导出代码版本（`wca-0.2.0` → `0.2.0`） | 必须等于 `RELEASE.json.version` |
+| `version` | 导出代码版本（`wca-0.3.0` → `0.3.0`） | 必须等于 `RELEASE.json.version` |
 | `commit` | 导出代码 git commit（完整 40 位） | 必须等于 `RELEASE.json.git_commit` |
 | `python` | 导出时解释器版本 | **仅记录**；跨补丁版本复算不因它失败，但验收记录要写实际复算解释器 |
 | `rule_pack_version` | 导出包使用的规则包 | 必须在 `RELEASE.json.supported_rule_pack_versions` 内 |
@@ -164,16 +171,37 @@ py -3.12 -m venv .venv-clean
   v3 签名包若缺 `producer`，按“无法核对版本”处理，**应拒收或转入例外流程**，不得
   直接签发验收结论。
 
-### 5.4 仍有的前置条件（“独立”不等于“无需任何前置”）
+### 5.4 工件绑定、独立验算器与锚点
+
+新版 manifest（v2/v3 新导出）增加三组字段：
+
+| 字段 | 覆盖 | 失败关闭 |
+|---|---|---|
+| `artifact_sha256` | `findings.csv`、`input_files.csv`、`quality_issues.csv`、`conclusions_final.csv`、`responsibility.json`、`not_covered.json`、`未覆盖清单.md`、`README.txt`、`verify-requirements.txt` 的逐文件 SHA-256 | 文件缺失/哈希不符 → `ARTIFACT FAIL` |
+| `artifacts_digest` | 上述映射按 UTF-8 路径字节序排序后的 canonical JSON SHA-256 | 缺失/不一致 → `ARTIFACT BINDING FAIL` |
+| `verify_script_sha256` | 包内 `verify.py` 字节哈希 | 缺失/被替换 → `VERIFY SCRIPT FAIL` |
+
+- `artifact_sha256`、`artifacts_digest`、`verify_script_sha256` 都被 `manifest_checksum` 覆盖；v3 新包的签名 payload 还直接包含 `artifacts_digest` 与 `verify_script_sha256`，因此签名覆盖它们。
+- `wca-verify` **不执行包内 `verify.py`**：它只读取文件、重算哈希、重算链、重算 `inputs_digest`、验签、从 `findings.csv` 反算 `conclusion_digest`。包内 `verify.py` 被替换时，独立验算器报告 `VERIFY SCRIPT FAIL`，且不会运行替换后的脚本。
+- **额外文件失败关闭**：包根与 `inputs/` 出现未在 `artifact_sha256` / `inputs/manifest.json` 声明的文件，直接 `EXTRA FILE FAIL`。没有 `--allow-extra-files` 开关；原因是额外文件可能夹带数据或指令，验收器不应替接收方猜测“哪些额外文件无害”。
+- **发现 vs 已确认结论**：`findings.csv` 行数对应 manifest `counts.findings`（未签认）；`conclusions_final.csv` 行数对应 `counts.final_conclusions`（已签认）。`wca-verify` 从 `findings.csv` 按公开规范化算法反算 `conclusion_digest`，并输出 `FINDINGS DIGEST OK`；`wca replay` 也执行同一反算。
+- `manifest.counts.rule_versions` 记录单条规则的版本分布（例如 v4 规则 100 条、v5 规则 16 条）。**`rule_version` 是单条规则版本，不等于 rule pack 版本**；v5 包中保留未改判据的 v4 规则是预期，不是包版本漂移。
+- **锚点选择：部分通过，而非静默 OK**。`wca-verify` / `wca replay` 未传 `--expect-anchor` 时仍执行字节层检查，但输出 `ANCHOR NOT CHECKED` + `RESULT PARTIAL`（exit 2）；理由是：内部/预检仍需要看字节层结果，但对外验收必须有包外锚点，`PARTIAL` 明确阻断“没有锚点也算通过”。`--expect-triple` 只是 legacy 外部比对，不约束 schema，也不给 `RESULT OK`。
+- 锚点记录可另带 `package_sha256`（zip 字节 SHA-256）与 `artifacts_digest`（包根工件清单摘要）；用 `--expect-package-sha256` / `--expect-artifacts-digest` 传入，不匹配失败关闭。目录包不能比较 `package_sha256`。
+
+### 5.5 仍有的前置条件（“独立”不等于“无需任何前置”）
 
 1. **Python 3.12**（构建与实测在 3.12.8；`requires-python >=3.12`）。
 2. **依赖来源**：能访问 PyPI，或准备与 `requirements.lock.txt` 同版本的本地 wheel 缓存/镜像；
    发行物不承诺空气隙离线自足。
-3. **包外信任根**：你方保管的固定公钥（`--public-key`）与四/五段锚点。发行物不附带它们；
+3. **包外信任根**：你方保管的固定公钥（`--public-key`）、四/五段锚点、包 SHA-256 与 `artifacts_digest`。发行物不附带它们；
    只用包内公钥只能得到 `package self-check (NOT source trust)`。
 4. **待验举证包**：真实签名包（zip 或解包目录）。发行物不自带证据包或样例 CSV。
 
-## 6. 本轮发行物干净环境实测（2026-11-04）
+## 6. 上一轮（0.2.0）发行物干净环境实测（历史记录，2026-11-04）
+
+> 以下是 0.2.0 的历史记录，保留作对照；0.3.0 的新实测见 §8。该 0.2.0 包缺工件绑定，不能再用
+> `wca-verify` 0.3.0 当成完整验收。
 
 发行物：`dist/wca-replay-0.2.0/`，共 **312,876 字节（305.5 KiB）**；
 `RELEASE.json`：版本 `0.2.0`、构建时间 `2026-11-04T00:10:39+08:00`、
@@ -233,9 +261,12 @@ EXPECTED FAIL：replay exit=1（PRODUCER FAIL，失败关闭）
 锚点 `3,rp-2026.11.gd-pilot-standard.v5,0e225473cf3fd6156326063213a7fa332f64347298a170a5391104fff544287b,01bd44034d61a8ead8248a1b7845b794488b46a26424c488bb525ff0d25ac10a`。
 完整日志：`var/release-clean/clean-room-output.txt`（`var/` 已 gitignore）。
 
-## 7. 交接目录结构（2026-11-04 验收演练）
+## 7. 交接目录结构（2026-11-04 验收演练；0.2.0 历史）
 
-本轮交接目录：`handoff/20261104-验收演练/`，共 **372,067 字节**（11 个文件，含交付清单）：
+> 本节保留上一轮 0.2.0 交接目录的实际结构；0.3.0 发行物目录结构相同，但本轮未重建 handoff。
+> 0.3.0 验收请以 §8 的 `dist/wca-replay-0.3.0/` 与干净环境实测为准。
+
+上一轮交接目录：`handoff/20261104-验收演练/`，共 **372,067 字节**（11 个文件，含交付清单）：
 
 ```text
 handoff/20261104-验收演练/                                     372,067
@@ -270,3 +301,66 @@ handoff/20261104-验收演练/                                     372,067
   只装副本的 `release/requirements.lock.txt`（`--require-hashes`）与 wheel（`--no-deps`），
   再跑 `wca-verify`；输出 `RESULT OK`，`import src` 指向该 venv 的 `site-packages`。
   `replay` 故意未跑，留给盲跑会话。
+
+## 8. 0.3.0 发行物与盲跑缺陷修复实测（2026-11-04）
+
+发行物：`dist/wca-replay-0.3.0/`，共 **323,828 字节**；commit
+`c36547bc01ffbd1d2e7d15f17f8a4913760b9436`；构建时间 `2026-11-04T01:41:10+08:00`。
+wheel `worktime_compliance_agent-0.3.0-py3-none-any.whl`（284,798 字节，
+sha256 `37660716c100dd67ceb0c5c3711a29402b05cf53bc6b222105117f6aa1d8e629`）。
+
+干净 venv 建在仓库外：`%TEMP%\wca-030-clean\venv`（Python 3.12.8），只装
+`release/requirements.lock.txt`（`--require-hashes`）与 wheel（`--no-deps`）。
+真实包：`run-20261104T014322-1c21ddc7.zip`（55,876 字节），锚点
+`3,rp-2026.11.gd-pilot-standard.v5,9d37a312caae194cb8c8da8c36a473ec9eebf0511d2f201be24a01b0c3f0909f,01bd44034d61a8ead8248a1b7845b794488b46a26424c488bb525ff0d25ac10a`；
+`artifacts_digest=618dd683ba93cfc2c39517d8f6c697cb2fbfe2d50e1f7e4cedec0e1cd2a57abe`。
+
+```text
+# wca-verify 正常包（锚点 + 包 SHA + artifacts_digest）
+MANIFEST SCHEMA v3 OK
+PRODUCER 0.3.0 c36547bc01ffbd1d2e7d15f17f8a4913760b9436 python=3.12.8 rule_pack=rp-2026.11.gd-pilot-standard.v5
+MANIFEST CHECKSUM OK
+ARTIFACTS OK checked=9
+VERIFY SCRIPT OK sha256=1f3821c20582f13416cb54b264723c1a96cda4f783dad50067093e94999a5752
+ARTIFACTS DIGEST OK 618dd683ba93cfc2c39517d8f6c697cb2fbfe2d50e1f7e4cedec0e1cd2a57abe
+FINDINGS DIGEST OK 01bd44034d61a8ead8248a1b7845b794488b46a26424c488bb525ff0d25ac10a
+COUNTS 发现（未签认） 116 条 / 已确认结论 0 条
+RULE VERSIONS {"rp-2026.10.gd-pilot-standard.v4": 100, "rp-2026.11.gd-pilot-standard.v5": 16}
+CHAIN OK events=8
+INPUTS DIGEST OK e9d901308ad4864d005c09fa12a3041e1a49648a469d4b6bc225d59e87a11368
+SIGNATURE OK / pinned（来源可信） / key_id=ed25519:8680c06aff744854a46e8e68082af7f3800fa0fc5f7e36288eafbff480966915
+PACKAGE SHA256 OK 15f3c7f6e2236640ea99ccdd7642e73ff5be295a8d97c9552f27eadd4d88888e
+ANCHOR CHECK OK
+RESULT OK
+
+# 同一包 wca replay
+工件逐文件：OK checked=9
+发现摘要：一致（findings.csv 116 行，反算 01bd44034d61a8ea…）
+= rule_pack_version / = input_fingerprint / = conclusion_digest
+发现（未签认） 期望 116 / 实得 116 分级 {'DEFENSIBLE': 23, 'REVIEW': 86, 'VIOLATION': 7}
+已确认结论（包内）期望 0 / 实际 0 条（replay 不重建人工确认，只核对包内结论集行数）
+RESULT OK
+```
+
+七种坏包在**同一个 0.3.0 干净 venv**里逐一失败（不是源码测试的转述）：
+
+| 坏包 | 输出（实测） |
+|---|---|
+| A 改 findings 一条严重级别 | `ARTIFACT FAIL 工件哈希不一致：findings.csv` |
+| B 改 inputs 时间戳 | `INPUTS FAIL 输入摘要与 manifest.inputs_digest 不一致` |
+| C 往 conclusions_final 塞一条 | `ARTIFACT FAIL 工件哈希不一致：conclusions_final.csv` |
+| D 替换包内 verify.py | `VERIFY SCRIPT FAIL verify.py 哈希与 manifest 不一致`；替换脚本未被执行 |
+| E 删除 findings.csv | `ARTIFACT FAIL 工件缺失：findings.csv` |
+| F 加额外文件 | `EXTRA FILE FAIL 未声明的包内文件：extra.txt` |
+| G 改未覆盖清单.md | `ARTIFACT FAIL 工件哈希不一致：未覆盖清单.md` |
+
+另：同一包不传 `--expect-anchor` 时 `wca-verify` 输出 `ANCHOR NOT CHECKED` + `RESULT PARTIAL`
+（exit 2），不再给完整通过。
+
+**P1-2 指纹断代**：这次干净环境包的 `input_fingerprint` 从 0.2.0 的 `0e225473…` 变为
+`9d37a312…`，原因 `input_files.csv` / `input_fingerprint` 的 `row_count` 从表头列数改为实际数据行数；
+`conclusion_digest` 仍为 `01bd4403…`（判据与输入事实未变）。旧包不回改，旧 `row_count` 口径保留在历史包里。
+
+**P2 对账**：`counts.rule_versions` 显示 100 条 v4 规则 + 16 条 v5 规则；`rule_version` 是单条规则版本，
+不是 rule pack 版本，v5 包里保留未改判据的 v4 规则是预期。`未覆盖清单.md` 已去掉历史“101 条结论”
+口径，改为按本轮实际 `发现（未签认）116 / 已确认结论 0` 生成。
