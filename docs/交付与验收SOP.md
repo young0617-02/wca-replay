@@ -41,6 +41,13 @@ python verify.py --public-key <固定公钥文件> --expect-anchor "<四/五段>
 - `wca-verify` 期望：`MANIFEST CHECKSUM OK`、`ARTIFACTS OK`、`VERIFY SCRIPT OK`、`FINDINGS DIGEST OK`、`COUNTS 发现（未签认）... / 已确认结论 ...`、`CHAIN OK`、`INPUTS DIGEST OK`、`SIGNATURE OK / pinned`、`ANCHOR CHECK OK`、`RESULT OK`。它**不执行包内 `verify.py`**；包内脚本被替换会报 `VERIFY SCRIPT FAIL`。
 - `wca replay` 期望：`工件逐文件：OK`、`发现摘要：一致`、三元组逐项 `=`、`发现（未签认）` 条数一致、`RESULT OK`；裁剪包会显示 `≠ input_fingerprint`，这是预期。
 - **没有 `--expect-anchor`**：两个工具都输出 `ANCHOR NOT CHECKED` 与 `RESULT PARTIAL`（exit 2），不能当作验收通过；只传 `--expect-triple` 也只是 legacy 外部比对，仍不给 `RESULT OK`。
+- **四项目门禁（0.4.0）**：`RESULT OK` 必须同时满足签名 `pinned`、外部锚点、外部
+  `--expect-package-sha256`、外部 `--expect-artifacts-digest`；缺一项即 `RESULT PARTIAL`（exit 2），
+  任一项不匹配即 `RESULT FAIL`（exit 1）。`--anchor-file <单包 anchor.json>` 可一次提供
+  `anchor`/`package_sha256`/`artifacts_digest`；**显式参数优先、文件兜底**。
+- **`NOT CHECKED` 含义**：只表示早退时尚未走到该检查，不等于“缺失/不符”。例如
+  `ANCHOR NOT CHECKED（早退，尚未走到锚点校验；非锚点缺失）` 表示已传锚点、但前序检查先失败，
+  不能据此判锚点缺失或错误。
 - `--expect-package-sha256` 只对 zip 有效；目录包传它按失败关闭。`--expect-artifacts-digest` 比对 manifest 的包根工件清单摘要。
 - 五段：最后一段是 `projection_fingerprint`，必须与包内相等；四段旧调用不变。未裁剪包没有投影字段，传五段按失败关闭：`ANCHOR FAIL 包内无 projection_fingerprint，第五段无法校验`。
 - 两段结果合并：`wca-verify` 覆盖字节层 + 工件绑定 + 发现反算摘要 + 签名 + 外部锚点；`wca replay` 再证明规则字段能复算同一结论。包内 `verify.py` 只作便利脚本，不能替代任何一段。
@@ -428,12 +435,14 @@ sha256 `0492169186f85cbb7824757f4604d78e2b27d498aefc80e69e4e6105be680857`。
 `VERIFY-SIGNATURE.txt`；`SHA256SUMS` 覆盖除自身与 `.sig` 外的发行文件，签名已实测
 `SHA256SUMS SIGNATURE OK`。**这不是可复现构建证明**，只是发行物文件签名。
 
-**RESULT OK 门禁**：`wca-verify` 只有同时满足“签名 pin 命中 + 外部锚点通过 +
-外部 package_sha256 通过”才给 `RESULT OK`。无公钥 / 无包 SHA / 无锚点三种组合均为
-`RESULT PARTIAL`（exit 2）；源码 `tests/test_package_binding.py` **24 项**覆盖。工具输出已统一为
+**RESULT OK 门禁**：`wca-verify` / `wca replay` 只有同时满足“签名 pin 命中 + 外部锚点通过 +
+外部 package_sha256 通过 + 外部 artifacts_digest 通过”四项才给 `RESULT OK`。无公钥 / 无包 SHA /
+无锚点 / 无外部 artifacts_digest 四种组合均为 `RESULT PARTIAL`（exit 2），任一不匹配为
+`RESULT FAIL`（exit 1）；源码 `tests/test_package_binding.py` **25 项**覆盖。工具输出已统一为
 中性表述 `pinned (key matches supplied pin; independent key_id verification not done)`，不再比
-`KEY-NOTE.txt` 更乐观；`RESULT OK` 只表示包内检查与三项外部比对通过，不是来源身份核验。
-外部 `--expect-artifacts-digest` 是附加比对：传了必须匹配，未传不影响三项门禁。
+`KEY-NOTE.txt` 更乐观；`RESULT OK` 只表示包内检查与四项外部比对通过，不是来源身份核验。
+`--anchor-file <单包 anchor.json>` 可一次提供 `anchor`/`package_sha256`/`artifacts_digest`，
+显式参数优先、文件兜底。
 
 **policies 进包**：0.4.0 包 `ARTIFACTS OK checked=14`（9 个原工件 + 5 个 policies 文件）；
 `policies/` 纳入 `artifact_sha256`、`artifacts_digest` 与签名，并加入 allowlist，不会误报

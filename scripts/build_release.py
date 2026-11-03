@@ -101,6 +101,9 @@ def _readme(version: str, commit: str, wheel: str, build_time: str) -> str:
   **单个 `FINDINGS DIGEST OK` 不等于整张 `findings.csv` 未变**，必须同时 `ARTIFACTS OK`。
 - **规则版本**：`rule_version` 是单条规则版本，不等于 rule pack 版本；v5 包内可同时有
   v4/v5 规则，分布见 `manifest.counts.rule_versions` 与包内 `policies/RULE-PACK.md`。
+- **policies/ 用途**：包内 `policies/` 提供规则包定义（rule_id/版本/条文号/阈值/生效日期）、
+  条文稳定引用、口径声明、13 项存疑逐条与 `CONFIDENCE.md`，供外部做“规则→条文→阈值→事实”
+  的实质审查；它是**对外精简版，不是全文法条库**，也不替代律师判断。
 
 ## 前置条件（缺一不可）
 
@@ -151,12 +154,21 @@ py -3.12 -m venv .venv-clean
 `COUNTS 发现（未签认）... / 已确认结论 ...`、`CHAIN OK`、`INPUTS DIGEST OK`、
 `SIGNATURE OK / pinned`、`ANCHOR CHECK OK`、`RESULT OK`。它证明包字节、工件绑定、
 发现反算摘要、输入摘要、签名与外部锚点一致；**不证明结论正确**。
-不传 `--expect-anchor` 只输出 `ANCHOR NOT CHECKED` + `RESULT PARTIAL`（exit 2）。
+
+**`RESULT OK` 四项门禁**：签名 `pinned` + 外部锚点 + 外部 `package_sha256` + 外部
+`artifacts_digest` 必须同时通过；缺一项 → `RESULT PARTIAL`（exit 2），任一项不匹配 →
+`RESULT FAIL`（exit 1）。`--anchor-file <单包 anchor.json>` 可一次提供
+`anchor`/`package_sha256`/`artifacts_digest`，**显式参数优先、文件兜底**。
+
+**`NOT CHECKED` 含义**：只表示早退时尚未走到该检查，**不等于“缺失/不符”**。例如
+`ANCHOR NOT CHECKED（早退，尚未走到锚点校验；非锚点缺失）` 表示已传入锚点，但前序检查先失败，
+不是锚点缺失；不能据此判定锚点错误。
 
 ## 4. 字段层：同版本 `replay`
 
 ```powershell
-.venv-clean\\Scripts\\wca.exe replay <包.zip> --public-key <固定公钥文件> --expect-anchor "<四/五段>"
+.venv-clean\\Scripts\\wca.exe replay <包.zip> --public-key <固定公钥文件> --expect-anchor "<四/五段>" `
+  --expect-package-sha256 <包SHA256> --expect-artifacts-digest <artifacts_digest>
 ```
 
 期望：`工件逐文件：OK`、`发现摘要：一致`、三元组逐项 `=`、
