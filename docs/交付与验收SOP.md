@@ -364,3 +364,46 @@ RESULT OK
 **P2 对账**：`counts.rule_versions` 显示 100 条 v4 规则 + 16 条 v5 规则；`rule_version` 是单条规则版本，
 不是 rule pack 版本，v5 包里保留未改判据的 v4 规则是预期。`未覆盖清单.md` 已去掉历史“101 条结论”
 口径，改为按本轮实际 `发现（未签认）116 / 已确认结论 0` 生成。
+
+## 9. 复测与整改闭环（AUD-2026-11-04-001）
+
+本轮复测交接包：`handoff/20261104-验收复测/`。它是 0.3.0 的**新批次**，不覆盖上一批
+`handoff/20261104-验收演练/`；旧包保留作对照基线。逐条整改状态见 `docs/整改回应表.md`，
+**不要在没有证据的情况下把任何一条标成“已闭合”**。
+
+复测方按同一套 A–H 用例执行，`wca-verify` 与 `wca replay` **都要跑**：
+
+| 用例 | 改动 | 期望（0.3.0） |
+|---|---|---|
+| A | `findings.csv` 改一条 severity | `wca-verify`/`wca replay` 均 FAIL，报 `ARTIFACT FAIL` 或 `FINDINGS DIGEST FAIL` |
+| B | `inputs/` 改一个时间戳 | 均 FAIL，报 `INPUTS FAIL` |
+| C | `conclusions_final.csv` 追加伪造结论 | 均 FAIL，报 `ARTIFACT FAIL`（结论集哈希/工件哈希） |
+| D | 包内 `verify.py` 替换为假桩 | 均 FAIL，报 `VERIFY SCRIPT FAIL`；假桩**不得被执行** |
+| E | 删除 `findings.csv` | 均 FAIL，报 `ARTIFACT FAIL 工件缺失` |
+| F | 增加未声明文件 | 均 FAIL，报 `EXTRA FILE FAIL` |
+| G | 篡改 `未覆盖清单.md` | 均 FAIL，报 `ARTIFACT FAIL` |
+| H | 只改 `findings.csv` 的 `source_line_no` | 均 FAIL，报 `ARTIFACT FAIL`（该列不在 `conclusion_digest` 内，由文件级 SHA-256 保护） |
+
+复测命令（从交接包 `release/` 安装 wheel 与锁后）：
+
+```powershell
+wca-verify package/<包>.zip --public-key trusted-public-key.pub `
+  --expect-anchor "<anchor.json 的四段>" `
+  --expect-package-sha256 <anchor.json.package_sha256> `
+  --expect-artifacts-digest <anchor.json.artifacts_digest>
+wca replay package/<包>.zip --public-key trusted-public-key.pub `
+  --expect-anchor "<anchor.json 的四段>" `
+  --expect-package-sha256 <anchor.json.package_sha256> `
+  --expect-artifacts-digest <anchor.json.artifacts_digest>
+```
+
+- 期望正常包：`ARTIFACTS OK checked=9`、`VERIFY SCRIPT OK`、`FINDINGS DIGEST OK`、
+  `COUNTS 发现（未签认）116 / 已确认结论 0`、`SIGNATURE OK / pinned`、`PACKAGE SHA256 OK`、
+  `ANCHOR CHECK OK`、`RESULT OK`。
+- 不传 `--expect-anchor`：`ANCHOR NOT CHECKED` + `RESULT PARTIAL`（exit 2），不是完整验收。
+- `KEY-NOTE.txt` 已写明：`trusted-public-key.pub` 与包内 `manifest.signature.public_key_b64`
+  是同一把钥匙的两份副本，仅供技术验证，**不构成来源可信**；正式交付应由双方通过独立渠道交换指纹。
+- **P0-3 独立信任根属于交付流程，不在软件验收范围内**。软件通过只说明工件绑定/复算/验签链路
+  在本发行物上成立，不能说明公钥属于某个已核验的交付主体，也不能替代第三方签名、时间戳或指纹交换。
+- 复测方仍需自行构造 A–H 坏包并留存命令/输出/退出码；本交接包按要求不放源码、docs、reports、
+  测试、数据库、私钥或旧版发行物。

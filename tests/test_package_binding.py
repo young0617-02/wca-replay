@@ -156,6 +156,22 @@ def test_a2_findings_change_with_recomputed_artifacts_fails_digest(conn, cfg, tm
     assert "FINDINGS DIGEST" in str(res.get("reason") or "")
 
 
+def test_h_source_line_no_change_fails_by_artifact_hash(conn, cfg, tmp_path):
+    """H：source_line_no 不在 conclusion_digest 内，但必须被文件级 SHA-256 捕获。"""
+    _out, zip_path, manifest, _key, pub = _build_signed(conn, cfg, tmp_path)
+    pkg = _unpack(zip_path, tmp_path / "h")
+    path = pkg / "findings.csv"
+    rows = list(csv.DictReader(io.StringIO(path.read_text(encoding="utf-8"), newline="")))
+    rows[0]["source_line_no"] = "999999"
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=rows[0].keys(), lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+    out, reason = _assert_both_fail(pkg, pub, _anchor(manifest))
+    assert "ARTIFACT FAIL" in out, out
+    assert "ARTIFACT FAIL" in reason, reason
+
+
 def test_b_input_timestamp_change_fails_both(conn, cfg, tmp_path):
     _out, zip_path, manifest, _key, pub = _build_signed(conn, cfg, tmp_path)
     pkg = _unpack(zip_path, tmp_path / "b")
