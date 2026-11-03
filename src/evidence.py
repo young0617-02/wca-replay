@@ -647,9 +647,53 @@ def _write_conclusions_csv(path: Path, rows: list[dict]) -> None:
 
 
 
+def _write_package_confidence(path, *, findings_count: int, final_count: int,
+                              signed: bool) -> None:
+    """把本包真实计数写进已签名工件，避免静态 CONFIDENCE 把 confirmed 包写成 0 条。"""
+    base = path.read_text(encoding="utf-8").rstrip()
+    role = "含已确认结论" if final_count else "engine-only（无已确认结论）"
+    block = (
+        "\n\n## 本包计数（导出时生成）\n\n"
+        f"- 发现（未签认）：{findings_count} 条\n"
+        f"- 已确认结论：{final_count} 条\n"
+        f"- responsibility.signed：{'true' if signed else 'false'}\n"
+        f"- 本包角色：{role}\n"
+        "- 三处口径应一致：本文件、`manifest.counts`、`未覆盖清单.md`；"
+        "若不一致，以 manifest 为准并视为导出缺陷。\n"
+    )
+    path.write_text(base + block, encoding="utf-8")
+
+
+def _aggregate_violations(findings, file_paths: dict[int, str]) -> list[dict]:
+    """VIOLATION 中没有单行来源的，列出周期聚合口径，供未覆盖清单明示。"""
+    out: list[dict] = []
+    for f in findings:
+        if str(f["severity"]) != "VIOLATION":
+            continue
+        refs = json.loads(f["source_refs"])
+        _path, line = _source_loc(refs, file_paths)
+        if line:
+            continue
+        metric = json.loads(f["metric_json"])
+        window = metric.get("evidence_window") if isinstance(
+            metric.get("evidence_window"), dict) else {}
+        out.append({
+            "rule_id": str(f["rule_id"]),
+            "emp_id": str(f["emp_id"]),
+            "period_key": str(f["period_key"] or f["work_date"] or ""),
+            "tables": metric.get("evidence_tables") or [],
+            "start": window.get("start"),
+            "end": window.get("end"),
+            "rules": metric.get("evidence_rules") or [],
+            "aggregation": metric.get("evidence_aggregation") or "",
+        })
+    return out
+
+
 def _not_covered_markdown(nc: dict, *, findings_count: int = 0,
                           final_count: int = 0,
-                          rule_versions: dict[str, int] | None = None) -> str:
+                          rule_versions: dict[str, int] | None = None,
+                          aggregate_findings: list[dict] | None = None) -> str:
     """把未覆盖清单渲染成给人读的 Markdown（数据来自 config/not_covered.json，不写死在代码里）。"""
     NL = chr(10)
     scope = nc["scope"]
@@ -676,6 +720,18 @@ def _not_covered_markdown(nc: dict, *, findings_count: int = 0,
     out += [f"- {x}" for x in nc["known_limitations"]]
     out += ["", "## 未测项（不得当成已达成）", ""]
     out += [f"- {x}" for x in nc["not_tested"]]
+    out += ["", "## 周期聚合结论（无法定位到单行）", ""]
+    if aggregate_findings:
+        for item in aggregate_findings:
+            out.append(
+                f"- `{item['rule_id']} / {item['emp_id']} / {item['period_key']}`："
+                "该结论为周期聚合，无法定位到单行；"
+                f"复算口径：表 {'/'.join(item['tables']) or '未知'}，"
+                f"区间 {item['start'] or '未知'}..{item['end'] or '未知'}，"
+                f"关联规则 {'/'.join(item['rules']) or item['rule_id']}；"
+                f"{item['aggregation'] or '按 metric_json 聚合值复算'}。")
+    else:
+        out.append("- 无：本轮所有 VIOLATION 均有单行来源。")
     return NL.join(out) + NL
 
 
@@ -1011,7 +1067,14 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
     nc_md = work / "未覆盖清单.md"
     nc_md.write_text(_not_covered_markdown(
         nc, findings_count=len(findings), final_count=len(resp["human_confirmations"]),
-        rule_versions=_rule_version_counts(findings)))
+        rule_versions=_rule_version_counts(findings),
+        aggregate_findings=_aggregate_violations(findings, file_paths)))
+    confidence_path = policies_dir / "CONFIDENCE.md"
+    if not confidence_path.is_file():
+        raise RuntimeError("缺少 policies/CONFIDENCE.md，无法生成按包计数")
+    _write_package_confidence(
+        confidence_path, findings_count=len(findings),
+        final_count=len(resp["human_confirmations"]), signed=bool(resp["signed"]))
 
     # 8) 输入自含（US-EX-01）：把本次结论真正依赖的原始 CSV 一起打包，让重放不需要另外索要数据
     inputs_dir = work / INPUTS_DIRNAME

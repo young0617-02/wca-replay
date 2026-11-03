@@ -63,7 +63,12 @@ def _print_result(result: dict) -> None:
               "rule_pack=" + str(producer.get("rule_pack_version")))
     line("MANIFEST CHECKSUM", st("manifest"), "manifest")
     artifact = result.get("artifact") or {}
-    line("ARTIFACTS", st("artifacts"), "artifacts", f"checked={artifact.get('checked', 0)}")
+    artifact_detail = f"checked={artifact.get('checked', 0)}"
+    if st("artifacts") == "FAIL":
+        reason = str(artifact.get("reason") or "")
+        reason = reason.removeprefix("ARTIFACT FAIL ").removeprefix("ARTIFACT BINDING FAIL ")
+        artifact_detail += f"（{reason}）"
+    line("ARTIFACTS", st("artifacts"), "artifacts", artifact_detail)
     script_detail = (f"sha256={artifact.get('verify_script_sha256')}"
                      if artifact.get("verify_script_sha256") else "")
     line("VERIFY SCRIPT", st("verify_script"), "verify_script", script_detail)
@@ -84,8 +89,10 @@ def _print_result(result: dict) -> None:
     line("EXTRA FILE", st("extras"), "extras",
          ("：" + ",".join(artifact.get("extras") or [])) if artifact.get("extras") else "")
     findings = result.get("findings") or {}
-    line("FINDINGS DIGEST", st("findings"), "findings",
-         str(findings.get("actual_digest", "")))
+    findings_detail = str(findings.get("actual_digest", ""))
+    if st("findings") == "OK":
+        findings_detail += " (9 fields; source_* not covered by digest)"
+    line("FINDINGS DIGEST", st("findings"), "findings", findings_detail)
     if findings.get("ok"):
         print(f"COUNTS 发现（未签认） {findings.get('rows', 0)} 条 / "
               f"已确认结论 {findings.get('final_rows', 0)} 条")
@@ -122,6 +129,9 @@ def _print_result(result: dict) -> None:
         print("ANCHOR CHECK OK")
     elif anchor_status == "FAIL":
         print(f"ANCHOR FAIL —— {result.get('anchor_reason') or result.get('reason')}")
+    elif result.get("anchor_expected") and early:
+        # 已传入锚点但前序失败：与“未提供锚点”彻底分开。
+        print("ANCHOR SKIPPED (early exit)")
     else:
         print("ANCHOR NOT CHECKED" + _note(
             "anchor", anchor_status, result, checks, early))

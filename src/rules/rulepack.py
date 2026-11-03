@@ -166,6 +166,23 @@ def _finding(
     )
 
 
+def _aggregate_evidence(rule_ids: list[str], window_kind: str, window_key: str,
+                        dates: list, *, aggregation: str) -> dict:
+    """周期聚合结论的可复算口径：表、区间、规则，写进 metric_json。"""
+    clean = sorted({d for d in dates if d is not None})
+    return {
+        "evidence_tables": ["punch.csv", "schedule.csv"],
+        "evidence_window": {
+            "kind": window_kind,
+            "key": window_key,
+            "start": clean[0].isoformat() if clean else None,
+            "end": clean[-1].isoformat() if clean else None,
+        },
+        "evidence_rules": rule_ids,
+        "evidence_aggregation": aggregation,
+    }
+
+
 def _demote(severity: str, facts: DayFacts) -> str:
     """口径不明时不得给出「明显违规」结论——降级为需复核。"""
     if facts.ambiguous_day_type or facts.workday_arrangement_unverified:
@@ -358,7 +375,12 @@ def rule_week(emp: EmpScope, cfg: Config) -> list[Finding]:
                 emp, "CAP-W01", sev,
                 f"{week_key} 内 7 个日历日均有出勤记录、无整天休息，违反《劳动法》第 38 条"
                 "「每周至少休息一日」。（若其中含调休上班日，须人工核对该年度放假安排）",
-                {"days_present": len(days), "rest_days": 0, "minutes_worked": total},
+                {"days_present": len(days), "rest_days": 0, "minutes_worked": total,
+                 **_aggregate_evidence(
+                     ["CAP-W01", "SCOPE-01"], "iso_week", week_key,
+                     [d.work_date for d in days],
+                     aggregation="同一 ISO 周 7 个日历日逐日 minutes_worked/punch_count 聚合；"
+                                 "任一整天零工作且零打卡即视为休息日")},
                 period_key=week_key,
             ))
 
@@ -379,7 +401,12 @@ def rule_week(emp: EmpScope, cfg: Config) -> list[Finding]:
                 {"minutes_worked": total, "cap_minutes": WEEKLY_STATUTORY_CAP_MINUTES,
                  "minutes_over": total - WEEKLY_STATUTORY_CAP_MINUTES,
                  "avg_4w_minutes": avg_week, "weeks_in_avg": len(window),
-                 "expected_minutes": expected},
+                 "expected_minutes": expected,
+                 **_aggregate_evidence(
+                     ["WK-W02", "OT-D01"], "iso_week_4w_average", week_key,
+                     [d.work_date for _k, ds in weeks[max(0, idx - 3): idx + 1] for d in ds],
+                     aggregation="本周及前 3 个 ISO 周的 minutes_worked 求和后按周数平均；"
+                                 "本周 minutes_worked 同时进入周总计与 4 周平均")},
                 period_key=week_key,
             ))
         elif total > emp.weekly_std_minutes:
@@ -389,7 +416,11 @@ def rule_week(emp: EmpScope, cfg: Config) -> list[Finding]:
                 "「每日不超 8 小时而每周超 40 小时」是否一律计为延长工作时间，裁口径存在差异；"
                 "本项目锁定深圳并按需复核处理（见 docs/待确认清单.md 第 Q4 项）。",
                 {"minutes_worked": total, "expected_minutes": expected,
-                 "minutes_over": total - emp.weekly_std_minutes},
+                 "minutes_over": total - emp.weekly_std_minutes,
+                 **_aggregate_evidence(
+                     ["WK-W01", "OT-D01"], "iso_week", week_key,
+                     [d.work_date for d in days],
+                     aggregation="同一 ISO 周 minutes_worked 求和，与 weekly_std_minutes 比较")},
                 period_key=week_key,
             ))
     return out
@@ -426,7 +457,13 @@ def rule_month(emp: EmpScope, cfg: Config) -> list[Finding]:
                 f"违反《劳动法》第 41 条每月上限。统计口径 count_scope={scope_label}"
                 "（休息日加班是否计入 36 小时上限存在裁口径差异，默认只计工作日延长部分）。",
                 {**agg, "counted_minutes": counted, "cap_minutes": cfg.ot_cap_monthly_minutes,
-                 "counting_scope": scope_label},
+                 "counting_scope": scope_label,
+                 **_aggregate_evidence(
+                     ["CAP-M01", "OT-D01"], "calendar_month", month_key,
+                     [f.work_date for f in emp.facts
+                      if _month_key(f.work_date) == month_key],
+                     aggregation="自然月内逐日 max(0, minutes_worked-daily_std_minutes) 按 "
+                                 "counting_scope 求和；只计工作日延长")},
                 period_key=month_key,
             ))
         elif counted > warn_line:
@@ -434,7 +471,13 @@ def rule_month(emp: EmpScope, cfg: Config) -> list[Finding]:
                 emp, "CAP-M02", SEV_DEFENSIBLE,
                 f"{month_key} 延长工时累计 {counted} 分钟，已达 36 小时上限的 90% 以上，"
                 "触发内部制度预警线（policy.sz.overtime-approval），建议排班干预。",
-                {**agg, "counted_minutes": counted, "warn_threshold_minutes": warn_line},
+                {**agg, "counted_minutes": counted, "warn_threshold_minutes": warn_line,
+                 **_aggregate_evidence(
+                     ["CAP-M02", "OT-D01"], "calendar_month", month_key,
+                     [f.work_date for f in emp.facts
+                      if _month_key(f.work_date) == month_key],
+                     aggregation="自然月内工作日延长分钟按 counting_scope 求和；"
+                                 "与月上限 90% 预警线比较")},
                 period_key=month_key,
             ))
     return out

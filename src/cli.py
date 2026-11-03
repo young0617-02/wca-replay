@@ -379,7 +379,7 @@ def cmd_replay(args) -> int:
     elif res.get("anchor_checked"):
         print(f"  ANCHOR FAIL —— {res.get('reason')}")
     elif res.get("anchor_expected"):
-        print("  ANCHOR NOT CHECKED（早退，尚未走到锚点校验；非锚点缺失；不能算完整验收）")
+        print("  ANCHOR SKIPPED (early exit)")
     else:
         print("  ANCHOR NOT CHECKED（未传外部锚点；不能算完整验收）")
     if "actual_triple" not in res:

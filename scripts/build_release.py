@@ -160,9 +160,16 @@ py -3.12 -m venv .venv-clean
 `RESULT FAIL`（exit 1）。`--anchor-file <单包 anchor.json>` 可一次提供
 `anchor`/`package_sha256`/`artifacts_digest`，**显式参数优先、文件兜底**。
 
-**`NOT CHECKED` 含义**：只表示早退时尚未走到该检查，**不等于“缺失/不符”**。例如
-`ANCHOR NOT CHECKED（早退，尚未走到锚点校验；非锚点缺失）` 表示已传入锚点，但前序检查先失败，
-不是锚点缺失；不能据此判定锚点错误。
+**`NOT CHECKED` / `SKIPPED` 含义**：`NOT CHECKED` 只表示早退时尚未走到该检查，
+**不等于“缺失/不符”**；已传入锚点但前序失败时输出 `ANCHOR SKIPPED (early exit)`，与
+“未提供锚点”的 `ANCHOR NOT CHECKED（未传外部锚点）` 彻底分开。`ARTIFACTS FAIL` 行会带具体
+失败文件名；`FINDINGS DIGEST OK` 会带后缀 `(9 fields; source_* not covered by digest)`。
+
+**anchor 文件与环境变量**：`anchor.json` 的 `packages` 是**对象**（key → 单包记录），不是数组；
+`--anchor-file` 只接受单包扁平 JSON（`anchor`/`package_sha256`/`artifacts_digest`），组合式
+`anchor.json` 会被拒绝。环境变量入口只有 `WCA_EXPECT_ANCHOR`（仅锚点）；包 SHA 与
+`artifacts_digest` 只能走显式参数或单包 anchor 文件。优先级：显式参数 > `WCA_EXPECT_ANCHOR` >
+anchor 文件。
 
 ## 4. 字段层：同版本 `replay`
 

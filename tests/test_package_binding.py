@@ -128,6 +128,7 @@ def test_good_package_passes_independent_verify(conn, cfg, tmp_path):
     assert "RESULT OK" in out and "pinned (key matches supplied pin" in out
     assert "来源可信" not in out, out
     assert "independent key_id verification not done" in out, out
+    assert "(9 fields; source_* not covered by digest)" in out, out
     assert len(_lines_starting(out, "ARTIFACTS DIGEST")) == 1, out
     res = replay(zip_path, expect_anchor=anchor, public_keys=[str(pub)],
                  expect_package_sha256=sha256_hex(zip_path.read_bytes()),
@@ -428,12 +429,13 @@ def test_early_failure_has_only_relevant_fail_labels(conn, cfg, tmp_path):
     assert "ARTIFACT" in out and "findings.csv" in out, out
     assert _unexpected_fail_lines(out, ("ARTIFACTS FAIL", "RESULT FAIL")) == [], out
     assert len(_lines_starting(out, "ARTIFACTS DIGEST")) == 1, out
-    for label in ("VERIFY SCRIPT NOT CHECKED", "ARTIFACTS DIGEST", "SIGNATURE NOT CHECKED",
-                  "ANCHOR NOT CHECKED"):
+    for label in ("VERIFY SCRIPT NOT CHECKED", "ARTIFACTS DIGEST", "SIGNATURE NOT CHECKED"):
         line = next(line for line in out.splitlines() if label in line)
         assert "早退" in line, line
-    anchor_line = next(line for line in out.splitlines() if "ANCHOR NOT CHECKED" in line)
-    assert "非锚点缺失" in anchor_line, anchor_line
+    assert "ANCHOR SKIPPED (early exit)" in out, out
+    assert "ANCHOR NOT CHECKED" not in out, out
+    artifacts_line = next(line for line in out.splitlines() if line.startswith("ARTIFACTS FAIL"))
+    assert "findings.csv" in artifacts_line, artifacts_line
 
 
 def test_external_artifacts_digest_failure_shows_internal_ok(conn, cfg, tmp_path):
@@ -462,7 +464,8 @@ def test_replay_early_failure_does_not_report_chain_break_or_no_signature(conn, 
     assert "SIGNATURE NOT CHECKED" in text, text
     assert "断裂" not in text, text
     assert "签名：无" not in text, text
-    assert "ANCHOR NOT CHECKED" in text and "早退" in text, text
+    assert "ANCHOR SKIPPED (early exit)" in text, text
+    assert "ANCHOR NOT CHECKED" not in text, text
     assert len(_lines_starting(text, "ARTIFACTS DIGEST")) == 1, text
 
 
@@ -476,6 +479,7 @@ def test_replay_wrong_anchor_reports_anchor_fail_not_not_checked(conn, cfg, tmp_
     assert code != 0, text
     assert "ANCHOR FAIL" in text, text
     assert "ANCHOR NOT CHECKED" not in text, text
+    assert "ANCHOR SKIPPED" not in text, text
     assert "SIGNATURE FAIL" not in text, text
     assert "CHAIN NOT CHECKED" not in text, text
 
@@ -493,7 +497,8 @@ def test_replay_external_artifacts_digest_failure_shows_expected_actual(conn, cf
     assert "manifest-internal OK" in line and "external=FAIL" in line, line
     assert "expected=" + "0" * 64 in line, line
     assert f"actual={manifest['artifacts_digest']}" in line, line
-    assert "ANCHOR NOT CHECKED" in text and "早退" in text, text
+    assert "ANCHOR SKIPPED (early exit)" in text, text
+    assert "ANCHOR NOT CHECKED" not in text, text
 
 
 def test_missing_relative_public_key_reports_path_not_base64(conn, cfg, tmp_path):
