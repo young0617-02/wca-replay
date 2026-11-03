@@ -1,11 +1,11 @@
-# 交付与验收 SOP（两页）
+# 交付与验收 SOP
 
 > 适用：举证包交付与第三方复核。本文只写“怎么验、看到什么、漏一步会漏什么”，不声称合规已满足。
 
 ## 0. 前提与边界
 
 - 包内 `verify.py` 只用标准库 + PyNaCl（`verify-requirements.txt` 固定 `pynacl==1.6.2`）；未装 PyNaCl 会 `SIGNATURE FAIL`（失败关闭）。
-- `replay` 需要**本仓库同版本代码**；`verify.py` 不需要。没有同版本代码时，必须由组织提供同版本 replay 环境，不能只凭 `verify.py` 说“结论正确”。
+- `replay` 需要**本仓库同版本代码**或**同版本发行 wheel**（`dist/wca-replay-<版本>/`，见 §5）；`verify.py` 不需要代码，只需要 Python 与 PyNaCl。没有同版本代码/发行物时，不能只凭 `verify.py` 说“结论正确”。
 - 默认导出不裁剪；只有显式 `--omit-fields leave:paid` 才有裁剪包，才需要第五段投影锚点。
 
 ## 1. 交付方
@@ -91,3 +91,144 @@ RESULT FAIL
 ```
 
 演练中系统 Python 未装 PyNaCl 时 `verify.py` 曾输出 `SIGNATURE FAIL 未安装 PyNaCl`；换项目 `.venv` Python 后通过。安装 `verify-requirements.txt` 是验收前置步骤，不是可选项。
+
+## 5. 验算环境与版本核对（发行物）
+
+本节回答“同版本代码”怎么从口头约定变成可核对的事实。发行物由 `scripts/build_release.py` 生成，
+目录为 `dist/wca-replay-<版本>/`，只含：
+
+| 文件 | 作用 |
+|---|---|
+| `worktime_compliance_agent-<版本>-py3-none-any.whl` | 验算代码；含 `wca` / `wca-replay` / `wca-verify` 入口与 `src/schema.sql`、`config/region_profile.json` |
+| `requirements.lock.txt` | `uv export --frozen --all-groups --format requirements.txt --no-emit-project` 的完整锁定清单，**逐包带 `--hash=sha256:`**；含 dev group（pytest），验算不需要它，但保留完整闭包 |
+| `SHA256SUMS` | 对目录内除自身外每个文件的 SHA-256 |
+| `RELEASE.json` | 版本、构建时间、`git_commit`、Python 要求、支持规则包、证据包 schema 版本 |
+| `README-验收.md` | 一页安装/运行/核对说明 |
+
+发行物不入库（`dist/` 已 gitignore）。构建脚本强制工作树干净，并把 commit 写进 wheel 内的
+`src/_release_info.py`；因此 `RELEASE.json.git_commit`、wheel 内 `BUILD_COMMIT` 与包内
+`manifest.producer.commit` 三者应能逐一对应。**发行物不能替代包**：它不含真实证据包、样例数据、
+私钥或数据库。
+
+### 5.1 验收方先核对发行物
+
+```powershell
+# 在发行物目录内执行
+Get-Content SHA256SUMS -Encoding UTF8 | ForEach-Object {
+  $hash, $name = $_ -split '\s+', 2
+  $actual = (Get-FileHash $name -Algorithm SHA256).Hash.ToLower()
+  if ($actual -ne $hash) { throw "SHA256 不匹配：$name" }
+  "OK $name"
+}
+Get-Content RELEASE.json -Encoding UTF8 | ConvertFrom-Json
+```
+
+`RELEASE.json` 必查字段：`version`、`build_time`、`git_commit`、`python_requires`、
+`supported_rule_pack_versions`、`evidence_schema_versions`。任一文件哈希不符，或
+`git_commit` 与你方记录的发行提交不符，**拒收**，不要继续安装。
+
+### 5.2 干净 venv（不能复用项目 `.venv`）
+
+```powershell
+py -3.12 -m venv .venv-clean
+.venv-clean\Scripts\python -m pip install --require-hashes -r requirements.lock.txt
+.venv-clean\Scripts\python -m pip install --no-deps <发行物>.whl
+```
+
+- `--require-hashes` 让 pip 校验锁定清单里的每个哈希；失败即依赖与清单不一致，不要加
+  `--no-deps` 绕过或改用未锁定版本。
+- wheel 必须用 `--no-deps` 安装，避免 pip 重新解析依赖树。
+- 装完后用 `.venv-clean\Scripts\wca.exe replay <包>` 与
+  `.venv-clean\Scripts\wca-verify.exe <包>`；不要从源码目录运行，避免 Python 导入本地 `src/`。
+
+### 5.3 用包内 `producer` 判断“该用哪个版本复算”
+
+新导出包在 `manifest.producer` 记录：
+
+| 字段 | 含义 | 验收要求 |
+|---|---|---|
+| `version` | 导出代码版本（`wca-0.2.0` → `0.2.0`） | 必须等于 `RELEASE.json.version` |
+| `commit` | 导出代码 git commit（完整 40 位） | 必须等于 `RELEASE.json.git_commit` |
+| `python` | 导出时解释器版本 | **仅记录**；跨补丁版本复算不因它失败，但验收记录要写实际复算解释器 |
+| `rule_pack_version` | 导出包使用的规则包 | 必须在 `RELEASE.json.supported_rule_pack_versions` 内 |
+
+`replay` 已把 `version` / `commit` / `rule_pack_version` 与当前验算代码逐一核对：
+
+- 一致：正常继续，并在人类可读输出打印“`导出代码：version=... commit=...`”；
+- **不一致：`PRODUCER FAIL`，非零退出，失败关闭**。选择失败关闭而不是“警告后继续”，
+  因为继续会照样算出一个“三元组一致”的 OK 结果，看起来正好像“同版本可复算”，
+  而这正是要防的误读。跨版本复算属于例外流程：需双方书面标注“使用 commit X
+  复算 commit Y 的包”，并保留包外锚点，**不得写成同版本可复算**。
+- 包内没有 `producer`（修订前旧包）：`replay` 打印“包内未记录 producer（旧包；
+  无法核对导出代码版本）”并继续，这是旧包兼容路径；验收方不能把它当成“同版本已核对”。
+  v3 签名包若缺 `producer`，按“无法核对版本”处理，**应拒收或转入例外流程**，不得
+  直接签发验收结论。
+
+### 5.4 仍有的前置条件（“独立”不等于“无需任何前置”）
+
+1. **Python 3.12**（构建与实测在 3.12.8；`requires-python >=3.12`）。
+2. **依赖来源**：能访问 PyPI，或准备与 `requirements.lock.txt` 同版本的本地 wheel 缓存/镜像；
+   发行物不承诺空气隙离线自足。
+3. **包外信任根**：你方保管的固定公钥（`--public-key`）与四/五段锚点。发行物不附带它们；
+   只用包内公钥只能得到 `package self-check (NOT source trust)`。
+4. **待验举证包**：真实签名包（zip 或解包目录）。发行物不自带证据包或样例 CSV。
+
+## 6. 本轮发行物干净环境实测（2026-11-04）
+
+发行物：`dist/wca-replay-0.2.0/`，共 **312,876 字节（305.5 KiB）**；
+`RELEASE.json`：版本 `0.2.0`、构建时间 `2026-11-04T00:10:39+08:00`、
+commit `f170b272f0dcff51aa88d4489526af6d202c0716`、`python_requires >=3.12`。
+wheel `worktime_compliance_agent-0.2.0-py3-none-any.whl`（273,846 字节，
+sha256 `57fd43450faca3c2ae88ee0958d60e999ea4821a30b777e9c1e944bcfd932b5a`）。
+
+干净 venv 为 `var/release-clean/venv`（Python 3.12.8，未复用项目 `.venv`），只装上述
+wheel 与 `requirements.lock.txt`（安装时显式 `--require-hashes`）。随后在该 venv 内用
+`data/raw` 的合成 CSV 建临时 SQLite、跑 check、`keygen`、导出 v3 签名包。关键输出：
+
+```text
+# SHA256SUMS
+OK README-验收.md 839d5e704083a869a75956a43bf37193cd5d04054ef4795854eafdfcd93f08bf
+OK RELEASE.json 63568b8bd5d8ca98781900306839b7bc88ace74d264584d3779e52f0206de458
+OK requirements.lock.txt abfe36c7f52d04fb5295beca444d53c5ac8576b64058654d767556ee303e0466
+OK worktime_compliance_agent-0.2.0-py3-none-any.whl 57fd43450faca3c2ae88ee0958d60e999ea4821a30b777e9c1e944bcfd932b5a
+RELEASE.json version=0.2.0 commit=f170b272f0dcff51aa88d4489526af6d202c0716 python_requires=>=3.12
+
+# manifest.producer 与发行物
+manifest.producer version=0.2.0 commit=f170b272f0dcff51aa88d4489526af6d202c0716 python=3.12.8 rule_pack=rp-2026.11.gd-pilot-standard.v5
+VERSION CHECK OK：version/commit/rule_pack 与发行物一致
+
+# wca-verify 验真实签名包（四段锚点 + pin）
+MANIFEST SCHEMA v3 OK
+PRODUCER 0.2.0 f170b272f0dcff51aa88d4489526af6d202c0716 python=3.12.8 rule_pack=rp-2026.11.gd-pilot-standard.v5
+MANIFEST CHECKSUM OK
+EPOCH OK
+CHAIN OK events= 8 segment= legacy
+ANCHOR CHECK OK
+INPUTS OK checked= 8 packed= 8 missing_at_export= 0
+INPUTS DIGEST OK 4979f14f249a6fc24236725988e593d222814c6d12cfb8ca36341c7cd3f689b5
+ARTIFACT OK conclusions_final.csv
+SIGNATURE OK (pinned key_id=ed25519:f574b0f5edd417721f4d5077439a33f91ba04359e6b01e45192efdaf35e815c5)
+INPUTS SIGNED OK (inputs_digest bound by signature)
+RESULT OK
+
+# 同一包解包后直接 python verify.py（不经过 wca-verify 包装）也 rc=0；
+# 输出与上面一致：PRODUCER ... / ANCHOR CHECK OK / INPUTS DIGEST OK /
+# ARTIFACT OK / SIGNATURE OK (pinned ...) / RESULT OK
+
+# wca replay 复算同一包
+导出代码：version=0.2.0 commit=f170b272f0dcff51aa88d4489526af6d202c0716 python=3.12.8 rule_pack=rp-2026.11.gd-pilot-standard.v5
+签名：有效 / pinned（来源可信） / key_id=ed25519:f574b0f5edd417721f4d5077439a33f91ba04359e6b01e45192efdaf35e815c5
+= rule_pack_version: 期望 rp-2026.11.gd-pilot-… 实得 rp-2026.11.gd-pilot-…
+= input_fingerprint: 期望 0e225473cf3fd6156326… 实得 0e225473cf3fd6156326…
+= conclusion_digest: 期望 01bd44034d61a8ead824… 实得 01bd44034d61a8ead824…
+结论条数 期望 116 / 实得 116 分级 {'DEFENSIBLE': 23, 'REVIEW': 86, 'VIOLATION': 7}
+重放结果：一致 —— 三元组与结论条数逐项一致
+
+# 伪造 producer.commit（重算 manifest_checksum）后
+结论：无法重放 —— PRODUCER FAIL 包内 producer 与当前验算版本不一致：commit（包内 000…000 / 当前 f170b272f0dcff51aa88d4489526af6d202c0716）
+EXPECTED FAIL：replay exit=1（PRODUCER FAIL，失败关闭）
+```
+
+该真实包：`run-20261104T001053-25ebf744`，54,872 字节，自含输入 8 个 / 301,679 字节，
+锚点 `3,rp-2026.11.gd-pilot-standard.v5,0e225473cf3fd6156326063213a7fa332f64347298a170a5391104fff544287b,01bd44034d61a8ead8248a1b7845b794488b46a26424c488bb525ff0d25ac10a`。
+完整日志：`var/release-clean/clean-room-output.txt`（`var/` 已 gitignore）。
