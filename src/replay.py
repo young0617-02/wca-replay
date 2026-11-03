@@ -406,8 +406,10 @@ def _base_result(package: Path | str, manifest: dict) -> dict:
         "pinned_params": {k: scope[k] for k in PINNED_SCOPE_PARAMS if k in scope},
         "inherited_params_note": "包内 scope 未记录的判据参数沿用代码默认值（不读本机 .env）",
         "manifest_checksum": "missing",
+        "chain": {"ok": False, "reason": "未校验", "length": 0, "head_hash": "",
+                  "checked": False},
         "signature_present": False, "signature_ok": False, "signature_trust": "none",
-        "signature_key_id": "", "signature_reason": "",
+        "signature_key_id": "", "signature_reason": "", "signature_checked": False,
         "inputs_digest": "", "inputs_digest_ok": False,
         "projection_fingerprint": "", "actual_projection_fingerprint": "",
         "projection_ok": False, "omitted_fields": [],
@@ -416,8 +418,8 @@ def _base_result(package: Path | str, manifest: dict) -> dict:
         "producer_ok": True, "producer_reason": "",
         "artifact": {}, "findings_binding": {},
         "anchor_checked": False, "partial": False,
-        "package_sha256": "", "package_sha256_ok": True,
-        "artifacts_digest": "", "artifacts_digest_ok": True,
+        "package_sha256": "", "package_sha256_checked": False, "package_sha256_ok": None,
+        "artifacts_digest": "", "artifacts_digest_checked": False, "artifacts_digest_ok": None,
         "final_conclusions_expected": 0, "final_conclusions_packaged": 0,
         "input_fingerprint_recomputed": False,
         "ok": False, "reason": "",
@@ -442,15 +444,19 @@ def replay(package: Path | str, *, limits: ZipLimits | None = None,
     """
     pkg_path = Path(package)
     package_sha = package_verify._sha256_file(pkg_path) if pkg_path.is_file() else ""
+    result = _base_result(package, {})
+    result["package_sha256"] = package_sha
     if expect_package_sha256:
+        result["package_sha256_checked"] = True
         if not package_sha or str(expect_package_sha256).strip().lower() != package_sha:
-            result = _base_result(package, {})
-            result["package_sha256"] = package_sha
             result["package_sha256_ok"] = False
             result["reason"] = ("PACKAGE SHA256 FAIL 目录形态无法比较包文件哈希"
                                 if not package_sha else
                                 "PACKAGE SHA256 FAIL 包文件哈希与外部记录不一致")
             return result
+        result["package_sha256_ok"] = True
+    else:
+        result["package_sha256_ok"] = None
     with unpacked(package, limits=limits) as d:
         manifest = json.loads(
             _package_member(d, "manifest.json").read_text(encoding="utf-8"))
@@ -459,6 +465,11 @@ def replay(package: Path | str, *, limits: ZipLimits | None = None,
             result["reason"] = "MANIFEST FAIL manifest 不是对象"
             return result
         result = _base_result(package, manifest)
+        result["package_sha256"] = package_sha
+        result["package_sha256_checked"] = bool(expect_package_sha256)
+        result["package_sha256_ok"] = (
+            str(expect_package_sha256).strip().lower() == package_sha
+            if expect_package_sha256 and package_sha else None)
         schema_ver = evidence_schema_version(manifest.get("schema"))
         if schema_ver is None:
             result["manifest_checksum"] = "unknown"
@@ -504,12 +515,16 @@ def replay(package: Path | str, *, limits: ZipLimits | None = None,
                 result["reason"] = findings_binding["reason"]
                 return result
         if expect_artifacts_digest:
+            result["artifacts_digest_checked"] = True
             expected_artifacts = str(expect_artifacts_digest).strip().lower()
             if expected_artifacts != result["artifacts_digest"]:
                 result["artifacts_digest_ok"] = False
                 result["reason"] = (
-                    "ARTIFACTS DIGEST FAIL manifest.artifacts_digest 与外部记录不一致")
+                    "ARTIFACTS DIGEST external FAIL "
+                    f"expected={expected_artifacts} actual={result['artifacts_digest']} "
+                    "(manifest-internal OK)")
                 return result
+            result["artifacts_digest_ok"] = True
 
         raw_anchor = expect_anchor if expect_anchor is not None \
             else os.environ.get("WCA_EXPECT_ANCHOR")
@@ -527,6 +542,7 @@ def replay(package: Path | str, *, limits: ZipLimits | None = None,
             _package_member(d, "audit_chain.jsonl").read_text(encoding="utf-8").splitlines(),
             str(manifest.get("engine_version") or ""), triple["rule_pack_version"],
             manifest.get("audit_segment"))
+        chain["checked"] = True
         inputs_manifest = _package_member(d, "inputs/manifest.json")
         inputs = json.loads(inputs_manifest.read_text(encoding="utf-8")) \
             if inputs_manifest.is_file() else {"entries": [], "missing": [],
@@ -617,7 +633,8 @@ def replay(package: Path | str, *, limits: ZipLimits | None = None,
             result["reason"] = f"PIN FAIL {exc}"
             return result
         signature = signing.verify_signature(manifest, chain["head_hash"], pinned)
-        result.update({"signature_present": signature["present"],
+        result.update({"signature_checked": True,
+                       "signature_present": signature["present"],
                        "signature_ok": signature["ok"],
                        "signature_trust": signature["trust"],
                        "signature_key_id": signature["key_id"],
@@ -745,9 +762,20 @@ def replay(package: Path | str, *, limits: ZipLimits | None = None,
         finally:
             shutil.rmtree(work, ignore_errors=True)
         result["anchor_checked"] = bool(expected_anchor)
-        result["partial"] = not result["anchor_checked"]
+        pinned_ok = result.get("signature_trust") == "pinned"
+        external_ok = (pinned_ok and result["anchor_checked"]
+                       and result["package_sha256_checked"])
+        result["partial"] = not external_ok
         if result["partial"] and result["ok"]:
-            result["reason"] += "；ANCHOR NOT CHECKED（未做外部锚点校验，不能算完整验收）"
+            missing = []
+            if not pinned_ok:
+                missing.append("外部公钥 pin")
+            if not result["anchor_checked"]:
+                missing.append("外部锚点")
+            if not result["package_sha256_checked"]:
+                missing.append("外部包 SHA-256")
+            result["reason"] += ("；RESULT PARTIAL（缺少/未通过 " + "、".join(missing)
+                                 + "，不能算完整验收）")
         return result
 
 

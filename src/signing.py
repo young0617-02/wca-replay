@@ -1,7 +1,8 @@
 """Ed25519 举证包签名/验签与密钥文件工具。
 
 边界：签名只证明“manifest 关键字段 + 审计链头”由一个持有私钥的实体签过。
-包内公钥只能做自洽检查；只有外部 pin（--public-key）才能证明来源可信。
+包内公钥只能做自洽检查；外部 pin（--public-key）只表示与供给公钥匹配，
+来源可信仍需双方通过独立渠道核验 key_id。
 私钥不进入包，也不进入任何日志。
 """
 from __future__ import annotations
@@ -226,8 +227,11 @@ def artifact_digest(entries: dict[str, str] | list[list[str]]) -> str:
     seen: set[str] = set()
     for raw_path, raw_sha in items:
         path = str(raw_path).replace("\\", "/")
-        if not path or "/" in path or path in (".", ".."):
-            raise ValueError(f"工件相对路径非法（必须是包根文件名）：{raw_path!r}")
+        parts = [p for p in path.split("/") if p]
+        if (not parts or path.startswith("/") or ".." in parts
+                or (len(parts[0]) >= 2 and parts[0][1] == ":")):
+            raise ValueError(f"包内路径非法（必须是包内相对路径）：{raw_path!r}")
+        path = "/".join(parts)
         digest = str(raw_sha).strip().lower()
         if not _SHA256_RE.match(digest):
             raise ValueError(f"工件 sha256 非法：{raw_path} -> {raw_sha!r}")

@@ -29,6 +29,9 @@ REQUIRED_ARTIFACTS = (
     "findings.csv", "input_files.csv", "quality_issues.csv",
     "conclusions_final.csv", "responsibility.json", "not_covered.json", "未覆盖清单.md",
     README_FILE, VERIFY_REQUIREMENTS,
+    "policies/RULE-PACK.md", "policies/LAW-REFERENCES.md",
+    "policies/口径声明-对外版.md", "policies/字段口径与条文依据-对外版.md",
+    "policies/CONFIDENCE.md",
 )
 # 审计链由独立的链重算与签名链头保护；不放进 artifact_sha256，
 # 否则“改一条链事件”会先报工件哈希，掩盖具体断在第几条。
@@ -56,16 +59,23 @@ def _load_manifest(root: Path) -> dict:
     return doc
 
 
-def _normalize_root_artifact(name: object) -> str:
+def _normalize_artifact_path(name: object) -> str:
     text = str(name).replace("\\", "/")
-    if not text or "/" in text or text in (".", ".."):
-        raise ValueError(f"ARTIFACT FAIL 工件路径非法（必须是包根文件名）：{name!r}")
-    return text
+    parts = [p for p in text.split("/") if p]
+    if (not parts or text.startswith("/") or ".." in parts
+            or (len(parts[0]) >= 2 and parts[0][1] == ":")):
+        raise ValueError(f"ARTIFACT FAIL 包内路径非法（必须是包内相对路径）：{name!r}")
+    return "/".join(parts)
 
 
 def check_artifacts(root: Path, manifest: dict, schema_ver: int) -> dict:
-    """逐文件哈希 + verify.py 哈希 + 未声明文件检查；v1 旧包跳过。"""
+    """逐文件哈希 + verify.py 哈希 + 未声明文件检查；v1 旧包跳过。
+
+    每个子检查独立记录 OK/FAIL/NOT CHECKED；早退时未走的检查不能写成 FAIL。
+    """
     result = {"ok": True, "reason": "", "checked": 0, "extras": [],
+              "files_status": "NOT CHECKED", "verify_script_status": "NOT CHECKED",
+              "digest_status": "NOT CHECKED", "extras_status": "NOT CHECKED",
               "artifact_sha256": {}, "artifacts_digest": "", "verify_script_sha256": ""}
     if schema_ver < 2:
         result["reason"] = "LEGACY v1 包未做工件绑定"
@@ -74,53 +84,67 @@ def check_artifacts(root: Path, manifest: dict, schema_ver: int) -> dict:
     declared_digest = manifest.get("artifacts_digest")
     script_digest = manifest.get("verify_script_sha256")
     if not isinstance(declared, dict) or not declared:
-        result.update(ok=False, reason="ARTIFACT BINDING FAIL 缺少 manifest.artifact_sha256")
+        result.update(ok=False, files_status="FAIL",
+                      reason="ARTIFACT BINDING FAIL 缺少 manifest.artifact_sha256")
         return result
     if not isinstance(declared_digest, str) or not declared_digest:
-        result.update(ok=False, reason="ARTIFACT BINDING FAIL 缺少 manifest.artifacts_digest")
+        result.update(ok=False, digest_status="FAIL",
+                      reason="ARTIFACT BINDING FAIL 缺少 manifest.artifacts_digest")
         return result
     if not isinstance(script_digest, str) or not script_digest:
-        result.update(ok=False, reason="VERIFY SCRIPT FAIL 缺少 manifest.verify_script_sha256")
+        result.update(ok=False, verify_script_status="FAIL",
+                      reason="VERIFY SCRIPT FAIL 缺少 manifest.verify_script_sha256")
         return result
     try:
-        normalized = {_normalize_root_artifact(k): str(v).lower() for k, v in declared.items()}
+        normalized = {_normalize_artifact_path(k): str(v).lower()
+                      for k, v in declared.items()}
     except ValueError as exc:
-        result.update(ok=False, reason=str(exc))
+        result.update(ok=False, files_status="FAIL", reason=str(exc))
         return result
     result["artifact_sha256"] = normalized
     result["artifacts_digest"] = declared_digest
     result["verify_script_sha256"] = script_digest
     missing = [name for name in REQUIRED_ARTIFACTS if name not in normalized]
     if missing:
-        result.update(ok=False, reason="ARTIFACT BINDING FAIL 缺少必需工件：" + ",".join(missing))
+        result.update(ok=False, files_status="FAIL",
+                      reason="ARTIFACT BINDING FAIL 缺少必需工件：" + ",".join(missing))
         return result
     for name, expected in normalized.items():
         path = root / name
         if not path.is_file():
-            result.update(ok=False, reason=f"ARTIFACT FAIL 工件缺失：{name}")
+            result.update(ok=False, files_status="FAIL",
+                          reason=f"ARTIFACT FAIL 工件缺失：{name}")
             return result
         actual = _sha256_file(path)
         result["checked"] += 1
         if actual != expected:
-            result.update(ok=False, reason=f"ARTIFACT FAIL 工件哈希不一致：{name}")
+            result.update(ok=False, files_status="FAIL",
+                          reason=f"ARTIFACT FAIL 工件哈希不一致：{name}")
             return result
+    result["files_status"] = "OK"
     try:
         actual_digest = signing.artifact_digest(normalized)
     except ValueError as exc:
-        result.update(ok=False, reason=f"ARTIFACT BINDING FAIL {exc}")
+        result.update(ok=False, digest_status="FAIL",
+                      reason=f"ARTIFACT BINDING FAIL {exc}")
         return result
     if actual_digest != declared_digest:
-        result.update(ok=False, reason="ARTIFACT BINDING FAIL artifacts_digest 不一致")
+        result.update(ok=False, digest_status="FAIL",
+                      reason="ARTIFACT BINDING FAIL artifacts_digest 不一致")
         return result
+    result["digest_status"] = "OK"
     script_path = root / VERIFY_SCRIPT
     if not script_path.is_file():
-        result.update(ok=False, reason="VERIFY SCRIPT FAIL 包内缺少 verify.py")
+        result.update(ok=False, verify_script_status="FAIL",
+                      reason="VERIFY SCRIPT FAIL 包内缺少 verify.py")
         return result
     actual_script = _sha256_file(script_path)
     if actual_script != script_digest:
-        result.update(ok=False, reason="VERIFY SCRIPT FAIL verify.py 哈希与 manifest 不一致")
+        result.update(ok=False, verify_script_status="FAIL",
+                      reason="VERIFY SCRIPT FAIL verify.py 哈希与 manifest 不一致")
         return result
-    allowed_root = set(normalized) | {MANIFEST_FILE, VERIFY_SCRIPT, CHAIN_FILE}
+    result["verify_script_status"] = "OK"
+    allowed_paths = set(normalized) | {MANIFEST_FILE, VERIFY_SCRIPT, CHAIN_FILE}
     allowed_inputs = {f"{INPUTS_DIRNAME}/manifest.json"}
     inputs_manifest = root / INPUTS_DIRNAME / "manifest.json"
     if inputs_manifest.is_file():
@@ -131,30 +155,31 @@ def check_artifacts(root: Path, manifest: dict, schema_ver: int) -> dict:
                 raise ValueError("inputs/manifest.json entries 不是数组")
             for entry in entries:
                 arc = str(entry.get("arcname") or "")
-                normalized = arc.replace("\\", "/")
-                parts = [p for p in normalized.split("/") if p]
-                if (not parts or normalized.startswith("/") or ".." in parts
-                        or (len(parts[0]) >= 2 and parts[0][1] == ":")):
-                    raise ValueError(f"inputs/manifest.json 包内路径非法：{arc!r}")
-                allowed_inputs.add(normalized)
+                normalized_arc = _normalize_artifact_path(arc)
+                allowed_inputs.add(normalized_arc)
         except ValueError:
             raise
         except Exception as exc:
-            result.update(ok=False,
-                          reason=f"ARTIFACT FAIL 无法读取 inputs/manifest.json：{type(exc).__name__}: {exc}")
+            result.update(ok=False, extras_status="FAIL",
+                          reason="ARTIFACT FAIL 无法读取 inputs/manifest.json："
+                                 f"{type(exc).__name__}: {exc}")
             return result
     for path in sorted(root.rglob("*")):
         if not path.is_file():
             continue
         rel = path.relative_to(root).as_posix()
-        if rel in allowed_root:
+        if rel in allowed_paths:
             continue
-        if rel.startswith(INPUTS_DIRNAME + "/"):
-            if rel in allowed_inputs:
-                continue
+        if rel.startswith(INPUTS_DIRNAME + "/") and rel in allowed_inputs:
+            continue
         result["extras"].append(rel)
     if result["extras"]:
-        result.update(ok=False, reason="EXTRA FILE FAIL 未声明的包内文件：" + ",".join(result["extras"]))
+        result.update(ok=False, extras_status="FAIL",
+                      reason="EXTRA FILE FAIL 未声明的包内文件：" + ",".join(result["extras"]))
+    else:
+        result["extras_status"] = "OK"
+    result["ok"] = all(result[k] == "OK" for k in (
+        "files_status", "verify_script_status", "digest_status", "extras_status"))
     return result
 
 
@@ -320,96 +345,137 @@ def verify_package(package: Path | str, *, public_keys: list[str] | tuple[str, .
                    expect_package_sha256: str | None = None,
                    expect_artifacts_digest: str | None = None,
                    require_signature: bool = False) -> dict:
-    """独立验算入口；返回 ok/partial/reason 与各检查结果。不执行包内代码。"""
+    """独立验算入口；返回 ok/partial/reason 与各检查状态。不执行包内代码。
+
+    RESULT OK 的门禁：内容检查全通过 + 签名 pin 命中 + 外部锚点通过 + 外部包 SHA 通过。
+    任一外部项缺失/未通过 → PARTIAL（内容检查失败 → FAIL）。
+    """
     p = Path(package)
+    check_names = ("manifest", "producer", "artifacts", "verify_script",
+                   "artifacts_digest_internal", "extras", "findings", "chain", "inputs",
+                   "signature", "signature_pinned", "anchor", "package_sha",
+                   "artifacts_digest_external")
     result = {
         "package": str(p), "schema": "", "manifest_schema_version": None, "run_id": "",
         "producer": {}, "producer_ok": True, "producer_reason": "",
         "manifest_checksum": "missing", "chain": {"ok": False, "reason": "未校验", "length": 0,
-                                                   "head_hash": ""},
+                                                   "head_hash": "", "checked": False},
         "artifact": {}, "findings": {}, "inputs_digest": "", "inputs_digest_ok": False,
         "signature_present": False, "signature_ok": False, "signature_trust": "none",
-        "signature_key_id": "", "signature_reason": "",
+        "signature_key_id": "", "signature_reason": "", "signature_checked": False,
         "anchor_checked": False, "anchor_reason": "ANCHOR NOT CHECKED",
-        "package_sha256": "", "package_sha256_ok": True,
-        "artifacts_digest": "", "artifacts_digest_ok": True,
+        "package_sha256": "", "package_sha256_checked": False, "package_sha256_ok": None,
+        "package_sha256_expected": "",
+        "artifacts_digest": "", "artifacts_digest_checked": False, "artifacts_digest_ok": None,
+        "artifacts_digest_expected": "",
+        "checks": {k: "NOT CHECKED" for k in check_names},
         "partial": False, "ok": False, "reason": "",
     }
+    checks = result["checks"]
     if not p.exists():
         result["reason"] = f"包不存在：{p}"
         return result
     package_sha = _sha256_file(p) if p.is_file() else ""
     result["package_sha256"] = package_sha
     if expect_package_sha256:
+        result["package_sha256_checked"] = True
+        result["package_sha256_expected"] = str(expect_package_sha256).strip().lower()
         if not package_sha:
+            checks["package_sha"] = "FAIL"
             result.update(ok=False, partial=False, package_sha256_ok=False,
                           reason="PACKAGE SHA256 FAIL 目录形态无法比较包文件哈希")
             return result
-        if str(expect_package_sha256).strip().lower() != package_sha:
+        if result["package_sha256_expected"] != package_sha:
+            checks["package_sha"] = "FAIL"
             result.update(ok=False, partial=False, package_sha256_ok=False,
                           reason="PACKAGE SHA256 FAIL 包文件哈希与外部记录不一致")
             return result
+        checks["package_sha"] = "OK"
+        result["package_sha256_ok"] = True
     try:
         from .replay import unpacked
         with unpacked(p) as root:
             try:
                 manifest = _load_manifest(root)
             except ValueError as exc:
+                checks["manifest"] = "FAIL"
                 result["reason"] = str(exc)
                 return result
             schema_ver = evidence_schema_version(manifest.get("schema"))
             result["schema"] = str(manifest.get("schema") or "")
             result["run_id"] = str(manifest.get("run_id") or "")
             if schema_ver is None:
+                checks["manifest"] = "FAIL"
                 result["reason"] = "MANIFEST FAIL manifest.schema 缺失或无法识别"
                 return result
             if schema_ver < 2:
+                checks["manifest"] = "FAIL"
                 result["reason"] = "LEGACY PACKAGE FAIL 独立验算器只接受 v2+ 包（v1 仅保留历史回放）"
                 return result
             result["manifest_schema_version"] = schema_ver
             declared_checksum = manifest.get("manifest_checksum")
             if not isinstance(declared_checksum, str) or not declared_checksum:
+                checks["manifest"] = "FAIL"
                 result.update(manifest_checksum="missing", reason="MANIFEST FAIL 缺少 manifest_checksum")
                 return result
             if declared_checksum != manifest_checksum(manifest):
+                checks["manifest"] = "FAIL"
                 result.update(manifest_checksum="mismatch", reason="MANIFEST FAIL manifest_checksum 不一致")
                 return result
             result["manifest_checksum"] = "ok"
+            checks["manifest"] = "OK"
             triple = manifest.get("triple") if isinstance(manifest.get("triple"), dict) else {}
             if any(not isinstance(triple.get(k), str) or not triple.get(k) for k in TRIPLE_KEYS):
+                checks["manifest"] = "FAIL"
                 result["reason"] = "MANIFEST FAIL manifest.triple 缺字段或为空"
                 return result
             producer_ok, producer_reason = producer.check_manifest_producer(manifest)
             result["producer_ok"] = producer_ok
             result["producer_reason"] = producer_reason
             result["producer"] = dict(manifest.get("producer") or {})
+            checks["producer"] = "OK" if producer_ok else "FAIL"
             if not producer_ok:
                 result["reason"] = producer_reason
                 return result
             artifact = check_artifacts(root, manifest, schema_ver)
             result["artifact"] = artifact
+            checks["artifacts"] = artifact["files_status"]
+            checks["verify_script"] = artifact["verify_script_status"]
+            checks["artifacts_digest_internal"] = artifact["digest_status"]
+            checks["extras"] = artifact["extras_status"]
             if not artifact["ok"]:
                 result["reason"] = artifact["reason"]
                 return result
             findings = check_findings(root, manifest)
             result["findings"] = findings
+            checks["findings"] = "OK" if findings["ok"] else "FAIL"
             if not findings["ok"]:
                 result["reason"] = findings["reason"]
                 return result
-            if expect_artifacts_digest:
-                expected = str(expect_artifacts_digest).strip().lower()
-                if expected != artifact["artifacts_digest"]:
-                    result.update(artifacts_digest_ok=False, ok=False, partial=False,
-                                  reason="ARTIFACTS DIGEST FAIL manifest.artifacts_digest 与外部记录不一致")
-                    return result
             result["artifacts_digest"] = artifact["artifacts_digest"]
+            checks["artifacts_digest_internal"] = artifact["digest_status"]
+            if expect_artifacts_digest:
+                result["artifacts_digest_checked"] = True
+                result["artifacts_digest_expected"] = str(expect_artifacts_digest).strip().lower()
+                if result["artifacts_digest_expected"] != artifact["artifacts_digest"]:
+                    checks["artifacts_digest_external"] = "FAIL"
+                    result.update(artifacts_digest_ok=False, ok=False, partial=False,
+                                  reason="ARTIFACTS DIGEST external FAIL "
+                                         f"expected={result['artifacts_digest_expected']} "
+                                         f"actual={artifact['artifacts_digest']} "
+                                         "(manifest-internal OK)")
+                    return result
+                checks["artifacts_digest_external"] = "OK"
+                result["artifacts_digest_ok"] = True
             chain_text = (root / "audit_chain.jsonl").read_text(encoding="utf-8")
             from .replay import _chain_from_snapshot
             chain = _chain_from_snapshot(chain_text.splitlines(),
                                          str(manifest.get("engine_version") or ""),
                                          triple["rule_pack_version"],
                                          manifest.get("audit_segment"))
+            chain["checked"] = True
             result["chain"] = chain
+            checks["chain"] = "OK" if chain["ok"] else "FAIL"
             if not chain["ok"]:
                 result["reason"] = f"CHAIN FAIL {chain['reason']}"
                 return result
@@ -420,49 +486,81 @@ def verify_package(package: Path | str, *, public_keys: list[str] | tuple[str, .
             try:
                 actual_inputs = signing.compute_inputs_digest_from_dir(root)
             except Exception as exc:
+                checks["inputs"] = "FAIL"
                 result["reason"] = f"INPUTS FAIL 无法计算输入摘要：{type(exc).__name__}: {exc}"
                 return result
             declared_inputs = manifest.get("inputs_digest")
             if not isinstance(declared_inputs, str) or not declared_inputs:
+                checks["inputs"] = "FAIL"
                 result["reason"] = "INPUTS FAIL 缺少 manifest.inputs_digest"
                 return result
             result["inputs_digest"] = declared_inputs
             if actual_inputs != declared_inputs:
+                checks["inputs"] = "FAIL"
                 result["reason"] = "INPUTS FAIL 输入摘要与 manifest.inputs_digest 不一致"
                 return result
             result["inputs_digest_ok"] = True
+            checks["inputs"] = "OK"
             pinned = signing.load_public_keys(public_keys)
             signature = signing.verify_signature(manifest, chain["head_hash"], pinned)
+            result["signature_checked"] = True
             result.update(signature_present=signature["present"], signature_ok=signature["ok"],
                           signature_trust=signature["trust"],
                           signature_key_id=signature["key_id"],
                           signature_reason=signature["reason"])
             if signature["present"] and not signature["ok"]:
+                checks["signature"] = "FAIL"
                 result["reason"] = f"SIGNATURE FAIL {signature['reason']}"
                 return result
             if not signature["present"] and (schema_ver >= 3 or require_signature):
+                checks["signature"] = "FAIL"
                 result["reason"] = "SIGNATURE FAIL 包无签名，且当前要求必须有签名"
                 return result
+            checks["signature"] = "OK" if signature["present"] else "NOT CHECKED"
+            checks["signature_pinned"] = ("OK" if signature["trust"] == "pinned" else "NOT CHECKED")
             try:
                 expected_anchor_parsed = _parse_expected_anchor(
                     expect_anchor if expect_anchor is not None else os.environ.get("WCA_EXPECT_ANCHOR"))
                 expected_triple_parsed = _parse_expected_triple(
                     expect_triple if expect_triple is not None else os.environ.get("WCA_EXPECT_TRIPLE"))
             except ValueError as exc:
+                checks["anchor"] = "FAIL"
                 result["reason"] = str(exc)
                 return result
             anchor_ok, anchor_reason, mismatched = _anchor_check(
                 manifest, schema_ver, expected_anchor_parsed, expected_triple_parsed)
             result["anchor_checked"] = expected_anchor_parsed is not None
             result["anchor_reason"] = anchor_reason
+            checks["anchor"] = ("OK" if anchor_ok and result["anchor_checked"]
+                                else ("FAIL" if not anchor_ok else "NOT CHECKED"))
             if not anchor_ok:
                 result["reason"] = anchor_reason
                 return result
-            content_ok = True
-            result["partial"] = not result["anchor_checked"]
-            result["ok"] = content_ok and result["anchor_checked"]
-            result["reason"] = ("工件、发现摘要、链、输入与签名均一致" if result["ok"]
-                                else "ANCHOR NOT CHECKED：字节层与发现摘要一致，但未做外部锚点校验")
+            internal_checks = ("manifest", "producer", "artifacts", "verify_script",
+                               "artifacts_digest_internal", "extras", "findings", "chain",
+                               "inputs")
+            content_ok = all(checks[k] == "OK" for k in internal_checks) and \
+                checks["signature"] in ("OK", "NOT CHECKED")
+            external_ok = (checks["signature_pinned"] == "OK"
+                           and checks["anchor"] == "OK"
+                           and checks["package_sha"] == "OK")
+            result["partial"] = content_ok and not external_ok
+            result["ok"] = content_ok and external_ok
+            missing_external = []
+            if checks["signature_pinned"] != "OK":
+                missing_external.append("外部公钥 pin")
+            if checks["anchor"] != "OK":
+                missing_external.append("外部锚点")
+            if checks["package_sha"] != "OK":
+                missing_external.append("外部包 SHA-256")
+            if result["ok"]:
+                result["reason"] = ("工件、发现摘要、链、输入与签名均一致；"
+                                    "外部 pin、锚点与包 SHA 均通过")
+            elif result["partial"]:
+                result["reason"] = ("RESULT PARTIAL：内容检查通过，但缺少/未通过 "
+                                    + "、".join(missing_external))
+            else:
+                result["reason"] = "RESULT FAIL：内容检查未通过"
             return result
     except Exception as exc:
         result["reason"] = f"VERIFY FAIL {type(exc).__name__}: {exc}"

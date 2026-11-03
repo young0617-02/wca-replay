@@ -104,9 +104,10 @@ def _assert_both_fail(pkg: Path, pub: Path, anchor: str, *,
 def test_good_package_passes_independent_verify(conn, cfg, tmp_path):
     _out, zip_path, manifest, _key, pub = _build_signed(conn, cfg, tmp_path)
     anchor = _anchor(manifest)
-    code, out = _verify(zip_path, "--public-key", str(pub), "--expect-anchor", anchor)
+    code, out = _verify(zip_path, "--public-key", str(pub), "--expect-anchor", anchor,
+                        "--expect-package-sha256", sha256_hex(zip_path.read_bytes()))
     assert code == 0, out
-    assert "RESULT OK" in out and "pinned（来源可信）" in out
+    assert "RESULT OK" in out and "pinned (key matches supplied pin" in out
     res = replay(zip_path, expect_anchor=anchor, public_keys=[str(pub)])
     assert res["ok"], res["reason"]
     assert res["producer_ok"] is True
@@ -269,8 +270,8 @@ def test_package_sha_and_artifacts_digest_are_enforced(conn, cfg, tmp_path):
                         "--expect-package-sha256", package_sha,
                         "--expect-artifacts-digest", artifacts_digest)
     assert code == 0, out
-    assert "PACKAGE SHA256 OK" in out
-    assert "ARTIFACTS DIGEST OK" in out
+    assert "external=OK" in out
+    assert "manifest-internal OK / external OK" in out
 
     code, out = _verify(zip_path, "--public-key", str(pub), "--expect-anchor", anchor,
                         "--expect-package-sha256", "0" * 64)
@@ -285,6 +286,70 @@ def test_package_sha_and_artifacts_digest_are_enforced(conn, cfg, tmp_path):
     assert not bad["ok"] and "PACKAGE SHA256 FAIL" in bad["reason"]
 
 
+def test_result_ok_requires_pin_anchor_and_package_sha(conn, cfg, tmp_path):
+    _out, zip_path, manifest, _key, pub = _build_signed(conn, cfg, tmp_path)
+    anchor = _anchor(manifest)
+    package_sha = sha256_hex(zip_path.read_bytes())
+
+    code, out = _verify(zip_path, "--public-key", str(pub), "--expect-anchor", anchor,
+                        "--expect-package-sha256", package_sha)
+    assert code == 0 and "RESULT OK" in out, out
+
+    no_key = _verify(zip_path, "--expect-anchor", anchor,
+                     "--expect-package-sha256", package_sha)
+    assert no_key[0] != 0, no_key[1]
+    assert "RESULT OK" not in no_key[1] and "RESULT PARTIAL" in no_key[1], no_key[1]
+
+    no_sha = _verify(zip_path, "--public-key", str(pub), "--expect-anchor", anchor)
+    assert no_sha[0] != 0, no_sha[1]
+    assert "RESULT OK" not in no_sha[1] and "RESULT PARTIAL" in no_sha[1], no_sha[1]
+    assert "PACKAGE SHA256" in no_sha[1] and "NOT CHECKED" in no_sha[1], no_sha[1]
+
+
+def test_early_failure_has_only_relevant_fail_labels(conn, cfg, tmp_path):
+    _out, zip_path, manifest, _key, pub = _build_signed(conn, cfg, tmp_path)
+    pkg = _unpack(zip_path, tmp_path / "early-a")
+    path = pkg / "findings.csv"
+    rows = list(csv.DictReader(io.StringIO(path.read_text(encoding="utf-8"), newline="")))
+    rows[0]["severity"] = "DEFENSIBLE" if rows[0]["severity"] != "DEFENSIBLE" else "REVIEW"
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=rows[0].keys(), lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+    code, out = _verify(pkg, "--public-key", str(pub), "--expect-anchor", _anchor(manifest))
+    assert code != 0 and "RESULT FAIL" in out, out
+    assert "ARTIFACT" in out and "findings.csv" in out, out
+    for unrelated in ("VERIFY SCRIPT FAIL", "SIGNATURE FAIL", "CHAIN FAIL",
+                      "PACKAGE SHA256 FAIL", "ANCHOR FAIL"):
+        assert unrelated not in out, (unrelated, out)
+
+
+def test_external_artifacts_digest_failure_shows_internal_ok(conn, cfg, tmp_path):
+    _out, zip_path, manifest, _key, pub = _build_signed(conn, cfg, tmp_path)
+    anchor = _anchor(manifest)
+    code, out = _verify(zip_path, "--public-key", str(pub), "--expect-anchor", anchor,
+                        "--expect-package-sha256", sha256_hex(zip_path.read_bytes()),
+                        "--expect-artifacts-digest", "0" * 64)
+    assert code != 0, out
+    assert "manifest-internal OK" in out, out
+    assert "external FAIL" in out, out
+    assert "expected=0000000000000000000000000000000000000000000000000000000000000000" in out, out
+
+
+def test_replay_early_failure_does_not_report_chain_break_or_no_signature(conn, cfg, tmp_path, capsys):
+    _out, zip_path, manifest, _key, pub = _build_signed(conn, cfg, tmp_path)
+    pkg = _unpack(zip_path, tmp_path / "replay-early")
+    (pkg / "findings.csv").unlink()
+    code = cli.main(["replay", str(pkg), "--public-key", str(pub),
+                     "--expect-anchor", _anchor(manifest)])
+    text = capsys.readouterr().out + capsys.readouterr().err
+    assert code != 0, text
+    assert "CHAIN NOT CHECKED" in text, text
+    assert "SIGNATURE NOT CHECKED" in text, text
+    assert "断裂" not in text, text
+    assert "签名：无" not in text, text
+
+
 def test_missing_relative_public_key_reports_path_not_base64(conn, cfg, tmp_path):
     _out, zip_path, _manifest, _key, _pub = _build_signed(conn, cfg, tmp_path)
     code, out = _verify(zip_path, "--public-key", "missing-key.pub")
@@ -297,9 +362,10 @@ def test_relative_public_key_resolves_from_caller_cwd(conn, cfg, tmp_path, monke
     _out, zip_path, manifest, _key, pub = _build_signed(conn, cfg, tmp_path)
     monkeypatch.chdir(tmp_path)
     code, out = _verify(zip_path, "--public-key", "pub.pub", "--expect-anchor",
-                        _anchor(manifest), cwd=tmp_path)
+                        _anchor(manifest), "--expect-package-sha256",
+                        sha256_hex(zip_path.read_bytes()), cwd=tmp_path)
     assert code == 0, out
-    assert "pinned（来源可信）" in out, out
+    assert "pinned (key matches supplied pin" in out, out
 
 
 def test_row_count_is_data_rows_not_header_columns(conn, cfg, tmp_path):
@@ -312,6 +378,26 @@ def test_row_count_is_data_rows_not_header_columns(conn, cfg, tmp_path):
             zf.read("input_files.csv").decode("utf-8"), newline="")))
     employee_row = next(r for r in rows if r["rel_path"] == "employee.csv")
     assert int(employee_row["row_count"]) == len(EMPLOYEES)
+
+
+def test_policies_are_in_package_and_hashed(conn, cfg, tmp_path):
+    _out, zip_path, manifest, _key, pub = _build_signed(conn, cfg, tmp_path)
+    policy_names = {
+        "policies/RULE-PACK.md", "policies/LAW-REFERENCES.md",
+        "policies/口径声明-对外版.md", "policies/字段口径与条文依据-对外版.md",
+        "policies/CONFIDENCE.md",
+    }
+    hashes = manifest.get("artifact_sha256") or {}
+    assert policy_names <= set(hashes), sorted(hashes)
+    assert len(hashes) == 14, len(hashes)
+    with zipfile.ZipFile(zip_path) as zf:
+        names = set(zf.namelist())
+    assert policy_names <= names, names
+    code, out = _verify(zip_path, "--public-key", str(pub),
+                        "--expect-anchor", _anchor(manifest),
+                        "--expect-package-sha256", sha256_hex(zip_path.read_bytes()))
+    assert code == 0, out
+    assert "ARTIFACTS OK checked=14" in out, out
 
 
 def test_not_covered_has_no_stale_101_and_rule_versions_are_explained(conn, cfg, tmp_path):
@@ -329,7 +415,8 @@ def test_not_covered_has_no_stale_101_and_rule_versions_are_explained(conn, cfg,
 def test_terminology_separates_findings_from_final_conclusions(conn, cfg, tmp_path, capsys):
     _out, zip_path, manifest, _key, pub = _build_signed(conn, cfg, tmp_path)
     cli_code = cli.main(["replay", str(zip_path), "--public-key", str(pub),
-                         "--expect-anchor", _anchor(manifest)])
+                         "--expect-anchor", _anchor(manifest),
+                         "--expect-package-sha256", sha256_hex(zip_path.read_bytes())])
     text = capsys.readouterr().out + capsys.readouterr().err
     assert cli_code == 0, text
     assert "发现（未签认）" in text

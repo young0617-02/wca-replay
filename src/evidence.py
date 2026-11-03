@@ -444,9 +444,17 @@ PACKAGE_README = (
     "包内 verify.py 只是便利脚本，**不是信任依据**；正式验收应使用发行 wheel 的 "
     "wca-verify（独立实现，不执行包内代码），再用 wca replay 重放引擎比对三元组。\r\n"
     "v3 包带 manifest.signature（Ed25519）与 artifact_sha256/artifacts_digest/"
-    "verify_script_sha256：包内公钥只能证明包内自洽，只有用包外固定公钥"
-    "（wca-verify --public-key）才能证明来源可信；验签需要 PyNaCl，版本见 "
+    "verify_script_sha256：包内公钥只能证明包内自洽；`--public-key` 只表示与供给的公钥 pin 匹配，"
+    "来源可信仍需双方通过独立渠道核验 key_id。验签需要 PyNaCl，版本见 "
     "verify-requirements.txt。\r\n"
+    "包内 policies/ 含规则包定义、条文/稳定引用、口径声明、13 项存疑与 CONFIDENCE；"
+    "不把整份 docs/ 打包。\r\n"
+    "摘要边界：conclusion_digest 只覆盖 rule_id/rule_version/emp_id/work_date/period_key/"
+    "severity/metric/citations/explanation 九个规范字段；source_rel_path、source_line_no、"
+    "severity_label 由 artifact_sha256[findings.csv] 负责。单个 FINDINGS DIGEST OK "
+    "不等于整张 findings.csv 未变，必须同时看 ARTIFACTS OK。\r\n"
+    "rule_version 是单条规则版本，不等于 rule pack 版本；v5 包可同时有 v4/v5 规则，"
+    "分布见 manifest.counts.rule_versions 与包内 policies/RULE-PACK.md。\r\n"
 )
 
 
@@ -640,7 +648,8 @@ def _write_conclusions_csv(path: Path, rows: list[dict]) -> None:
 
 
 def _not_covered_markdown(nc: dict, *, findings_count: int = 0,
-                          final_count: int = 0) -> str:
+                          final_count: int = 0,
+                          rule_versions: dict[str, int] | None = None) -> str:
     """把未覆盖清单渲染成给人读的 Markdown（数据来自 config/not_covered.json，不写死在代码里）。"""
     NL = chr(10)
     scope = nc["scope"]
@@ -649,6 +658,9 @@ def _not_covered_markdown(nc: dict, *, findings_count: int = 0,
         "",
         f"- 本轮包内：发现（未签认）{findings_count} 条 / 已确认结论 {final_count} 条"
         "（以 manifest.counts.findings / final_conclusions 为准）",
+        "- 单条规则版本分布：" + (", ".join(
+            f"{k}={v}" for k, v in sorted((rule_versions or {}).items())) or "无")
+        + "。`rule_version` 是单条规则版本，不等于 rule pack 版本；v5 包内保留未改判据的 v4 规则是预期。",
         "- 覆盖工时制：" + str(scope["worktime_regimes_covered"]),
         "- 不覆盖工时制：" + str(scope["worktime_regimes_excluded"]),
         "  - 原因：" + str(scope["excluded_reason"]),
@@ -910,6 +922,14 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
     cfg.ensure_dirs()
     work = cfg.packages_dir / run_id
     work.mkdir(parents=True, exist_ok=True)
+    policy_source = PROJECT_ROOT / "policies"
+    policy_files = sorted(policy_source.glob("*.md")) if policy_source.is_dir() else []
+    if not policy_files:
+        raise RuntimeError("缺少 policies/ 对外规则/条文材料，无法导出可实质审查的举证包")
+    policies_dir = work / "policies"
+    policies_dir.mkdir(parents=True, exist_ok=True)
+    for policy in policy_files:
+        shutil.copy2(policy, policies_dir / policy.name)
 
     findings = conn.execute(
         "SELECT * FROM finding WHERE run_id = ? ORDER BY emp_id, work_date, rule_id", (run_id,)
@@ -989,8 +1009,9 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
     nc_path = work / "not_covered.json"
     nc_path.write_text(canonical_json(nc) + chr(10), encoding="utf-8")
     nc_md = work / "未覆盖清单.md"
-    nc_md.write_text(_not_covered_markdown(nc, findings_count=len(findings),
-                                          final_count=len(resp["human_confirmations"])))
+    nc_md.write_text(_not_covered_markdown(
+        nc, findings_count=len(findings), final_count=len(resp["human_confirmations"]),
+        rule_versions=_rule_version_counts(findings)))
 
     # 8) 输入自含（US-EX-01）：把本次结论真正依赖的原始 CSV 一起打包，让重放不需要另外索要数据
     inputs_dir = work / INPUTS_DIRNAME
@@ -1080,6 +1101,10 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
     artifact_sha256[README_FILE] = sha256_hex(PACKAGE_README.encode("utf-8"))
     artifact_sha256[VERIFY_REQUIREMENTS_FILE] = sha256_hex(
         VERIFY_REQUIREMENTS.encode("utf-8"))
+    artifact_sha256.update({
+        f"policies/{p.name}": sha256_hex((policies_dir / p.name).read_bytes())
+        for p in policy_files
+    })
     verify_script_sha256 = sha256_hex(VERIFY_SNIPPET.encode("utf-8"))
     artifacts_digest = signing.artifact_digest(artifact_sha256)
     # 输入摘要覆盖 inputs/ 下实际存在的每个文件（含 inputs/manifest.json 本身），
@@ -1176,6 +1201,7 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
         "artifacts": [p.name for p in (findings_csv, manifest_files, chain_json, issues_csv,
                                        conclusions_csv, resp_path, nc_path, nc_md)]
                       + [README_FILE, VERIFY_REQUIREMENTS_FILE, "verify.py"]
+                      + [f"policies/{p.name}" for p in policy_files]
                       + [INPUTS_MANIFEST_NAME] + [e["arcname"] for e in collected["entries"]],
         "disclaimer": "本包不产出应付金额（需求 D-03）；金额是 HR 负责人具名录入的人工结论，不属于引擎输出；"
                       "数据为合成数据，非任何真实个人信息。",
@@ -1205,6 +1231,8 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
             for p in (manifest_path, findings_csv, manifest_files, chain_json, issues_csv,
                       conclusions_csv, resp_path, nc_path, nc_md):
                 zf.write(p, arcname=p.name)
+            for policy in policy_files:
+                zf.write(policies_dir / policy.name, arcname=f"policies/{policy.name}")
             zf.write(inputs_manifest, arcname=INPUTS_MANIFEST_NAME)
             for e in collected["entries"]:
                 zf.write(work / e["arcname"], arcname=e["arcname"])
@@ -1303,8 +1331,9 @@ VERIFY_SNIPPET = r'''"""包内便利复核脚本（不是信任依据）；正�
 可选签名约束：--public-key <公钥文件或Base64>（可重复）作为外部 pin；--require-signature。
 签名验签依赖 PyNaCl（见包内 verify-requirements.txt）；未安装且包内有签名时失败关闭。
 期望输出：EPOCH OK + MANIFEST CHECKSUM OK + CHAIN OK + INPUTS OK + ARTIFACT OK + SIGNATURE OK。
-SIGNATURE OK 只表示签名有效：pinned 才是来源可信；package self-check 仅包内自洽，
-必须打印 NOT source trust，不能和 pinned 混成一句 OK。
+SIGNATURE OK 只表示签名有效：pinned 只表示“与供给公钥副本匹配”，不代表来源可信；
+来源可信必须由双方独立渠道核验 key_id。package self-check 仅包内自洽，必须打印
+NOT source trust。
 任一校验失败都会打印 RESULT FAIL 并返回非零退出码；链、输入与签名一致仍不代表结论正确，
 结论是否一致要重跑引擎（`python -m src.cli replay <包>`）。
 """

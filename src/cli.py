@@ -290,9 +290,14 @@ def cmd_replay(args) -> int:
         print("  MANIFEST CHECKSUM MISSING（旧包，继续按既有规则比对）")
     if res.get("external_mismatched_fields"):
         print("  外部锚点差异：" + ", ".join(res["external_mismatched_fields"]))
-    print(f"  审计链：{'完整' if res['chain']['ok'] else '断裂'}，{res['chain']['length']} 条"
-          + (f"（seq={res['chain']['broken_at_seq']} {res['chain']['reason']}）"
-             if not res["chain"]["ok"] else ""))
+    chain = res.get("chain") or {}
+    if not chain.get("checked"):
+        print("  CHAIN NOT CHECKED（早退，尚未走到链校验）")
+    else:
+        print(f"  审计链：{'完整' if chain.get('ok') else '断裂'}，"
+              f"{chain.get('length', 0)} 条"
+              + (f"（seq={chain.get('broken_at_seq')} {chain.get('reason')}）"
+                 if not chain.get("ok") else ""))
     producer = res.get("producer") or {}
     if producer:
         print(f"  导出代码：version={producer.get('version')} "
@@ -311,28 +316,47 @@ def cmd_replay(args) -> int:
               + (f"；已裁剪字段 {res['omitted_fields']}" if res.get("omitted_fields") else ""))
     print(f"  钉回口径参数 {json.dumps(res['pinned_params'], ensure_ascii=False, sort_keys=True)}")
     print(f"  {res['inherited_params_note']}")
-    if res.get("signature_present"):
-        trust = ("pinned（来源可信）" if res["signature_trust"] == "pinned"
-                 else "package self-check（NOT source trust，仅包内自洽）")
+    if not res.get("signature_checked"):
+        print("  SIGNATURE NOT CHECKED（早退，尚未走到验签）")
+    elif res.get("signature_present"):
+        trust = ("pinned (key matches supplied pin; independent key_id verification not done)"
+                 if res["signature_trust"] == "pinned"
+                 else "package self-check (NOT source trust)")
         print(f"  签名：{'有效' if res['signature_ok'] else '无效'} / {trust}"
               f" / key_id={res.get('signature_key_id') or '?'}"
               + (f" —— {res['signature_reason']}" if not res["signature_ok"] else ""))
     else:
-        print("  签名：无（旧包；来源不可证明）"
+        print("  签名：无（仅包内自洽；不能证明来源）"
               + (" —— 已要求 --require-signature" if getattr(args, "require_signature", False)
                  else ""))
     artifact = res.get("artifact") or {}
     if artifact:
-        print(f"  工件逐文件：{'OK' if artifact.get('ok') else 'FAIL'} "
+        print(f"  工件逐文件：{artifact.get('files_status', 'NOT CHECKED')} "
               f"checked={artifact.get('checked', 0)}"
-              + (f"；{artifact.get('reason')}" if not artifact.get("ok") else ""))
+              + (f"；{artifact.get('reason')}" if artifact.get("files_status") == "FAIL" else ""))
+        print(f"  VERIFY SCRIPT：{artifact.get('verify_script_status', 'NOT CHECKED')}")
+        print(f"  ARTIFACTS DIGEST manifest-internal："
+              f"{artifact.get('digest_status', 'NOT CHECKED')}")
+        print(f"  EXTRA FILE：{artifact.get('extras_status', 'NOT CHECKED')}"
+              + (f"：{','.join(artifact.get('extras') or [])}" if artifact.get("extras") else ""))
     findings_binding = res.get("findings_binding") or {}
     if findings_binding:
         print(f"  发现摘要：{'一致' if findings_binding.get('ok') else '不一致'}"
               f"（findings.csv {findings_binding.get('rows', 0)} 行，"
               f"反算 {str(findings_binding.get('actual_digest', ''))[:16]}…）")
+    sha_status = ("NOT CHECKED" if not res.get("package_sha256_checked")
+                  else ("OK" if res.get("package_sha256_ok") else "FAIL"))
+    print(f"  PACKAGE SHA256 computed={res.get('package_sha256') or 'NOT AVAILABLE'} "
+          f"/ external={sha_status}")
+    if res.get("artifacts_digest_checked"):
+        print(f"  ARTIFACTS DIGEST external="
+              f"{'OK' if res.get('artifacts_digest_ok') else 'FAIL'}")
+    else:
+        print("  ARTIFACTS DIGEST external=NOT CHECKED")
     if not res.get("anchor_checked"):
-        print("  ANCHOR NOT CHECKED（未传 --expect-anchor；不能算完整验收）")
+        print("  ANCHOR NOT CHECKED（未完成外部锚点校验；不能算完整验收）")
+    else:
+        print("  ANCHOR CHECK OK")
     if "actual_triple" not in res:
         print(f"  RESULT {'PARTIAL' if res.get('partial') else 'FAIL'}"
               f" —— {res['reason']}")
@@ -791,7 +815,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="包外记录的 manifest.artifacts_digest（包根工件清单摘要）")
     p.add_argument("--public-key", action="append", default=None, dest="public_key",
                    help="外部固定公钥（文件路径或 Base64），可重复传入以支持轮换；"
-                        "不传时验签只证明包内自洽，不能证明来源")
+                        "pin 只表示与供给公钥匹配，来源可信需独立渠道核验 key_id")
     p.add_argument("--require-signature", action="store_true",
                    help="旧 v1/v2 包无签名也判失败；v3 缺签名始终失败")
     p.set_defaults(fn=cmd_replay)

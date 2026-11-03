@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -28,6 +29,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src import ENGINE_VERSION  # noqa: E402
+from src import signing  # noqa: E402
 from src.rules.rulepack import (RULE_PACK_V4, RULE_PACK_V5, RULE_PACK_V6,  # noqa: E402
                                 RULE_PACK_VERSION)
 from src.util import (EVIDENCE_PACKAGE_SCHEMA_V1, EVIDENCE_PACKAGE_SCHEMA_V2,  # noqa: E402
@@ -93,6 +95,12 @@ def _readme(version: str, commit: str, wheel: str, build_time: str) -> str:
 - Python 要求：`>=3.12`（本项目在 3.12.8 上构建与实测）
 - 支持规则包：{", ".join("`" + p + "`" for p in SUPPORTED_RULE_PACKS)}
 - 证据包 schema：{", ".join("`" + s + "`" for s in SCHEMA_VERSIONS)}
+- **摘要边界**：`conclusion_digest` 只覆盖 `rule_id, rule_version, emp_id, work_date,
+  period_key, severity, metric, citations, explanation` 九个规范字段；`source_rel_path`、
+  `source_line_no`、`severity_label` 由 `artifact_sha256["findings.csv"]` 负责。
+  **单个 `FINDINGS DIGEST OK` 不等于整张 `findings.csv` 未变**，必须同时 `ARTIFACTS OK`。
+- **规则版本**：`rule_version` 是单条规则版本，不等于 rule pack 版本；v5 包内可同时有
+  v4/v5 规则，分布见 `manifest.counts.rule_versions` 与包内 `policies/RULE-PACK.md`。
 
 ## 前置条件（缺一不可）
 
@@ -171,7 +179,17 @@ py -3.12 -m venv .venv-clean
 双方书面标注“跨版本、使用 commit X 复算 commit Y 的包”，并同时保留包外锚点，
 不得把它写成同版本可复算。
 
-## 6. 仍不覆盖什么
+## 6. 发行物自身签名（若目录内有 `SHA256SUMS.sig`）
+
+- `SHA256SUMS.sig` 是对 `SHA256SUMS` 原始字节的 Ed25519 签名；`VERIFY-SIGNATURE.txt`
+  给出 key_id、公钥副本与一段可执行的验证代码。
+- `SHA256SUMS` 覆盖除自身与 `SHA256SUMS.sig` 之外的发行文件；`.sig` 是 detached，
+  不会被自身覆盖。
+- 该签名只证明“SHA256SUMS 与私钥匹配”；**pinned 不等于来源可信**，仍须双方通过
+  独立渠道核验 key_id。
+- 本发行物只说明构建方法，**未实现/未验证可复现构建**；不声称 wheel 可逐字节重建。
+
+## 7. 仍不覆盖什么
 
 - `wca-verify` 只证明字节/工件绑定/发现反算摘要/签名/锚点，不跑引擎，不重算投影。
 - 包内 `verify.py` 只是便利脚本，不是信任依据；不校验工件绑定与 findings 反算摘要。
@@ -188,6 +206,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="发行物输出根目录，默认 dist/")
     parser.add_argument("--force", action="store_true",
                         help="覆盖已存在的同版本发行目录")
+    parser.add_argument("--signing-key", default=os.environ.get("WCA_RELEASE_SIGNING_KEY"),
+                        help="Ed25519 私钥路径；给出时生成 SHA256SUMS.sig 与 "
+                             "VERIFY-SIGNATURE.txt（也可用 WCA_RELEASE_SIGNING_KEY）")
     args = parser.parse_args(argv)
 
     version = _project_version()
@@ -249,17 +270,56 @@ def main(argv: list[str] | None = None) -> int:
             "wca-verify": "src.verify_pkg:main",
         },
     }
+    signing_key = signing.load_signing_key(args.signing_key) if args.signing_key else None
+    if args.signing_key and signing_key is None:
+        raise SystemExit(f"无法读取发行签名私钥：{args.signing_key}")
+    if signing_key is not None:
+        public_b64 = signing.public_key_b64(signing_key.verify_key.encode())
+        key_id = signing.key_id_for_public_key(signing_key.verify_key.encode())
+        release["release_signature"] = {
+            "file": "SHA256SUMS.sig",
+            "algorithm": "Ed25519",
+            "key_id": key_id,
+            "public_key_b64": public_b64,
+            "signed_file": "SHA256SUMS",
+            "scope": "SHA256SUMS 覆盖除 SHA256SUMS.sig 与自身外的发行文件",
+            "note": "签名只证明 SHA256SUMS 与私钥匹配；来源可信需独立核验 key_id",
+        }
     release_json = release_dir / "RELEASE.json"
     release_json.write_text(json.dumps(release, ensure_ascii=False, indent=2) + "\n",
                             encoding="utf-8")
 
+    if signing_key is not None:
+        verify_txt = release_dir / "VERIFY-SIGNATURE.txt"
+        verify_txt.write_text(
+            "发行物签名说明（SHA256SUMS.sig）\n"
+            "================================\n"
+            "算法：Ed25519（PyNaCl）。签名对象：本目录 SHA256SUMS 的原始字节。\n"
+            f"key_id：{key_id}\n"
+            f"public_key_b64：{public_b64}\n\n"
+            "验证（在发行物目录内，使用已安装 requirements.lock.txt 的 Python）：\n"
+            "  from pathlib import Path\n"
+            "  import base64\n"
+            "  from nacl.signing import VerifyKey\n"
+            "  sums = Path('SHA256SUMS').read_bytes()\n"
+            "  sig = base64.b64decode(Path('SHA256SUMS.sig').read_text().strip())\n"
+            "  VerifyKey(base64.b64decode('" + public_b64 + "')).verify(sums, sig)\n"
+            "  print('SHA256SUMS SIGNATURE OK')\n\n"
+            "口径：pinned 只表示“与随附公钥副本匹配”；只有通过独立渠道核验 key_id 后，\n"
+            "才能说来源可信。本签名不证明构建可复现，也不证明 wheel 未被替换——\n"
+            "SHA256SUMS.sig 只签 SHA256SUMS，SHA256SUMS 不包含自身与 .sig。\n",
+            encoding="utf-8")
     sums = release_dir / "SHA256SUMS"
     lines = []
     for path in sorted(release_dir.iterdir(), key=lambda p: p.name):
-        if path.name == sums.name or not path.is_file():
+        if path.name in (sums.name, "SHA256SUMS.sig") or not path.is_file():
             continue
         lines.append(f"{_sha256(path)}  {path.name}")
     sums.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    if signing_key is not None:
+        signature = signing_key.sign(sums.read_bytes()).signature
+        (release_dir / "SHA256SUMS.sig").write_text(
+            base64.b64encode(signature).decode("ascii") + "\n", encoding="utf-8")
 
     print(f"\n发行物：{release_dir}")
     for path in sorted(release_dir.iterdir(), key=lambda p: p.name):

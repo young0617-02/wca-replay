@@ -23,55 +23,73 @@ def _public_keys(values: list[str] | None) -> list[str]:
 
 
 def _print_result(result: dict) -> None:
+    checks = result.get("checks") or {}
+
+    def st(name: str) -> str:
+        return str(checks.get(name, "NOT CHECKED"))
+
     if result.get("schema"):
-        print(f"MANIFEST SCHEMA v{result.get('manifest_schema_version')} OK")
+        print(f"MANIFEST SCHEMA v{result.get('manifest_schema_version')}")
     producer = result.get("producer") or {}
     if producer:
         print("PRODUCER", producer.get("version"), producer.get("commit"),
               "python=" + str(producer.get("python")),
               "rule_pack=" + str(producer.get("rule_pack_version")))
-    if result.get("manifest_checksum") == "ok":
-        print("MANIFEST CHECKSUM OK")
+    print(f"MANIFEST CHECKSUM {st('manifest')}")
     artifact = result.get("artifact") or {}
-    if artifact:
-        print(f"ARTIFACTS {'OK' if artifact.get('ok') else 'FAIL'}"
-              f" checked={artifact.get('checked', 0)}"
-              + (f"；{artifact.get('reason')}" if not artifact.get("ok") else ""))
-        if artifact.get("verify_script_sha256"):
-            print(f"VERIFY SCRIPT {'OK' if artifact.get('ok') else 'FAIL'}"
-                  f" sha256={artifact.get('verify_script_sha256')}")
-        if artifact.get("artifacts_digest"):
-            print(f"ARTIFACTS DIGEST {'OK' if artifact.get('ok') else 'FAIL'}"
-                  f" {artifact.get('artifacts_digest')}")
+    print(f"ARTIFACTS {st('artifacts')} checked={artifact.get('checked', 0)}")
+    if artifact.get("verify_script_sha256"):
+        print(f"VERIFY SCRIPT {st('verify_script')}"
+              f" sha256={artifact.get('verify_script_sha256')}")
+    else:
+        print(f"VERIFY SCRIPT {st('verify_script')}")
+    print(f"ARTIFACTS DIGEST manifest-internal {st('artifacts_digest_internal')}"
+          f" {result.get('artifacts_digest') or ''}".rstrip())
+    print(f"EXTRA FILE {st('extras')}"
+          + (f"：{','.join(artifact.get('extras') or [])}" if artifact.get("extras") else ""))
     findings = result.get("findings") or {}
-    if findings:
-        print(f"FINDINGS DIGEST {'OK' if findings.get('ok') else 'FAIL'}"
-              f" {str(findings.get('actual_digest', ''))}")
-        if findings.get("ok"):
-            print(f"COUNTS 发现（未签认） {findings.get('rows', 0)} 条 / "
-                  f"已确认结论 {findings.get('final_rows', 0)} 条")
-            versions = findings.get("rule_versions") or {}
-            print("RULE VERSIONS " + json.dumps(versions, ensure_ascii=False, sort_keys=True))
+    print(f"FINDINGS DIGEST {st('findings')}"
+          f" {str(findings.get('actual_digest', ''))}".rstrip())
+    if findings.get("ok"):
+        print(f"COUNTS 发现（未签认） {findings.get('rows', 0)} 条 / "
+              f"已确认结论 {findings.get('final_rows', 0)} 条")
+        print("RULE VERSIONS " + json.dumps(findings.get("rule_versions") or {},
+                                            ensure_ascii=False, sort_keys=True))
     chain = result.get("chain") or {}
-    if chain.get("head_hash"):
-        print(f"CHAIN {'OK' if chain.get('ok') else 'FAIL'} events={chain.get('length', 0)}")
+    print(f"CHAIN {st('chain')}"
+          + (f" events={chain.get('length', 0)}" if chain.get("checked") else ""))
     if result.get("inputs_digest"):
-        print(f"INPUTS DIGEST {'OK' if result.get('inputs_digest_ok') else 'FAIL'}"
-              f" {result.get('inputs_digest')}")
-    if result.get("signature_present"):
-        trust = ("pinned（来源可信）" if result.get("signature_trust") == "pinned"
-                 else "package self-check（NOT source trust，仅包内自洽）")
-        print(f"SIGNATURE {'OK' if result.get('signature_ok') else 'FAIL'}"
-              f" / {trust} / key_id={result.get('signature_key_id') or '?'}"
-              + (f" —— {result.get('signature_reason')}"
-                 if not result.get("signature_ok") else ""))
-    elif result.get("manifest_schema_version") and result.get("manifest_schema_version") >= 3:
-        print("SIGNATURE FAIL 包无签名")
-    if result.get("package_sha256_ok") is False:
-        print("PACKAGE SHA256 FAIL")
-    elif result.get("package_sha256"):
-        print(f"PACKAGE SHA256 OK {result.get('package_sha256')}")
-    print(result.get("anchor_reason") or "ANCHOR NOT CHECKED")
+        print(f"INPUTS DIGEST {st('inputs')} {result.get('inputs_digest')}")
+    else:
+        print(f"INPUTS DIGEST {st('inputs')}")
+    sig_status = st("signature")
+    if sig_status == "FAIL":
+        print(f"SIGNATURE FAIL —— {result.get('signature_reason') or result.get('reason')}")
+    elif sig_status == "NOT CHECKED":
+        print("SIGNATURE NOT CHECKED")
+    else:
+        trust = ("pinned (key matches supplied pin; independent key_id verification not done)"
+                 if result.get("signature_trust") == "pinned"
+                 else "package self-check (NOT source trust)")
+        print(f"SIGNATURE {sig_status} / {trust} / "
+              f"key_id={result.get('signature_key_id') or '?'}")
+    print(f"SIGNATURE PINNED {st('signature_pinned')}")
+    computed_sha = result.get("package_sha256") or "NOT AVAILABLE"
+    sha_status = st("package_sha")
+    print(f"PACKAGE SHA256 computed={computed_sha} / external={sha_status}"
+          + (f" expected={result.get('package_sha256_expected')}"
+             if sha_status == "FAIL" else ""))
+    if result.get("artifacts_digest_checked"):
+        ext_status = st("artifacts_digest_external")
+        line = (f"ARTIFACTS DIGEST manifest-internal {st('artifacts_digest_internal')} / "
+                f"external {ext_status}")
+        if ext_status == "FAIL":
+            line += (f" expected={result.get('artifacts_digest_expected')} "
+                     f"actual={result.get('artifacts_digest')}")
+        print(line)
+    else:
+        print(f"ARTIFACTS DIGEST external NOT CHECKED")
+    print(f"ANCHOR {st('anchor')}")
     if result.get("ok"):
         print("RESULT OK")
     elif result.get("partial"):
