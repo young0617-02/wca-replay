@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import argparse
 import inspect
 import re
 
@@ -95,6 +96,21 @@ def test_all_does_not_hand_build_step_namespaces():
     """结构性拦住本轮真实发生的缺陷：`all` 手工拼 Namespace 导致新开关读不到。"""
     text = inspect.getsource(cli.cmd_all)
     assert "argparse.Namespace(" not in text, "all 必须复用子命令自己的解析结果"
+
+
+def test_export_delivery_flag_and_legacy_alias_registered():
+    ap = cli.build_parser()
+    new = ap.parse_args(["export", "--record-delivery-as", "rv1"])
+    old = ap.parse_args(["export", "--sign-as", "rv1"])
+    assert new.record_delivery_as == "rv1" and new.sign_as is None
+    assert old.sign_as == "rv1" and old.record_delivery_as is None
+
+    sub = next(action for action in ap._actions
+               if isinstance(action, argparse._SubParsersAction))
+    help_text = sub.choices["export"].format_help()
+    assert "--record-delivery-as" in help_text
+    assert "--sign-as" in help_text
+    assert "非密码学签名" in help_text
 
 
 def test_export_sign_as_defaults_to_unsigned():

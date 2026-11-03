@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import zipfile
 from datetime import date
+from pathlib import Path
 
 import pytest
 
@@ -20,13 +21,14 @@ from src.evidence import (
     genesis_hash,
     input_fingerprint,
     not_covered_block,
+    record_delivery_event,
     responsibility_block,
     set_genesis,
     sign_package,
     verify_chain,
 )
 from src.rules.findings import Finding
-from src.util import sha256_hex
+from src.util import canonical_json, sha256_hex
 
 
 def _seed_facts(conn, cfg):
@@ -176,6 +178,28 @@ def test_unsigned_findings_never_reach_the_conclusion_set(conn, cfg):
         assert "rv1" in body and "4500" in body
 
 
+def test_delivery_event_and_sign_alias_share_the_same_audit_bytes(conn, cfg):
+    """改名只改函数名/CLI 文案；evidence.sign 的事件字段与 payload 哈希不能变。"""
+    _seed_facts(conn, cfg)
+    out = run_check(conn, cfg, start=date(2025, 9, 2), end=date(2025, 9, 2))
+    first = record_delivery_event(conn, cfg, out.run_id, recorded_by="rv1")
+    second = sign_package(conn, cfg, out.run_id, signed_by="rv1")
+
+    rows = conn.execute(
+        "SELECT seq, actor, action, run_id, payload_sha256 FROM audit_event "
+        "WHERE action = 'evidence.sign' AND run_id = ? ORDER BY seq",
+        (out.run_id,)).fetchall()
+    expected_payload = sha256_hex(canonical_json(
+        {"run_id": out.run_id, "signed_by": "rv1"}))
+    assert len(rows) == 2
+    assert {r["actor"] for r in rows} == {"human:rv1"}
+    assert {r["action"] for r in rows} == {"evidence.sign"}
+    assert {r["payload_sha256"] for r in rows} == {expected_payload}
+    assert first["audit_seq"] != second["audit_seq"]
+    assert first["signed_by"] == second["signed_by"] == "rv1"
+    assert verify_chain(conn, cfg).ok, "追加两条交付事件后链仍必须完整"
+
+
 def test_signing_puts_a_named_actor_in_the_chain(conn, cfg):
     """US-RV-04：签发只追加审计事件，签名人具名、可回看，链仍完整。"""
     _seed_facts(conn, cfg)
@@ -198,6 +222,18 @@ def test_signing_puts_a_named_actor_in_the_chain(conn, cfg):
 
     with pytest.raises(ValueError):
         sign_package(conn, cfg, out.run_id, signed_by="   ")
+
+
+def test_export_from_other_cwd_still_reads_repo_config(conn, cfg, tmp_path, monkeypatch):
+    """配置路径必须相对仓库根解析：换目录执行 export 不能因 CWD 找不到 not_covered.json。"""
+    _seed_facts(conn, cfg)
+    out = run_check(conn, cfg, start=date(2025, 9, 2), end=date(2025, 9, 2))
+    monkeypatch.chdir(tmp_path)
+    nc = not_covered_block(cfg)
+    assert nc["scope"]["cities_covered"] == cfg.region_profile.codes()
+    manifest = export_package(conn, cfg, out.run_id)
+    assert manifest["not_covered"]["rules_excluded"] == [r["rule_id"] for r in nc["rules_excluded"]]
+    assert Path(manifest["package_zip"]).is_file()
 
 
 def test_package_declares_what_it_does_not_cover(conn, cfg):

@@ -12,19 +12,84 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
+import os
 import shutil
-import sqlite3
+import threading
 import zipfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from . import ENGINE_VERSION
 from .config import Config, PROJECT_ROOT
-from .db import get_meta, set_meta
-from .util import CN_TZ, canonical_json, digest_of, sha256_hex
+from .db import (DB_BACKEND_POSTGRES, Connection, column_exists, get_meta, set_meta,
+                 table_exists, transaction_if_needed)
+from .rules.approvals import export_approval_csv, export_coverage_csv
+from .rules.rulepack import RULE_PACK_V4, RULE_PACK_V5, RULE_PACK_V6
+from .util import (CN_TZ, CSV_FORMULA_ESCAPE, EVIDENCE_PACKAGE_SCHEMA,
+                   MANIFEST_CHECKSUM_FIELD, canonical_json, csv_safe_row, digest_of,
+                   manifest_checksum, sha256_hex)
+
+logger = logging.getLogger(__name__)
+
+# 同 run 导出锁：进程内线程锁 + PG session advisory lock；SQLite 用包目录原子锁文件。
+_EXPORT_LOCK_GUARD = threading.Lock()
+_EXPORT_LOCKS: dict[str, threading.Lock] = {}
+
+
+class ExportBusyError(RuntimeError):
+    """同一 run 已有导出在运行；明确拒绝，不并发写同一 zip。"""
+
+
+@contextmanager
+def _export_run_lock(conn: Connection, cfg: Config, run_id: str):
+    key = f"wca.export:{run_id}"
+    with _EXPORT_LOCK_GUARD:
+        local = _EXPORT_LOCKS.setdefault(run_id, threading.Lock())
+    if not local.acquire(blocking=False):
+        raise ExportBusyError(f"该 run 正在导出：{run_id}（另一个导出正在进行），请稍后重试")
+    pg_locked = False
+    file_lock: Path | None = None
+    try:
+        if conn.dialect == DB_BACKEND_POSTGRES:
+            row = conn.execute(
+                "SELECT pg_try_advisory_lock(hashtext(?)) AS ok", (key,)).fetchone()
+            if not bool(row["ok"]):
+                raise ExportBusyError(
+                    f"该 run 正在导出：{run_id}（另一个导出正在进行），请稍后重试")
+            pg_locked = True
+        else:
+            cfg.packages_dir.mkdir(parents=True, exist_ok=True)
+            lock_name = ".export-" + sha256_hex(run_id.encode("utf-8"))[:32] + ".lock"
+            file_lock = cfg.packages_dir / lock_name
+            try:
+                fd = os.open(file_lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError as exc:
+                file_lock = None
+                raise ExportBusyError(
+                    f"该 run 正在导出：{run_id}（另一个导出正在进行），请稍后重试") from exc
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(f"pid={os.getpid()} run_id={run_id}\n")
+        yield
+    finally:
+        if pg_locked:
+            try:
+                conn.execute("SELECT pg_advisory_unlock(hashtext(?))", (key,))
+            except Exception:  # 连接已关闭时 PG 会自动释放 session lock
+                logger.warning("释放导出 advisory lock 失败：%s", run_id, exc_info=True)
+        if file_lock is not None:
+            try:
+                file_lock.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("清理导出锁文件失败：%s", file_lock, exc_info=True)
+        local.release()
+
 
 GENESES = "wca-audit-chain-v1"
+EPOCH_ACTION = "rule_pack.epoch.start"
+LEGACY_RULE_PACK = "legacy"
 
 
 def _chain_hash(prev: str, seq: int, actor: str, action: str, ts: str, payload_sha: str) -> str:
@@ -35,41 +100,187 @@ def genesis_hash(cfg: Config) -> str:
     return sha256_hex(f"{GENESES}|{ENGINE_VERSION}|{cfg.rule_pack_id}")
 
 
-def append_audit(conn: sqlite3.Connection, *, run_id: str | None, actor: str, action: str,
-                 payload: object, ts: str | None = None, cfg: Config | None = None) -> tuple[int, str]:
-    """追加一条审计事件。payload 走规范 JSON，禁止浮点。"""
-    last = conn.execute("SELECT entry_hash, seq FROM audit_event ORDER BY seq DESC LIMIT 1").fetchone()
-    if last is not None:
-        prev = str(last["entry_hash"])
-        seq = int(last["seq"]) + 1
-    else:
-        if cfg is None:
-            raise ValueError("链首事件必须传 cfg 以派生 genesis")
-        prev = genesis_of(conn, cfg)
-        seq = 1
-    ts = ts or datetime.now(CN_TZ).strftime("%Y-%m-%dT%H:%M:%S+08:00")
-    payload_sha = sha256_hex(canonical_json(payload))
-    entry = _chain_hash(prev, seq, actor, action, ts, payload_sha)
+def _stored_rule_pack(conn: Connection) -> str:
+    value = get_meta(conn, "rule_pack_version")
+    if value:
+        return value
+    row = conn.execute("SELECT rule_pack_version FROM run ORDER BY started_at DESC LIMIT 1"
+                       ).fetchone()
+    return str(row["rule_pack_version"]) if row and row["rule_pack_version"] else LEGACY_RULE_PACK
+
+
+def audit_epoch(conn: Connection, rule_pack_version: str) -> dict | None:
+    """返回某规则包的纪元行；旧库/未切库时返回 None。"""
+    if not table_exists(conn, "rule_pack_epoch"):
+        return None
+    row = conn.execute(
+        "SELECT epoch_id, rule_pack_version, prev_rule_pack_version, prev_head_hash, "
+        "activation_event_seq, segment_start_seq, segment_start_prev_hash, switched_at "
+        "FROM rule_pack_epoch WHERE rule_pack_version = ? "
+        "ORDER BY activation_event_seq DESC LIMIT 1", (rule_pack_version,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def _insert_event(conn: Connection, *, seq: int, run_id: str | None, actor: str, action: str,
+                  ts: str, payload_sha: str, prev: str, entry: str,
+                  rule_pack_version: str, segment_id: str | None) -> None:
     conn.execute(
-        "INSERT INTO audit_event(seq, run_id, actor, action, ts, payload_sha256, prev_hash, entry_hash) "
-        "VALUES(?,?,?,?,?,?,?,?)",
-        (seq, run_id, actor, action, ts, payload_sha, prev, entry),
+        "INSERT INTO audit_event(seq, run_id, actor, action, ts, payload_sha256, prev_hash, "
+        "entry_hash, rule_pack_version, segment_id) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (seq, run_id, actor, action, ts, payload_sha, prev, entry,
+         rule_pack_version, segment_id),
     )
-    return seq, entry
 
 
-def genesis_of(conn: sqlite3.Connection, cfg: Config) -> str:
+def ensure_audit_epoch(conn: Connection, cfg: Config) -> dict | None:
+    """v5 首次写入旧 v4 链时，追加显式切换事件并建立新审计段。
+
+    绝不重置 `audit_genesis`、绝不删除旧事件；切换事件留在旧段，段起点指回它的 entry_hash。
+    """
+    if cfg.rule_pack_id not in (RULE_PACK_V5, RULE_PACK_V6):
+        return None
+    existing = audit_epoch(conn, cfg.rule_pack_id)
+    if existing:
+        return existing
+    stored = get_meta(conn, "audit_genesis")
+    if not stored or stored == genesis_hash(cfg):
+        return None
+    old_pack = _stored_rule_pack(conn)
+    if old_pack == cfg.rule_pack_id:
+        raise RuntimeError(
+            "审计链起点与当前 engine/rule_pack 不一致，且无法确定旧规则包纪元；"
+            "拒绝写入，不重置旧链")
+    # 已在导入/审批事务内时复用外层事务：再 BEGIN 会让 SQLite 报错，
+    # 而 PG 的 COMMIT 会把外层业务写入提前提交，回滚补偿随之失效。
+    with transaction_if_needed(conn):
+        # 多个进程/连接同时首次切包时，epoch 的 seq/epoch_id 只能有一个赢家；
+        # 与 append_audit 共用同一把事务级锁，串行化后再复查。
+        if conn.dialect == DB_BACKEND_POSTGRES:
+            conn.execute("SELECT pg_advisory_xact_lock(hashtext(?))", ("wca.audit.append",))
+        again = audit_epoch(conn, cfg.rule_pack_id)
+        if again:
+            return again
+        old_epoch = audit_epoch(conn, old_pack)
+        last = conn.execute("SELECT entry_hash, seq FROM audit_event ORDER BY seq DESC LIMIT 1"
+                            ).fetchone()
+        prev = str(last["entry_hash"]) if last is not None else stored
+        prev_seq = int(last["seq"]) if last is not None else 0
+        seq = prev_seq + 1
+        epoch_id = f"epoch-{cfg.rule_pack_id}-{seq}"
+        ts = datetime.now(CN_TZ).strftime("%Y-%m-%dT%H:%M:%S+08:00")
+        payload = {
+            "epoch_id": epoch_id, "from_rule_pack": old_pack,
+            "to_rule_pack": cfg.rule_pack_id, "prev_segment_head": prev,
+            "prev_segment_head_seq": prev_seq,
+        }
+        payload_sha = sha256_hex(canonical_json(payload))
+        entry = _chain_hash(prev, seq, "system:audit", EPOCH_ACTION, ts, payload_sha)
+        _insert_event(conn, seq=seq, run_id=None, actor="system:audit", action=EPOCH_ACTION,
+                      ts=ts, payload_sha=payload_sha, prev=prev, entry=entry,
+                      rule_pack_version=old_pack,
+                      segment_id=(old_epoch["epoch_id"] if old_epoch else None))
+        conn.execute(
+            "INSERT INTO rule_pack_epoch(epoch_id, rule_pack_version, prev_rule_pack_version, "
+            "prev_head_hash, activation_event_seq, segment_start_seq, segment_start_prev_hash, "
+            "switched_at) VALUES(?,?,?,?,?,?,?,?)",
+            (epoch_id, cfg.rule_pack_id, old_pack, prev, seq, seq + 1, entry, ts),
+        )
+        return {
+            "epoch_id": epoch_id, "rule_pack_version": cfg.rule_pack_id,
+            "prev_rule_pack_version": old_pack, "prev_head_hash": prev,
+            "activation_event_seq": seq, "segment_start_seq": seq + 1,
+            "segment_start_prev_hash": entry, "switched_at": ts,
+        }
+
+
+def _audit_context(conn: Connection, cfg: Config | None) -> tuple[str, int, str | None, str | None]:
+    """(prev_hash, next_seq, rule_pack_version, segment_id) for the next append."""
+    if cfg is None:
+        if any(audit_epoch(conn, p) for p in (RULE_PACK_V5, RULE_PACK_V6)):
+            raise ValueError("审计纪元切换后追加事件必须传 cfg，不能猜段")
+        last = conn.execute("SELECT entry_hash, seq FROM audit_event ORDER BY seq DESC LIMIT 1"
+                            ).fetchone()
+        if last is None:
+            raise ValueError("链首事件必须传 cfg 以派生 genesis")
+        return str(last["entry_hash"]), int(last["seq"]) + 1, None, None
+
+    package = cfg.rule_pack_id
+    if package in (RULE_PACK_V5, RULE_PACK_V6):
+        if package == RULE_PACK_V5 and audit_epoch(conn, RULE_PACK_V6):
+            raise RuntimeError("v5 审计段已封闭（库已进入 v6 纪元），拒绝把新 v5 事件接在旧段上")
+        epoch = ensure_audit_epoch(conn, cfg)
+        if epoch:
+            last = conn.execute(
+                "SELECT entry_hash, seq FROM audit_event WHERE segment_id = ? "
+                "ORDER BY seq DESC LIMIT 1", (epoch["epoch_id"],)).fetchone()
+            prev = str(last["entry_hash"]) if last is not None else epoch["segment_start_prev_hash"]
+            seq = int(last["seq"]) + 1 if last is not None else int(epoch["segment_start_seq"])
+            return prev, seq, package, epoch["epoch_id"]
+        last = conn.execute("SELECT entry_hash, seq FROM audit_event ORDER BY seq DESC LIMIT 1"
+                            ).fetchone()
+        if last is None:
+            return genesis_of(conn, cfg), 1, package, None
+        return str(last["entry_hash"]), int(last["seq"]) + 1, package, None
+
+    if package == RULE_PACK_V4:
+        if audit_epoch(conn, RULE_PACK_V5) or audit_epoch(conn, RULE_PACK_V6):
+            raise RuntimeError("v4 审计段已封闭（库已进入新规则包纪元），拒绝把新 v4 事件接在旧段上")
+        last = conn.execute("SELECT entry_hash, seq FROM audit_event ORDER BY seq DESC LIMIT 1"
+                            ).fetchone()
+        if last is None:
+            return genesis_of(conn, cfg), 1, package, None
+        return str(last["entry_hash"]), int(last["seq"]) + 1, package, None
+
+    raise RuntimeError(f"不支持的规则包版本：{package}")
+
+
+def append_audit(conn: Connection, *, run_id: str | None, actor: str, action: str,
+                 payload: object, ts: str | None = None, cfg: Config | None = None) -> tuple[int, str]:
+    """追加一条审计事件。payload 走规范 JSON，禁止浮点。
+
+    审计链是单链表：seq/prev_hash 由「当前链头」推导，并发追加必须串行化，
+    否则两个事务会各自读到同一个链头并抢同一个 seq。这里统一用
+    `transaction_if_needed` 包住 append：调用方已在事务内就复用，否则自开一个，
+    PG advisory lock 因而总能持有到提交；业务侧不需要再各自记得包事务。
+    """
+    with transaction_if_needed(conn):
+        if conn.dialect == DB_BACKEND_POSTGRES:
+            conn.execute("SELECT pg_advisory_xact_lock(hashtext(?))", ("wca.audit.append",))
+        prev, seq, pack, segment = _audit_context(conn, cfg)
+        ts = ts or datetime.now(CN_TZ).strftime("%Y-%m-%dT%H:%M:%S+08:00")
+        payload_sha = sha256_hex(canonical_json(payload))
+        entry = _chain_hash(prev, seq, actor, action, ts, payload_sha)
+        _insert_event(conn, seq=seq, run_id=run_id, actor=actor, action=action, ts=ts,
+                      payload_sha=payload_sha, prev=prev, entry=entry,
+                      rule_pack_version=pack or "", segment_id=segment)
+        return seq, entry
+
+
+def genesis_of(conn: Connection, cfg: Config) -> str:
     stored = get_meta(conn, "audit_genesis")
     if not stored:
         g = genesis_hash(cfg)
         set_meta(conn, "audit_genesis", g)
         return g
+    epoch = audit_epoch(conn, cfg.rule_pack_id)
+    if epoch:
+        return str(epoch["segment_start_prev_hash"])
     if stored != genesis_hash(cfg):
         raise RuntimeError("审计链起点与当前 engine/rule_pack 不一致，拒绝写入（防止历史被替换）")
     return stored
 
 
-def set_genesis(conn: sqlite3.Connection, cfg: Config) -> None:
+def set_genesis(conn: Connection, cfg: Config) -> None:
+    """确保当前规则包有可用的审计上下文；v5/v6 首次写旧库会显式建立纪元。"""
+    if cfg.rule_pack_id in (RULE_PACK_V5, RULE_PACK_V6):
+        if cfg.rule_pack_id == RULE_PACK_V5 and audit_epoch(conn, RULE_PACK_V6):
+            raise RuntimeError("v5 审计段已封闭（库已进入 v6 纪元），拒绝新的 v5 运行")
+        ensure_audit_epoch(conn, cfg)
+        if audit_epoch(conn, cfg.rule_pack_id):
+            return
+    elif audit_epoch(conn, RULE_PACK_V5) or audit_epoch(conn, RULE_PACK_V6):
+        raise RuntimeError("v4 审计段已封闭（库已进入新规则包纪元），拒绝新的 v4 运行")
     genesis_of(conn, cfg)
 
 
@@ -91,24 +302,89 @@ class ChainVerification:
         }
 
 
-def verify_chain(conn: sqlite3.Connection, cfg: Config) -> ChainVerification:
-    rows = conn.execute(
-        "SELECT seq, actor, action, ts, payload_sha256, prev_hash, entry_hash FROM audit_event "
-        "ORDER BY seq"
-    ).fetchall()
+def _verify_rows(rows: list, start_prev: str) -> ChainVerification:
     if not rows:
-        return ChainVerification(0, True, None, "空链条", genesis_hash(cfg))
-    prev = genesis_hash(cfg)
+        return ChainVerification(0, True, None, "空链条", start_prev)
+    prev = start_prev
     for r in rows:
-        expected = _chain_hash(prev, int(r["seq"]), r["actor"], r["action"], r["ts"], r["payload_sha256"])
+        expected = _chain_hash(prev, int(r["seq"]), r["actor"], r["action"], r["ts"],
+                               r["payload_sha256"])
         if r["prev_hash"] != prev:
-            return ChainVerification(len(rows), False, int(r["seq"]), "prev_hash 与前一条 entry_hash 不衔接",
+            return ChainVerification(len(rows), False, int(r["seq"]),
+                                     "prev_hash 与前一条 entry_hash 不衔接",
                                      str(rows[-1]["entry_hash"]))
         if r["entry_hash"] != expected:
-            return ChainVerification(len(rows), False, int(r["seq"]), "entry_hash 与内容重算不一致（疑似改写）",
+            return ChainVerification(len(rows), False, int(r["seq"]),
+                                     "entry_hash 与内容重算不一致（疑似改写）",
                                      str(rows[-1]["entry_hash"]))
         prev = str(r["entry_hash"])
     return ChainVerification(len(rows), True, None, "", prev)
+
+
+def verify_chain(conn: Connection, cfg: Config, *, upto_seq: int | None = None,
+                 segment: dict | None = None, legacy_only: bool = False
+                 ) -> ChainVerification:
+    """校验链/段。
+
+    * 给 `segment`：只验证该 v5 审计段，从该段起点前哈希开始；
+    * `legacy_only`：只验证 v4 legacy 段（用于旧 v4 run 导出）；
+    * 默认：有 v5 纪元时同时验证旧 v4 链与 v5 新段；没有纪元时验证整条链。
+    """
+    cols = ("seq, actor, action, ts, payload_sha256, prev_hash, entry_hash, "
+            "rule_pack_version, segment_id")
+    if segment is not None:
+        where, params = "WHERE segment_id = ?", (segment["epoch_id"],)
+        if upto_seq is not None:
+            where += " AND seq <= ?"
+            params = params + (int(upto_seq),)
+        rows = conn.execute(f"SELECT {cols} FROM audit_event {where} ORDER BY seq",
+                            params).fetchall()
+        return _verify_rows(rows, str(segment["segment_start_prev_hash"]))
+
+    epoch = audit_epoch(conn, cfg.rule_pack_id) if not legacy_only else None
+    has_v5_epoch = audit_epoch(conn, RULE_PACK_V5)
+    has_v6_epoch = audit_epoch(conn, RULE_PACK_V6)
+    if legacy_only or (cfg.rule_pack_id == RULE_PACK_V4 and (has_v5_epoch or has_v6_epoch)):
+        where, params = "WHERE segment_id IS NULL", ()
+        if upto_seq is not None:
+            where += " AND seq <= ?"
+            params = (int(upto_seq),)
+        rows = conn.execute(f"SELECT {cols} FROM audit_event {where} ORDER BY seq",
+                            params).fetchall()
+        start = get_meta(conn, "audit_genesis") or genesis_hash(cfg)
+        return _verify_rows(rows, start)
+
+    if epoch and cfg.rule_pack_id in (RULE_PACK_V5, RULE_PACK_V6):
+        legacy_where, legacy_params = "WHERE segment_id IS NULL", ()
+        if upto_seq is not None:
+            legacy_where += " AND seq <= ?"
+            legacy_params = (int(upto_seq),)
+        legacy = conn.execute(
+            f"SELECT {cols} FROM audit_event {legacy_where} ORDER BY seq",
+            legacy_params).fetchall()
+        start = get_meta(conn, "audit_genesis") or genesis_hash(cfg)
+        legacy_ver = _verify_rows(legacy, start)
+        if not legacy_ver.ok:
+            return legacy_ver
+        seg_where, seg_params = "WHERE segment_id = ?", (epoch["epoch_id"],)
+        if upto_seq is not None:
+            seg_where += " AND seq <= ?"
+            seg_params = seg_params + (int(upto_seq),)
+        seg_rows = conn.execute(
+            f"SELECT {cols} FROM audit_event {seg_where} ORDER BY seq", seg_params).fetchall()
+        seg_ver = _verify_rows(seg_rows, str(epoch["segment_start_prev_hash"]))
+        if not seg_ver.ok:
+            return seg_ver
+        return ChainVerification(len(legacy) + len(seg_rows), True, None, "", seg_ver.head_hash)
+
+    where, params = "WHERE 1=1", ()
+    if upto_seq is not None:
+        where += " AND seq <= ?"
+        params = (int(upto_seq),)
+    rows = conn.execute(f"SELECT {cols} FROM audit_event {where} ORDER BY seq",
+                        params).fetchall()
+    start = get_meta(conn, "audit_genesis") or genesis_hash(cfg)
+    return _verify_rows(rows, start)
 
 
 def tamper_check_report(ver: ChainVerification) -> str:
@@ -116,7 +392,7 @@ def tamper_check_report(ver: ChainVerification) -> str:
 
 
 # ------------------------------------------------------------------ 输入指纹 / 结论摘要
-def input_fingerprint(conn: sqlite3.Connection, scope: dict,
+def input_fingerprint(conn: Connection, scope: dict,
                       file_ids: set[int] | None = None) -> str:
     """输入指纹 = 本次校验**实际引用到**的输入文件集合 + 范围与口径参数。
 
@@ -162,14 +438,17 @@ PACKAGE_README = (
     "三元组（规则版本 / 输入指纹 / 结论摘要）用于复核：在相同输入与相同规则版本下重跑，"
     "结论摘要必须逐字节一致。\r\n"
     "本包不含任何应付金额：引擎只输出小时数与法定倍数档位，金额由 HR 负责人在复核台具名录入。\r\n"
-    "包内 inputs/ 带本次结论真正依赖的原始 CSV（选择规则见 manifest.inputs.selection_rule），"
-    "所以复核不必再回头索要数据：verify.py 独立重算审计链与输入文件哈希；"
+    "包内 inputs/ 带本次结论真正依赖的原始 CSV；v5 另带审批台账 approval_ledger.csv，"
+    "选择规则见 manifest.inputs.selection_rule。verify.py 独立重算审计链与输入文件哈希；"
+    "audit_chain.jsonl 是本次 run 的链前缀（到该 run 最后一条事件），边界见 manifest.audit_window。"
     "有本项目代码时用 `python -m src.cli replay <包>` 重放引擎并比对三元组。\r\n"
 )
 
 
 # ---------------------------------------------------------------- 责任与未覆盖（US-EX-02 / US-EX-03 / US-RV-01）
-NOT_COVERED_PATH = "config/not_covered.json"
+NOT_COVERED_REL = "config/not_covered.json"
+# 配置路径一律相对仓库根解析，不依赖进程当前目录（换目录 export 必须仍可读）。
+NOT_COVERED_PATH = PROJECT_ROOT / NOT_COVERED_REL
 
 
 def not_covered_block(cfg: Config) -> dict:
@@ -177,19 +456,17 @@ def not_covered_block(cfg: Config) -> dict:
 
     覆盖城市来自档位表（配置，不写死），其余来自 `config/not_covered.json`。
     """
-    from pathlib import Path as _P
-
-    raw = _P(NOT_COVERED_PATH)
+    raw = Path(NOT_COVERED_PATH)
     data = json.loads(raw.read_text(encoding="utf-8")) if raw.is_file() else {}
     profile = getattr(cfg, "region_profile", None)
     data["scope"]["cities_covered"] = profile.codes() if profile else [cfg.region_code]
     data["scope"]["cities_covered_labels"] = ([profile.label(c) for c in profile.codes()]
                                               if profile else [cfg.region_label])
-    data["generated_from"] = NOT_COVERED_PATH
+    data["generated_from"] = NOT_COVERED_REL
     return data
 
 
-def responsibility_block(conn: sqlite3.Connection, cfg: Config, run_id: str) -> dict:
+def responsibility_block(conn: Connection, cfg: Config, run_id: str) -> dict:
     """谁参与了什么：机器只做解释与检索，数值出自确定性引擎，对外结论必须有人签名。"""
     rows = conn.execute(
         "SELECT f.finding_id, f.rule_id, f.emp_id, f.work_date, f.period_key, f.severity, "
@@ -247,24 +524,33 @@ def responsibility_block(conn: sqlite3.Connection, cfg: Config, run_id: str) -> 
     }
 
 
-def _has_table(conn: sqlite3.Connection, name: str) -> bool:
-    return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
-                        (name,)).fetchone() is not None
+def _has_table(conn: Connection, name: str) -> bool:
+    return table_exists(conn, name)
 
 
-def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
-    return conn.execute("SELECT 1 FROM pragma_table_info(?) WHERE name = ?",
-                        (table, column)).fetchone() is not None
+def _has_column(conn: Connection, table: str, column: str) -> bool:
+    return column_exists(conn, table, column)
 
 
-def sign_package(conn: sqlite3.Connection, cfg: Config, run_id: str, signed_by: str) -> dict:
-    """签发：把"谁为这份材料负责"追加进审计链（不改写历史）。CLI 与界面共用这一个入口。"""
-    if not signed_by.strip():
-        raise ValueError("签发人不能为空")
+def record_delivery_event(conn: Connection, cfg: Config, run_id: str,
+                          recorded_by: str) -> dict:
+    """登记交付事件：把“谁登记了这次交付”追加进审计链，不改写历史。
+
+    这不是密码学签名，也不提供签名信任根；`evidence.sign` 动作名与 payload
+    （`run_id`、`signed_by`）保持不变，改名只改函数/CLI 文案，审计事件字节不变。
+    """
+    if not recorded_by.strip():
+        raise ValueError("登记人不能为空")
     seq, entry_hash = append_audit(
-        conn, run_id=run_id, actor=f"human:{signed_by}", action="evidence.sign",
-        payload={"run_id": run_id, "signed_by": signed_by}, cfg=cfg)
-    return {"review_id": None, "audit_seq": seq, "entry_hash": entry_hash, "signed_by": signed_by}
+        conn, run_id=run_id, actor=f"human:{recorded_by}", action="evidence.sign",
+        payload={"run_id": run_id, "signed_by": recorded_by}, cfg=cfg)
+    return {"review_id": None, "audit_seq": seq, "entry_hash": entry_hash,
+            "signed_by": recorded_by}
+
+
+def sign_package(conn: Connection, cfg: Config, run_id: str, signed_by: str) -> dict:
+    """迁移期旧别名；等价于 `record_delivery_event`，不做密码学签名。"""
+    return record_delivery_event(conn, cfg, run_id, recorded_by=signed_by)
 
 
 def _write_conclusions_csv(path: Path, rows: list[dict]) -> None:
@@ -275,9 +561,11 @@ def _write_conclusions_csv(path: Path, rows: list[dict]) -> None:
                     "decision", "confirmed_by", "confirmed_at",
                     "amount_cents_input", "amount_entered_by", "note"])
         for x in rows:
-            w.writerow([x["rule_id"], x["emp_id"], x["work_date"], x["period_key"], x["severity"],
-                        x["decision"], x["confirmed_by"], x["confirmed_at"],
-                        x.get("amount_cents_input"), x.get("amount_entered_by"), x.get("note")])
+            w.writerow(csv_safe_row([
+                x["rule_id"], x["emp_id"], x["work_date"], x["period_key"], x["severity"],
+                x["decision"], x["confirmed_by"], x["confirmed_at"],
+                x.get("amount_cents_input"), x.get("amount_entered_by"), x.get("note"),
+            ]))
 
 
 
@@ -308,12 +596,50 @@ def _not_covered_markdown(nc: dict) -> str:
 
 
 # ------------------------------------------------- 输入自含与外部重放（US-EX-01 / A8）
-EXPORT_INPUTS_MAX_BYTES = 8 * 1024 * 1024
+# 受控实验：3,000 员工月密集数据实测需要 10,881,370 字节；8 MiB 会阻断自含导出。
+# 12 MiB 仍保持单包、不分卷；这是实验值，不是最终 SLA。
+EXPORT_INPUTS_MAX_BYTES = 12 * 1024 * 1024
+# 第一档告警线：3,000 行台账规模下的常态提示（不拒绝导出）。
+EXPORT_INPUTS_WARN_BYTES = 11_010_048   # 10.5 MiB
+# 第二档临界线：更接近硬上限，manifest/CLI/日志升级为“需人工确认”，仍不拒绝导出。
+EXPORT_INPUTS_CRITICAL_BYTES = 12_058_624   # 11.5 MiB
 INPUTS_DIRNAME = "inputs"
 INPUTS_MANIFEST_NAME = f"{INPUTS_DIRNAME}/manifest.json"
 
 
-def _run_input_file_ids(conn: sqlite3.Connection, run_id: str) -> set[int]:
+def input_budget_status(total_bytes: int, cap_bytes: int | None = None,
+                        warn_bytes: int | None = None,
+                        critical_bytes: int | None = None) -> str:
+    """返回 "ok" / "warning" / "critical"；超过上限直接拒绝，等于上限放行。
+
+    三档口径（写死，避免调用方各自解释）：
+      * < 10.5 MiB：ok；
+      * 10.5 MiB <= total < 11.5 MiB：warning（常态提示，仍允许导出）；
+      * 11.5 MiB <= total <= 12 MiB：critical（接近硬上限，需人工确认，仍允许导出）；
+      * > 12 MiB：ValueError（拒绝，不静默截断）。
+    """
+    cap = EXPORT_INPUTS_MAX_BYTES if cap_bytes is None else cap_bytes
+    warn = EXPORT_INPUTS_WARN_BYTES if warn_bytes is None else warn_bytes
+    critical = EXPORT_INPUTS_CRITICAL_BYTES if critical_bytes is None else critical_bytes
+    if total_bytes > cap:
+        raise ValueError(
+            f"待打包输入 {total_bytes:,} 字节，超过预算 {cap:,} 字节；"
+            "确认没必要自含时可用 --no-inputs 导出不带原始数据的包")
+    if total_bytes >= critical:
+        return "critical"
+    if total_bytes >= warn:
+        return "warning"
+    return "ok"
+
+
+def check_input_budget(total_bytes: int, cap_bytes: int | None = None,
+                       critical_bytes: int | None = None) -> str:
+    """输入体积预算的唯一判据；等于上限放行，超过 1 字节即拒绝。"""
+    return input_budget_status(total_bytes, cap_bytes=cap_bytes,
+                               critical_bytes=critical_bytes)
+
+
+def _run_input_file_ids(conn: Connection, run_id: str) -> set[int]:
     """本次结论**实际依赖**的输入文件 = 主数据 ∪ 引用集合 ∪ 结论溯源里的文件 ∪ 未归属质量问题的文件。
 
     三个并集都必要：
@@ -344,6 +670,69 @@ def _run_input_file_ids(conn: sqlite3.Connection, run_id: str) -> set[int]:
     return ids
 
 
+def _run_chain_prefix(conn: Connection, run_id: str, rule_pack_version: str
+                      ) -> tuple[list, int | None, dict | None]:
+    """本次 run 的链前缀；v5 纪元只取新段，v4 run 只取 legacy 段。"""
+    epoch = audit_epoch(conn, rule_pack_version) if rule_pack_version in (
+        RULE_PACK_V5, RULE_PACK_V6) else None
+    legacy_closed = (audit_epoch(conn, RULE_PACK_V5) or audit_epoch(conn, RULE_PACK_V6)) \
+        if rule_pack_version == RULE_PACK_V4 else None
+    if epoch:
+        where, params = "WHERE segment_id = ?", (epoch["epoch_id"],)
+    elif legacy_closed:
+        where, params = "WHERE segment_id IS NULL", ()
+    else:
+        where, params = "WHERE 1=1", ()
+    row = conn.execute(
+        f"SELECT MAX(seq) AS max_seq FROM audit_event {where} AND run_id = ?",
+        params + (run_id,)).fetchone()
+    max_seq = int(row["max_seq"]) if row and row["max_seq"] is not None else None
+    if max_seq is None:
+        # 旧 run 可能没有 run_id 事件：退回该段当前链头，保证链仍可验证
+        row = conn.execute(f"SELECT MAX(seq) AS max_seq FROM audit_event {where}",
+                           params).fetchone()
+        max_seq = int(row["max_seq"]) if row and row["max_seq"] is not None else None
+    if max_seq is None:
+        return [], None, epoch
+    rows = conn.execute(
+        f"SELECT seq, run_id, actor, action, ts, payload_sha256, prev_hash, entry_hash, "
+        f"rule_pack_version, segment_id FROM audit_event {where} AND seq <= ? ORDER BY seq",
+        params + (max_seq,)
+    ).fetchall()
+    return rows, max_seq, epoch
+
+
+def _select_raw_files(conn: Connection, ids: set[int]) -> list:
+    if not ids:
+        return []
+    ordered = sorted(int(x) for x in ids)
+    placeholders = ",".join("?" * len(ordered))
+    return conn.execute(
+        f"SELECT file_id, rel_path, sha256, kind, row_count FROM raw_file "
+        f"WHERE file_id IN ({placeholders}) ORDER BY rel_path", tuple(ordered)
+    ).fetchall()
+
+
+def _select_issues(conn: Connection, ids: set[int]) -> list:
+    if not ids:
+        return []
+    ordered = sorted(int(x) for x in ids)
+    placeholders = ",".join("?" * len(ordered))
+    return conn.execute(
+        f"SELECT i.*, f.rel_path FROM ingest_issue i JOIN raw_file f "
+        f"ON f.file_id = i.file_id WHERE i.file_id IN ({placeholders}) "
+        f"ORDER BY i.file_id, i.line_no", tuple(ordered)
+    ).fetchall()
+
+
+def _run_employee_ids(conn: Connection, scope: dict) -> list[str]:
+    ids = scope.get("emp_ids")
+    if ids:
+        return sorted({str(x) for x in ids})
+    return [str(r["emp_id"]) for r in conn.execute(
+        "SELECT emp_id FROM employee ORDER BY emp_id").fetchall()]
+
+
 def _resolve_input_path(rel_path: str, cfg: Config) -> Path | None:
     """按几个常见落点找原始文件；找不到就返回 None，由调用方如实记成缺项，不猜。"""
     if rel_path.startswith("inline://"):
@@ -357,18 +746,16 @@ def _resolve_input_path(rel_path: str, cfg: Config) -> Path | None:
     return None
 
 
-def collect_package_inputs(conn: sqlite3.Connection, cfg: Config, run_id: str) -> dict:
+def collect_package_inputs(conn: Connection, cfg: Config, run_id: str,
+                           *, file_ids: set[int] | None = None) -> dict:
     """挑出可打包的输入文件，并按字节预算把关（超预算直接报错，不静默截断）。"""
     entries: list[dict] = []
     missing: list[str] = []
-    ids = _run_input_file_ids(conn, run_id)
+    ids = set(file_ids) if file_ids is not None else _run_input_file_ids(conn, run_id)
     if not ids:
         return {"entries": [], "missing": [], "total_bytes": 0,
                 "reason": "本次运行没有记录引用文件（旧库或空引用），包内不含 inputs/"}
-    placeholders = ",".join("?" * len(ids))
-    rows = conn.execute(
-        f"SELECT file_id, rel_path, sha256, kind, row_count FROM raw_file "
-        f"WHERE file_id IN ({placeholders}) ORDER BY file_id", tuple(sorted(ids))).fetchall()
+    rows = _select_raw_files(conn, ids)
     for r in rows:
         src = _resolve_input_path(r["rel_path"], cfg)
         if src is None:
@@ -384,10 +771,7 @@ def collect_package_inputs(conn: sqlite3.Connection, cfg: Config, run_id: str) -
                         "arcname": f"{INPUTS_DIRNAME}/{int(r['file_id']):03d}-{src.name}",
                         "source": str(src)})
     total = sum(e["bytes"] for e in entries)
-    if total > EXPORT_INPUTS_MAX_BYTES:
-        raise ValueError(
-            f"待打包输入 {total:,} 字节，超过预算 {EXPORT_INPUTS_MAX_BYTES:,} 字节；"
-            f"确认没必要自含时可用 --no-inputs 导出不带原始数据的包")
+    status = check_input_budget(total)
     note = ""
     if not _has_column(conn, "run", "referenced_file_ids"):
         note = ("旧库没有 run.referenced_file_ids 列（本次运行当时未记录引用集合），"
@@ -395,15 +779,49 @@ def collect_package_inputs(conn: sqlite3.Connection, cfg: Config, run_id: str) -
     elif not conn.execute("SELECT referenced_file_ids FROM run WHERE run_id = ?",
                           (run_id,)).fetchone()["referenced_file_ids"]:
         note = "该 run 未记录引用文件集合（升级前的旧 run），已按主数据 + 溯源引用打包"
-    return {"entries": entries, "missing": missing, "total_bytes": total, "reason": note}
+    return {"entries": entries, "missing": missing, "total_bytes": total, "reason": note,
+            "warning": status in ("warning", "critical"),
+            "warn_bytes": EXPORT_INPUTS_WARN_BYTES,
+            "critical": status == "critical",
+            "critical_bytes": EXPORT_INPUTS_CRITICAL_BYTES}
 
 
-def export_package(conn: sqlite3.Connection, cfg: Config, run_id: str, *,
+def export_package(conn: Connection, cfg: Config, run_id: str, *,
                    include_inputs: bool = True) -> dict:
-    """导出举证包（zip + manifest），返回清单字典。1000 行内应控制在数秒级（设计值）。"""
+    """导出举证包（zip + manifest），返回清单字典。同 run 并发导出会明确拒绝。"""
+    if conn.execute("SELECT 1 FROM run WHERE run_id = ?", (run_id,)).fetchone() is None:
+        raise ValueError(f"未知 run_id: {run_id}")
+    cfg.ensure_dirs()
+    with _export_run_lock(conn, cfg, run_id):
+        return _export_package_locked(conn, cfg, run_id, include_inputs=include_inputs)
+
+
+def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
+                           include_inputs: bool = True) -> dict:
+    """在持有同 run 导出锁时执行的实际导出。1000 行内应控制在数秒级（设计值）。"""
     run = conn.execute("SELECT * FROM run WHERE run_id = ?", (run_id,)).fetchone()
     if run is None:
         raise ValueError(f"未知 run_id: {run_id}")
+    scope_json = json.loads(run["scope_json"])
+    input_ids = _run_input_file_ids(conn, run_id)
+    files = _select_raw_files(conn, input_ids)
+    issues = _select_issues(conn, input_ids)
+    chain, chain_max_seq, chain_epoch = _run_chain_prefix(
+        conn, run_id, str(run["rule_pack_version"]))
+    activation_event = None
+    if chain_epoch:
+        row = conn.execute(
+            "SELECT seq, run_id, actor, action, ts, payload_sha256, prev_hash, entry_hash, "
+            "rule_pack_version, segment_id FROM audit_event WHERE seq = ?",
+            (int(chain_epoch["activation_event_seq"]),)).fetchone()
+        if row is not None:
+            activation_event = {
+                "seq": int(row["seq"]), "run_id": row["run_id"], "actor": row["actor"],
+                "action": row["action"], "ts": row["ts"],
+                "payload_sha256": row["payload_sha256"], "prev_hash": row["prev_hash"],
+                "entry_hash": row["entry_hash"],
+                "rule_pack_version": row["rule_pack_version"], "segment_id": row["segment_id"],
+            }
 
     cfg.ensure_dirs()
     work = cfg.packages_dir / run_id
@@ -412,27 +830,41 @@ def export_package(conn: sqlite3.Connection, cfg: Config, run_id: str, *,
     findings = conn.execute(
         "SELECT * FROM finding WHERE run_id = ? ORDER BY emp_id, work_date, rule_id", (run_id,)
     ).fetchall()
-    files = conn.execute("SELECT * FROM raw_file ORDER BY rel_path").fetchall()
-    chain = conn.execute(
-        "SELECT seq, run_id, actor, action, ts, payload_sha256, prev_hash, entry_hash "
-        "FROM audit_event ORDER BY seq"
-    ).fetchall()
-    issues = conn.execute(
-        "SELECT i.*, f.rel_path FROM ingest_issue i JOIN raw_file f ON f.file_id = i.file_id "
-        "ORDER BY i.file_id, i.line_no"
-    ).fetchall()
+    file_paths = {int(f["file_id"]): str(f["rel_path"]) for f in files}
+
+    approval_source = "none"
+    approval_meta: dict | None = None
+    if include_inputs and str(run["rule_pack_version"]) in (RULE_PACK_V5, RULE_PACK_V6):
+        employee_ids = _run_employee_ids(conn, scope_json)
+        approval_path = work / "approval_ledger.csv"
+        if str(run["rule_pack_version"]) == RULE_PACK_V6:
+            approval_source = "v6-coverage"
+            approval_meta = export_coverage_csv(conn, employee_ids, approval_path)
+            expected = str(scope_json.get("approval_coverage_sha256") or "")
+        else:
+            approval_source = "v5-ledger"
+            approval_meta = export_approval_csv(conn, employee_ids, approval_path)
+            expected = str(scope_json.get("approval_ledger_sha256") or "")
+        if expected and approval_meta["digest"] != expected:
+            raise ValueError(
+                "审批台账在 run 之后发生变化，导出的包无法与 run 的 input_fingerprint 对齐；"
+                "请重新执行校验后再导出，不要用当前台账冒充历史输入")
 
     # 1) 结论明细 CSV（行级来源反查链：finding -> source_refs -> (rel_path, line_no)）
     findings_csv = work / "findings.csv"
-    _write_findings_csv(findings_csv, findings, conn)
+    _write_findings_csv(findings_csv, findings, file_paths)
 
-    # 2) 输入清单
+    # 2) 输入清单（只列本次 run 引用集合；审批台账作为 v5 合成输入追加）
     manifest_files = work / "input_files.csv"
     with manifest_files.open("w", encoding="utf-8", newline="") as fh:
         w = csv.writer(fh, lineterminator="\n")
         w.writerow(["rel_path", "sha256", "row_count", "kind"])
         for f in files:
-            w.writerow([f["rel_path"], f["sha256"], int(f["row_count"]), f["kind"]])
+            w.writerow(csv_safe_row([f["rel_path"], f["sha256"], int(f["row_count"]),
+                                     f["kind"]]))
+        if approval_meta is not None:
+            w.writerow(csv_safe_row(["approval_ledger.csv", approval_meta["sha256"],
+                                     int(approval_meta["rows"]), "approval"]))
 
     # 3) 审计链快照 + 独立校验器
     chain_json = work / "audit_chain.jsonl"
@@ -441,7 +873,8 @@ def export_package(conn: sqlite3.Connection, cfg: Config, run_id: str, *,
             fh.write(canonical_json({
                 "seq": int(c["seq"]), "run_id": c["run_id"], "actor": c["actor"], "action": c["action"],
                 "ts": c["ts"], "payload_sha256": c["payload_sha256"], "prev_hash": c["prev_hash"],
-                "entry_hash": c["entry_hash"],
+                "entry_hash": c["entry_hash"], "rule_pack_version": c["rule_pack_version"],
+                "segment_id": c["segment_id"],
             }) + "\n")
 
     # 4) 数据质量报表
@@ -450,8 +883,10 @@ def export_package(conn: sqlite3.Connection, cfg: Config, run_id: str, *,
         w = csv.writer(fh, lineterminator="\n")
         w.writerow(["rel_path", "line_no", "rule_id", "severity", "field", "raw_value", "detail"])
         for i in issues:
-            w.writerow([i["rel_path"], int(i["line_no"]), i["rule_id"], i["severity"],
-                        i["field_name"], i["raw_value"], i["detail"]])
+            w.writerow(csv_safe_row([
+                i["rel_path"], int(i["line_no"]), i["rule_id"], i["severity"],
+                i["field_name"], i["raw_value"], i["detail"],
+            ]))
 
     # 5) 对外结论集：只收"已登记人工结论"的条目（US-RV-01★）
     resp = responsibility_block(conn, cfg, run_id)
@@ -477,39 +912,108 @@ def export_package(conn: sqlite3.Connection, cfg: Config, run_id: str, *,
         if stale.name != "manifest.json":
             stale.unlink()
     if include_inputs:
-        collected = collect_package_inputs(conn, cfg, run_id)
+        collected = collect_package_inputs(conn, cfg, run_id, file_ids=input_ids)
+        if approval_meta is not None:
+            collected["entries"].append({
+                "file_id": 0, "rel_path": "approval_ledger.csv", "kind": "approval",
+                "sha256": approval_meta["sha256"], "bytes": approval_meta["bytes"],
+                "rows": approval_meta["rows"],
+                "arcname": f"{INPUTS_DIRNAME}/000-approval.csv",
+                "source": str(approval_meta["path"]),
+            })
+            collected["total_bytes"] += approval_meta["bytes"]
+            collected["approval_rows"] = approval_meta["rows"]
+            collected["approval_sha256"] = approval_meta["sha256"]
+        status = input_budget_status(collected["total_bytes"])
+        collected["warning"] = status in ("warning", "critical")
+        collected["critical"] = status == "critical"
+        collected["warn_bytes"] = EXPORT_INPUTS_WARN_BYTES
+        collected["critical_bytes"] = EXPORT_INPUTS_CRITICAL_BYTES
+        collected["warning_message"] = ""
+        collected["critical_message"] = ""
+        if status == "warning":
+            collected["warning_message"] = (
+                f"自含输入 {collected['total_bytes']:,} 字节已超过告警线 "
+                f"{EXPORT_INPUTS_WARN_BYTES:,} 字节（上限 {EXPORT_INPUTS_MAX_BYTES:,} 字节），"
+                "接近上限但仍在预算内；导出照常成功")
+            logger.warning("举证包导出接近输入上限：%s", collected["warning_message"])
+        elif status == "critical":
+            collected["warning_message"] = (
+                f"自含输入 {collected['total_bytes']:,} 字节已超过告警线 "
+                f"{EXPORT_INPUTS_WARN_BYTES:,} 字节（上限 {EXPORT_INPUTS_MAX_BYTES:,} 字节）")
+            collected["critical_message"] = (
+                f"自含输入 {collected['total_bytes']:,} 字节已超过临界线 "
+                f"{EXPORT_INPUTS_CRITICAL_BYTES:,} 字节（硬上限 {EXPORT_INPUTS_MAX_BYTES:,} 字节），"
+                "接近硬上限，需人工确认；导出照常成功")
+            logger.error("举证包导出接近硬上限：%s", collected["critical_message"])
     else:
         collected = {"entries": [], "missing": [], "total_bytes": 0,
-                     "reason": "调用方指定 --no-inputs：本包不含原始输入，接收方无法离线重放"}
+                     "reason": "调用方指定 --no-inputs：本包不含原始输入，接收方无法离线重放",
+                     "warning": False, "warn_bytes": EXPORT_INPUTS_WARN_BYTES,
+                     "critical": False, "critical_bytes": EXPORT_INPUTS_CRITICAL_BYTES,
+                     "warning_message": "", "critical_message": ""}
     inputs_manifest = work / INPUTS_MANIFEST_NAME
     inputs_doc = {"schema": "wca-package-inputs-v1", "run_id": run_id,
+                  "csv_formula_escape": CSV_FORMULA_ESCAPE,
                   "cap_bytes": EXPORT_INPUTS_MAX_BYTES,
-                  "selection_rule": "主数据(org/employee) ∪ 引用集合 ∪ 结论溯源引用 ∪ 未归属质量问题所在文件",
+                  "warn_bytes": EXPORT_INPUTS_WARN_BYTES,
+                  "critical_bytes": EXPORT_INPUTS_CRITICAL_BYTES,
+                  "warning": bool(collected.get("warning", False)),
+                  "warning_message": str(collected.get("warning_message") or ""),
+                  "critical": bool(collected.get("critical", False)),
+                  "critical_message": str(collected.get("critical_message") or ""),
+                  "selection_rule": ("主数据(org/employee) ∪ 引用集合 ∪ 结论溯源引用 ∪ "
+                                     "未归属质量问题所在文件 ∪ " +
+                                     ("v6 覆盖投影" if approval_source == "v6-coverage"
+                                      else "v5 审批台账")),
                   "total_bytes": collected["total_bytes"], "missing": collected["missing"],
                   "reason": collected["reason"],
+                  "approval_rows": int(collected.get("approval_rows", 0)),
+                  "approval_source": approval_source,
                   "entries": [{k: e[k] for k in ("file_id", "rel_path", "kind", "sha256",
-                                                 "bytes", "arcname")} for e in collected["entries"]]}
+                                                 "bytes", "arcname", "rows") if k in e}
+                              for e in collected["entries"]]}
     inputs_manifest.write_text(canonical_json(inputs_doc) + chr(10), encoding="utf-8")
     for e in collected["entries"]:
         shutil.copyfile(e["source"], work / e["arcname"])
 
-    verification = verify_chain(conn, cfg)
+    if chain_epoch:
+        verification = verify_chain(conn, cfg, upto_seq=chain_max_seq, segment=chain_epoch)
+    elif str(run["rule_pack_version"]) == RULE_PACK_V4 and audit_epoch(conn, RULE_PACK_V5):
+        verification = verify_chain(conn, cfg, upto_seq=chain_max_seq, legacy_only=True)
+    else:
+        verification = verify_chain(conn, cfg, upto_seq=chain_max_seq)
     triple = {
         "rule_pack_version": run["rule_pack_version"],
         "input_fingerprint": run["input_fingerprint"],
         "conclusion_digest": run["conclusion_digest"],
     }
     manifest = {
-        "schema": "wca-evidence-package-v1",
+        "schema": EVIDENCE_PACKAGE_SCHEMA,
         "run_id": run_id,
         "engine_version": run["engine_version"],
         "triple": triple,
-        "scope_json": json.loads(run["scope_json"]),
+        "scope_json": scope_json,
+        "audit_window": {"mode": "prefix_through_last_run_event",
+                         "max_seq": chain_max_seq,
+                         "segment_id": chain_epoch["epoch_id"] if chain_epoch else None},
+        **({"audit_segment": {
+            "epoch_id": chain_epoch["epoch_id"],
+            "rule_pack_version": chain_epoch["rule_pack_version"],
+            "prev_rule_pack_version": chain_epoch["prev_rule_pack_version"],
+            "prev_head_hash": chain_epoch["prev_head_hash"],
+            "activation_event_seq": int(chain_epoch["activation_event_seq"]),
+            "segment_start_seq": int(chain_epoch["segment_start_seq"]),
+            "segment_start_prev_hash": chain_epoch["segment_start_prev_hash"],
+            "switched_at": chain_epoch["switched_at"],
+            "activation_event": activation_event,
+        }} if chain_epoch else {}),
         "counts": {
             "findings": len(findings),
-            "input_files": len(files),
+            "input_files": len(files) + (1 if approval_meta is not None else 0),
             "audit_events": len(chain),
             "quality_issues": len(issues),
+            "approval_rows": int(collected.get("approval_rows", 0)),
             # 对外结论集只含已人工确认的条目；未确认的仍留在 findings.csv 里等处置
             "final_conclusions": len(resp["human_confirmations"]),
             "unsigned_pending": resp["unsigned_findings_excluded_from_conclusions"],
@@ -526,57 +1030,81 @@ def export_package(conn: sqlite3.Connection, cfg: Config, run_id: str, *,
                         "not_tested_count": len(nc["not_tested"])},
         # 输入自含（US-EX-01）：接收方拿着这个包就能自己重跑，不必再回头索要原始数据
         "inputs": {"packed": len(collected["entries"]),
+                   "csv_formula_escape": CSV_FORMULA_ESCAPE,
                    "total_bytes": collected["total_bytes"],
                    "cap_bytes": EXPORT_INPUTS_MAX_BYTES,
+                   "warn_bytes": EXPORT_INPUTS_WARN_BYTES,
+                   "critical_bytes": EXPORT_INPUTS_CRITICAL_BYTES,
+                   "warning": bool(collected.get("warning", False)),
+                   "warning_message": str(collected.get("warning_message") or ""),
+                   "critical": bool(collected.get("critical", False)),
+                   "critical_message": str(collected.get("critical_message") or ""),
                    "selection_rule": inputs_doc["selection_rule"],
+                   "approval_rows": int(collected.get("approval_rows", 0)),
+                   "approval_sha256": str(collected.get("approval_sha256") or ""),
+                   "approval_source": approval_source,
                    "missing": collected["missing"],
                    "reason": collected["reason"],
                    "replay_command": "python -m src.cli replay <本包.zip 或解包目录>"},
+        "approval_source": approval_source,
         "artifacts": [p.name for p in (findings_csv, manifest_files, chain_json, issues_csv,
                                        conclusions_csv, resp_path, nc_path, nc_md)]
                       + [INPUTS_MANIFEST_NAME] + [e["arcname"] for e in collected["entries"]],
         "disclaimer": "本包不产出应付金额（需求 D-03）；金额是 HR 负责人具名录入的人工结论，不属于引擎输出；"
                       "数据为合成数据，非任何真实个人信息。",
     }
+    # 自校验和覆盖 manifest.json 内除自身以外的全部字段；它是“防单点改动”的
+    # 自洽检查，不是签名——能重算校验和的人仍可伪造，必须靠包外三元组锚点。
+    manifest[MANIFEST_CHECKSUM_FIELD] = manifest_checksum(manifest)
     manifest_path = work / "manifest.json"
     manifest_path.write_text(canonical_json(manifest) + "\n", encoding="utf-8")
     # manifest 自身的哈希，用于「重跑后比对包是否等价」
     manifest_sha = sha256_hex(manifest_path.read_bytes())
 
     zip_path = cfg.packages_dir / f"{run_id}.zip"
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("README.txt", PACKAGE_README)
-        for p in (manifest_path, findings_csv, manifest_files, chain_json, issues_csv,
-                  conclusions_csv, resp_path, nc_path, nc_md):
-            zf.write(p, arcname=p.name)
-        zf.write(inputs_manifest, arcname=INPUTS_MANIFEST_NAME)
-        for e in collected["entries"]:
-            zf.write(work / e["arcname"], arcname=e["arcname"])
-        zf.writestr("verify.py", VERIFY_SNIPPET)
+    tmp_zip = cfg.packages_dir / f".{run_id}.{os.getpid()}.zip.tmp"
+    try:
+        with zipfile.ZipFile(tmp_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("README.txt", PACKAGE_README)
+            for p in (manifest_path, findings_csv, manifest_files, chain_json, issues_csv,
+                      conclusions_csv, resp_path, nc_path, nc_md):
+                zf.write(p, arcname=p.name)
+            zf.write(inputs_manifest, arcname=INPUTS_MANIFEST_NAME)
+            for e in collected["entries"]:
+                zf.write(work / e["arcname"], arcname=e["arcname"])
+            zf.writestr("verify.py", VERIFY_SNIPPET)
+        os.replace(tmp_zip, zip_path)
+    except Exception:
+        tmp_zip.unlink(missing_ok=True)
+        raise
 
-    conn.execute(
-        "INSERT INTO evidence_package(package_id, run_id, created_at, rule_pack_version, "
-        "input_fingerprint, conclusion_digest, manifest_sha256, package_dir, row_count) "
-        "VALUES(?,?,?,?,?,?,?,?,?) "
-        "ON CONFLICT(package_id) DO UPDATE SET created_at = excluded.created_at, "
-        "manifest_sha256 = excluded.manifest_sha256, package_dir = excluded.package_dir",
-        (
-            f"pkg-{run_id}", run_id,
-            datetime.now(CN_TZ).strftime("%Y-%m-%dT%H:%M:%S+08:00"),
-            triple["rule_pack_version"], triple["input_fingerprint"], triple["conclusion_digest"],
-            manifest_sha, str(zip_path), len(findings),
-        ),
-    )
-    append_audit(
-        conn, run_id=run_id, actor="system:evidence", action="evidence.export",
-        payload={"triple": triple, "manifest_sha256": manifest_sha, "zip": zip_path.name}, cfg=cfg,
-    )
+    # 包登记与审计事件同事务；zip/文件已落盘，DB 失败时包可能残留，
+    # 但不会出现“登记了包、审计链里没有这次导出”的情况。
+    with transaction_if_needed(conn):
+        conn.execute(
+            "INSERT INTO evidence_package(package_id, run_id, created_at, rule_pack_version, "
+            "input_fingerprint, conclusion_digest, manifest_sha256, package_dir, row_count) "
+            "VALUES(?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(package_id) DO UPDATE SET created_at = excluded.created_at, "
+            "manifest_sha256 = excluded.manifest_sha256, package_dir = excluded.package_dir",
+            (
+                f"pkg-{run_id}", run_id,
+                datetime.now(CN_TZ).strftime("%Y-%m-%dT%H:%M:%S+08:00"),
+                triple["rule_pack_version"], triple["input_fingerprint"],
+                triple["conclusion_digest"], manifest_sha, str(zip_path), len(findings),
+            ),
+        )
+        append_audit(
+            conn, run_id=run_id, actor="system:evidence", action="evidence.export",
+            payload={"triple": triple, "manifest_sha256": manifest_sha, "zip": zip_path.name},
+            cfg=cfg,
+        )
     manifest["manifest_sha256"] = manifest_sha
     manifest["package_zip"] = str(zip_path)
     return manifest
 
 
-def _write_findings_csv(path: Path, findings, conn: sqlite3.Connection) -> None:
+def _write_findings_csv(path: Path, findings, file_paths: dict[int, str]) -> None:
     with path.open("w", encoding="utf-8", newline="") as fh:
         w = csv.writer(fh, lineterminator="\n")
         w.writerow([
@@ -586,24 +1114,24 @@ def _write_findings_csv(path: Path, findings, conn: sqlite3.Connection) -> None:
         ])
         for f in findings:
             refs = json.loads(f["source_refs"])
-            loc = _source_loc(conn, refs)
-            w.writerow([
+            loc = _source_loc(refs, file_paths)
+            w.writerow(csv_safe_row([
                 f["rule_id"], f["rule_version"], f["emp_id"], f["work_date"], f["period_key"],
                 f["severity"], _sev_label(f["severity"]), f["citation_ids"], f["metric_json"],
                 loc[0], loc[1], f["explanation"],
-            ])
+            ]))
 
 
-def _source_loc(conn: sqlite3.Connection, refs: list[dict]) -> tuple[str, str]:
+def _source_loc(refs: list[dict], file_paths: dict[int, str]) -> tuple[str, str]:
     paths: list[str] = []
     lines: list[str] = []
     for r in refs:
         fid = r.get("file_id")
         if fid is None:
             continue
-        row = conn.execute("SELECT rel_path FROM raw_file WHERE file_id = ?", (fid,)).fetchone()
-        if row:
-            paths.append(row["rel_path"])
+        path = file_paths.get(int(fid))
+        if path:
+            paths.append(path)
             lines.append(str(r.get("line_no")))
     return (";".join(dict.fromkeys(paths))), (";".join(lines))
 
@@ -615,59 +1143,342 @@ def _sev_label(sev: str) -> str:
 VERIFY_SNIPPET = '''"""独立复核脚本：不依赖本项目代码，只用标准库重算 hash 链并校验包内原始输入的哈希。
 
 用法：unzip pkg-<run_id>.zip && python verify.py
-期望输出：CHAIN OK + INPUTS OK + 三元组。链与输入哈希一致说明**包没被改写**；
-结论是否一致要重跑引擎（`python -m src.cli replay <包>`），本脚本不假装自己能算结论。
+可选外部锚点：python verify.py --expect-triple rp,input_fp,conclusion_digest
+（也可用环境变量 WCA_EXPECT_TRIPLE）；不传时仍按包内自洽规则校验。
+期望输出：EPOCH OK + CHAIN OK + INPUTS OK + 三元组 + RESULT OK。
+任一校验失败都会打印 RESULT FAIL 并返回非零退出码；链与输入哈希一致只说明
+**包内自洽**，结论是否一致要重跑引擎（`python -m src.cli replay <包>`）。
 """
+import argparse
 import hashlib
 import json
+import os
+import re
+import sys
+from pathlib import Path, PurePosixPath
 
 GENESES = "wca-audit-chain-v1"
+MANIFEST_CHECKSUM_FIELD = "manifest_checksum"
+TRIPLE_KEYS = ("rule_pack_version", "input_fingerprint", "conclusion_digest")
+EVIDENCE_SCHEMA_RE = re.compile(r"^wca-evidence-package-v(\d+)$")
 
 
 def h(s):
     return hashlib.sha256(s.encode()).hexdigest()
 
 
-manifest = json.load(open("manifest.json", encoding="utf-8"))
-engine = manifest["engine_version"]
-prev = h(f"{GENESES}|{engine}|" + manifest["triple"]["rule_pack_version"])
-ok = True
-n = 0
-for line in open("audit_chain.jsonl", encoding="utf-8"):
-    e = json.loads(line)
-    expect = h(f"{prev}|{e['seq']}|{e['actor']}|{e['action']}|{e['ts']}|{e['payload_sha256']}")
-    if e["prev_hash"] != prev or e["entry_hash"] != expect:
+def schema_version(doc):
+    """解析 wca-evidence-package-vN；缺失/未知返回 None（调用方失败关闭）。"""
+    raw = doc.get("schema")
+    if not isinstance(raw, str):
+        return None
+    match = EVIDENCE_SCHEMA_RE.match(raw)
+    return int(match.group(1)) if match else None
+
+
+def checksum_of(doc):
+    """与导出方同口径：排除 manifest_checksum 自身后做规范 JSON + SHA-256。"""
+    payload = {k: v for k, v in doc.items() if k != MANIFEST_CHECKSUM_FIELD}
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return h(raw)
+
+
+ANCHOR_KEYS = ("schema_version", "rule_pack_version", "input_fingerprint",
+               "conclusion_digest")
+
+
+def anchor_schema_version(value):
+    """外部锚点第一段：接受 2 / v2 / wca-evidence-package-v2。"""
+    text = str(value).strip()
+    if re.match(r"^(?:v|V)?\d+$", text):
+        return int(text.lstrip("vV"))
+    raw = text
+    if isinstance(raw, str) and EVIDENCE_SCHEMA_RE.match(raw):
+        return int(EVIDENCE_SCHEMA_RE.match(raw).group(1))
+    return None
+
+
+def parse_anchor(raw):
+    parts = [p.strip() for p in str(raw).split(",")]
+    if len(parts) != 4 or any(not p for p in parts):
+        raise ValueError("期望四元组格式非法（需要 schema_version,rule_pack_version,"
+                         "input_fingerprint,conclusion_digest 四段非空值）")
+    version = anchor_schema_version(parts[0])
+    if version is None:
+        raise ValueError("schema_version 无法识别：" + parts[0])
+    return {"schema_version": version, "rule_pack_version": parts[1],
+            "input_fingerprint": parts[2], "conclusion_digest": parts[3]}
+
+
+def expected_anchors_from_args():
+    """解析 --expect-anchor / WCA_EXPECT_ANCHOR；无四元组时回退 --expect-triple。"""
+    parser = argparse.ArgumentParser(
+        description="独立复核举证包；可选传入包外记录的三/四元组作为外部锚点。")
+    parser.add_argument(
+        "--expect-anchor",
+        help="外部期望四元组：schema_version,rule_pack_version,input_fingerprint,"
+             "conclusion_digest；也可用环境变量 WCA_EXPECT_ANCHOR")
+    parser.add_argument(
+        "--expect-triple",
+        help="外部期望三元组：rule_pack_version,input_fingerprint,conclusion_digest"
+             "（不约束 schema）；也可用环境变量 WCA_EXPECT_TRIPLE")
+    args = parser.parse_args()
+    raw_anchor = args.expect_anchor if args.expect_anchor is not None \
+        else os.environ.get("WCA_EXPECT_ANCHOR")
+    raw_triple = args.expect_triple if args.expect_triple is not None \
+        else os.environ.get("WCA_EXPECT_TRIPLE")
+    if raw_anchor:
+        try:
+            return parse_anchor(raw_anchor), None, None
+        except ValueError as exc:
+            return None, None, "ANCHOR FAIL " + str(exc)
+    if raw_triple:
+        parts = [p.strip() for p in str(raw_triple).split(",")]
+        if len(parts) != 3 or any(not p for p in parts):
+            return None, None, "TRIPLE FAIL 期望三元组格式非法（需要三段逗号分隔的非空值）"
+        return None, dict(zip(TRIPLE_KEYS, parts)), None
+    return None, None, None
+
+
+def safe_path(root, arcname):
+    """包内相对路径约束：拒绝空值、绝对路径、UNC、驱动器号、.. 与解析后越界。"""
+    if not isinstance(arcname, str) or not arcname.strip():
+        raise ValueError("包内路径非法：arcname 为空")
+    normalized = arcname.replace(chr(92), "/")
+    if normalized.startswith("/"):
+        raise ValueError("包内路径非法（绝对路径/UNC）：" + arcname)
+    if re.match(r"^[A-Za-z]:", normalized):
+        raise ValueError("包内路径非法（含驱动器号）：" + arcname)
+    parts = PurePosixPath(normalized).parts
+    if not parts or ".." in parts:
+        raise ValueError("包内路径非法（包含上级目录 ..）：" + arcname)
+    root_resolved = root.resolve()
+    target = root_resolved.joinpath(*parts).resolve()
+    if target != root_resolved and root_resolved not in target.parents:
+        raise ValueError("包内路径越界（不在包根目录内）：" + arcname)
+    return target
+
+
+def require(manifest, key, where):
+    value = manifest.get(key)
+    if value is None:
+        raise ValueError(where + " 缺字段：" + key)
+    return value
+
+
+def main():
+    root = Path(__file__).resolve().parent
+    try:
+        manifest = json.loads(safe_path(root, "manifest.json").read_text(encoding="utf-8"))
+    except Exception as exc:
+        print("MANIFEST FAIL", type(exc).__name__, str(exc))
+        print("RESULT FAIL")
+        return 1
+    if not isinstance(manifest, dict):
+        print("MANIFEST FAIL manifest 不是对象")
+        print("RESULT FAIL")
+        return 1
+
+    schema_ver = schema_version(manifest)
+    if schema_ver is None:
+        print("MANIFEST FAIL manifest.schema 缺失或无法识别：",
+              repr(manifest.get("schema")))
+        print("RESULT FAIL")
+        return 1
+    print("MANIFEST SCHEMA v" + str(schema_ver), "OK")
+
+    checksum_present = MANIFEST_CHECKSUM_FIELD in manifest
+    if schema_ver >= 2 and not checksum_present:
+        print("MANIFEST FAIL 新 schema v" + str(schema_ver) + " 包缺少 manifest_checksum")
+        print("RESULT FAIL")
+        return 1
+    if checksum_present:
+        try:
+            stored = manifest.get(MANIFEST_CHECKSUM_FIELD)
+            if not isinstance(stored, str) or stored != checksum_of(manifest):
+                print("MANIFEST FAIL manifest_checksum 不一致（字段被改动或校验和未同步重算）")
+                print("RESULT FAIL")
+                return 1
+            print("MANIFEST CHECKSUM OK")
+        except Exception as exc:
+            print("MANIFEST FAIL 无法计算 manifest_checksum：", type(exc).__name__, str(exc))
+            print("RESULT FAIL")
+            return 1
+    else:
+        print("MANIFEST CHECKSUM MISSING")
+
+    try:
+        engine = require(manifest, "engine_version", "manifest")
+        triple = require(manifest, "triple", "manifest")
+        if not isinstance(triple, dict):
+            raise ValueError("manifest.triple 不是对象")
+        for key in ("rule_pack_version", "input_fingerprint", "conclusion_digest"):
+            value = triple.get(key)
+            if not isinstance(value, str) or not value:
+                raise ValueError("manifest.triple 缺字段或为空：" + key)
+        require(manifest, "run_id", "manifest")
+        for key in ("scope_json", "counts", "chain_verification"):
+            if not isinstance(require(manifest, key, "manifest"), dict):
+                raise ValueError("manifest." + key + " 不是对象")
+    except Exception as exc:
+        print("MANIFEST FAIL", str(exc))
+        print("RESULT FAIL")
+        return 1
+
+    expected_anchor, expected, expected_error = expected_anchors_from_args()
+    if expected_error:
+        print(expected_error)
+        print("RESULT FAIL")
+        return 1
+
+    segment = manifest.get("audit_segment") or {}
+    prev = segment.get("segment_start_prev_hash") or h(
+        f"{GENESES}|{engine}|" + triple["rule_pack_version"])
+    epoch_ok = True
+    activation = segment.get("activation_event") or {}
+    if activation:
+        try:
+            expect_act = h(f"{activation['prev_hash']}|{activation['seq']}|{activation['actor']}"
+                           f"|{activation['action']}|{activation['ts']}|{activation['payload_sha256']}")
+            epoch_ok = (activation["entry_hash"] == expect_act
+                        and activation["entry_hash"] == segment["segment_start_prev_hash"]
+                        and activation["prev_hash"] == segment["prev_head_hash"])
+        except Exception:
+            epoch_ok = False
+    print("EPOCH", "OK" if epoch_ok else "FAIL")
+
+    ok = True
+    n = 0
+    try:
+        with safe_path(root, "audit_chain.jsonl").open(encoding="utf-8") as fh:
+            for line in fh:
+                if not line.strip():
+                    continue
+                e = json.loads(line)
+                expect = h(f"{prev}|{e['seq']}|{e['actor']}|{e['action']}|{e['ts']}|"
+                           f"{e['payload_sha256']}")
+                if e["prev_hash"] != prev or e["entry_hash"] != expect:
+                    ok = False
+                    print("BROKEN at seq", e.get("seq"))
+                    break
+                prev = e["entry_hash"]
+                n += 1
+    except Exception as exc:
         ok = False
-        print("BROKEN at seq", e["seq"])
-        break
-    prev = e["entry_hash"]
-    n += 1
-print("CHAIN", "OK" if ok else "FAIL", "events=", n)
-print("TRIPLE", json.dumps(manifest["triple"], sort_keys=True))
+        print("CHAIN FAIL 无法读取 audit_chain.jsonl：", type(exc).__name__, str(exc))
+    print("CHAIN", "OK" if ok and epoch_ok else "FAIL", "events=", n,
+          "segment=", segment.get("epoch_id", "legacy"))
+    print("TRIPLE", json.dumps(triple, sort_keys=True))
 
-# 包内原始输入：逐个按登记 sha256 复算。这一步不需要本项目代码，
-# 但它只证明「数据没被换过」；结论要重跑才可比，见 manifest.inputs.replay_command。
-import os
+    triple_ok = True
+    anchor_ok = True
+    if expected_anchor:
+        mismatched = []
+        if expected_anchor["schema_version"] != schema_ver:
+            mismatched.append("schema_version")
+        for key in TRIPLE_KEYS:
+            if expected_anchor[key] != triple.get(key):
+                mismatched.append(key)
+        if mismatched:
+            anchor_ok = False
+            print("ANCHOR FAIL 外部锚点与包内不一致：", ",".join(mismatched))
+            for key in mismatched:
+                expected_value = expected_anchor[key]
+                actual_value = schema_ver if key == "schema_version" else triple.get(key)
+                print("  ", key, "期望", expected_value, "包内", str(actual_value))
+        else:
+            print("ANCHOR CHECK OK")
+    elif expected:
+        mismatched = [k for k in TRIPLE_KEYS if expected[k] != triple.get(k)]
+        if mismatched:
+            triple_ok = False
+            print("TRIPLE FAIL 外部期望三元组与包内不一致：", ",".join(mismatched))
+            for key in mismatched:
+                print("  ", key, "期望", expected[key], "包内", str(triple.get(key)))
+        else:
+            print("TRIPLE CHECK OK")
+    scope = manifest.get("scope_json") or {}
+    if scope.get("rule_pack_id") and scope["rule_pack_id"] != triple["rule_pack_version"]:
+        triple_ok = False
+        print("TRIPLE FAIL 包内 triple.rule_pack_version 与 scope_json.rule_pack_id 不一致")
+    if (segment.get("rule_pack_version")
+            and segment["rule_pack_version"] != triple["rule_pack_version"]):
+        triple_ok = False
+        print("TRIPLE FAIL 包内 triple.rule_pack_version 与 audit_segment.rule_pack_version 不一致")
 
-inputs_manifest = "inputs/manifest.json"
-if os.path.isfile(inputs_manifest):
-    im = json.load(open(inputs_manifest, encoding="utf-8"))
-    bad, checked = [], 0
-    for entry in im["entries"]:
-        if not os.path.isfile(entry["arcname"].replace("/", os.sep)):
-            bad.append(entry["arcname"] + " (缺失)")
-            continue
-        with open(entry["arcname"].replace("/", os.sep), "rb") as fh:
-            digest = hashlib.sha256(fh.read()).hexdigest()
-        checked += 1
-        if digest != entry["sha256"]:
-            bad.append(entry["rel_path"] + " (哈希不一致)")
-    print("INPUTS", "OK" if not bad else "FAIL", "checked=", checked,
-          "packed=", len(im["entries"]), "missing_at_export=", len(im["missing"]))
-    for b in bad:
-        print("  BAD", b)
-    print("INPUT_BYTES", im["total_bytes"], "SELECTION", im["selection_rule"])
-else:
-    print("INPUTS NONE（本包未自含原始数据，无法离线重放）")
+    declared_counts = manifest.get("counts") or {}
+    if declared_counts.get("audit_events") is not None:
+        try:
+            if int(declared_counts["audit_events"]) != n:
+                ok = False
+                print("CHAIN FAIL manifest.counts.audit_events 与实际事件数不一致")
+        except (TypeError, ValueError):
+            ok = False
+            print("CHAIN FAIL manifest.counts.audit_events 不是整数")
 
+    inputs_ok = True
+    inputs_manifest = safe_path(root, "inputs/manifest.json")
+    if inputs_manifest.is_file():
+        try:
+            im = json.loads(inputs_manifest.read_text(encoding="utf-8"))
+            entries = im["entries"]
+            if not isinstance(entries, list):
+                raise ValueError("inputs/manifest.json entries 不是数组")
+            missing = im["missing"]
+            total_bytes = im["total_bytes"]
+            selection_rule = im["selection_rule"]
+            bad, checked = [], 0
+            for entry in entries:
+                try:
+                    path = safe_path(root, entry["arcname"])
+                except Exception as exc:
+                    bad.append(str(exc))
+                    continue
+                if not path.is_file():
+                    bad.append(str(entry["arcname"]) + " (缺失)")
+                    continue
+                with path.open("rb") as fh:
+                    digest = hashlib.sha256(fh.read()).hexdigest()
+                checked += 1
+                if digest != entry.get("sha256"):
+                    bad.append(str(entry.get("rel_path", entry["arcname"])) + " (哈希不一致)")
+            print("INPUTS", "OK" if not bad else "FAIL", "checked=", checked,
+                  "packed=", len(entries), "missing_at_export=", len(missing))
+            for b in bad:
+                print("  BAD", b)
+            print("INPUT_BYTES", total_bytes, "SELECTION", selection_rule)
+            inputs_ok = not bad
+            declared_inputs = manifest.get("inputs") or {}
+            if "inputs" not in manifest:
+                inputs_ok = False
+                print("INPUTS FAIL manifest 缺字段：inputs")
+            elif declared_inputs.get("packed") is not None:
+                if int(declared_inputs["packed"]) != len(entries):
+                    inputs_ok = False
+                    print("INPUTS FAIL manifest.inputs.packed 与包内 entries 数量不一致")
+            if declared_inputs.get("total_bytes") is not None:
+                if int(declared_inputs["total_bytes"]) != int(total_bytes):
+                    inputs_ok = False
+                    print("INPUTS FAIL manifest.inputs.total_bytes 与 inputs/manifest 不一致")
+        except Exception as exc:
+            inputs_ok = False
+            print("INPUTS FAIL 无法读取 inputs/manifest.json：", type(exc).__name__, str(exc))
+    else:
+        print("INPUTS NONE（本包未自含原始数据，无法离线重放）")
+        declared_inputs = manifest.get("inputs") or {}
+        try:
+            if int(declared_inputs.get("packed") or 0) > 0:
+                inputs_ok = False
+                print("INPUTS FAIL manifest 声明有输入，但包内没有 inputs/manifest.json")
+        except (TypeError, ValueError):
+            inputs_ok = False
+            print("INPUTS FAIL manifest.inputs.packed 不是整数")
+
+    result_ok = epoch_ok and ok and triple_ok and anchor_ok and inputs_ok
+    print("RESULT", "OK" if result_ok else "FAIL")
+    return 0 if result_ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
 '''

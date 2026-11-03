@@ -61,6 +61,51 @@ def digest_of(obj: object) -> str:
     return sha256_hex(canonical_bytes(obj))
 
 
+MANIFEST_CHECKSUM_FIELD = "manifest_checksum"
+EVIDENCE_PACKAGE_SCHEMA_V1 = "wca-evidence-package-v1"
+EVIDENCE_PACKAGE_SCHEMA_V2 = "wca-evidence-package-v2"
+# 当前导出使用 v2；v1 是既有历史包（可能没有 manifest_checksum）。
+EVIDENCE_PACKAGE_SCHEMA = EVIDENCE_PACKAGE_SCHEMA_V2
+_EVIDENCE_SCHEMA_RE = re.compile(r"^wca-evidence-package-v(\d+)$")
+
+
+def evidence_schema_version(value: object) -> int | None:
+    """解析 `wca-evidence-package-vN`；未知/缺失返回 None，由调用方失败关闭。"""
+    if not isinstance(value, str):
+        return None
+    match = _EVIDENCE_SCHEMA_RE.match(value)
+    return int(match.group(1)) if match else None
+
+
+_ANCHOR_SCHEMA_RE = re.compile(r"^(?:v|V)?(\d+)$")
+
+
+def anchor_schema_version(value: object) -> int | None:
+    """外部锚点第一段：接受整数、`v2`、`2` 或完整 `wca-evidence-package-v2`。"""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    match = _ANCHOR_SCHEMA_RE.match(text)
+    if match:
+        return int(match.group(1))
+    return evidence_schema_version(text)
+
+
+def manifest_checksum(doc: dict) -> str:
+    """manifest 自校验和：覆盖除 `manifest_checksum` 自身以外的全部字段。
+
+    口径与包内 verify.py 独立实现必须逐字节一致：规范 JSON（key 排序、
+    无空白、保留中文）后做 SHA-256。它只能发现“单个字段被改而校验和没重算”，
+    不能替代签名或外部可信锚点。
+    """
+    payload = {k: v for k, v in doc.items() if k != MANIFEST_CHECKSUM_FIELD}
+    return sha256_hex(canonical_json(payload))
+
+
 def parse_timestamp(value: object, *, assume_cn_tz: bool = True) -> datetime:
     """Parse a timestamp into an aware datetime in +08:00.
 
@@ -144,6 +189,52 @@ def percentile(sorted_values: list[int], pct: int) -> int:
     rank = math.ceil(pct / 100 * n)
     rank = min(max(rank, 1), n)
     return sorted_values[rank - 1]
+
+
+# ---------------------------------------------------------------- CSV 公式注入防护
+# 选 `'` 前缀而不是 OWASP 的制表符前缀：Excel/LibreOffice 都把字段首个 `'` 视为
+# “强制文本”标记且不在单元格里显示；制表符前缀会留在单元格内，也容易被后续
+# strip/裁剪流程吃掉。只在首字符命中公式起始字符时加前缀，普通中文/数字/日期不变。
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r", "\n")
+# 包内 inputs/manifest.json 用这个字段声明“本包的 CSV 已按 `'` 前缀转义”；
+# 重放只在看到该声明时才撤销前缀，旧包（无字段）按原始文本导入，避免误改历史值。
+CSV_FORMULA_ESCAPE = "apostrophe"
+
+
+def _looks_like_formula(value: str) -> bool:
+    """去掉任意数量的前导 `'` 后，首字符是否仍是公式起始字符。
+
+    这样原始值 `'=cmd` 会编码成 `''=cmd`，重放时只剥一层，仍能精确还原；
+    普通以 `'` 开头但后接中文的文本不受影响。
+    """
+    body = value.lstrip("'")
+    return bool(body) and body[0] in _FORMULA_PREFIXES
+
+
+def csv_safe_cell(value: object) -> object:
+    """单个 CSV 单元格的公式注入防护；非字符串（含 None/int）原样返回。"""
+    if isinstance(value, str) and _looks_like_formula(value):
+        return "'" + value
+    return value
+
+
+def csv_safe_row(row) -> list:
+    """逐单元格套用同一个规则，避免各导出函数各写一套。"""
+    return [csv_safe_cell(v) for v in row]
+
+
+def csv_unescape_cell(value: object) -> object:
+    """撤销 `csv_safe_cell` 的防护前缀。
+
+    只识别“若干个前导 `'` 后紧跟公式起始字符”的形态，并且只剥一层；普通以
+    `'` 开头但后接中文的业务值（例如 `'普通文本`）不会被改动。导入方默认不启用，
+    只有重放举证包时按导出约定撤销。
+    """
+    if isinstance(value, str):
+        body = value.lstrip("'")
+        if len(value) > len(body) and body and body[0] in _FORMULA_PREFIXES:
+            return value[1:]
+    return value
 
 
 NUM_RE = re.compile(r"(?<![0-9A-Za-z.])[-+]?\d[\d,]*(?:\.\d+)?(?![0-9A-Za-z])")

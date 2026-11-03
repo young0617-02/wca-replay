@@ -7,15 +7,17 @@ from __future__ import annotations
 
 import csv
 import json
-import sqlite3
+import os
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
 from .config import Config
+from .db import Connection, transaction_if_needed
 from .evidence import append_audit
 from .rules.findings import SEV_DEFENSIBLE, SEV_REVIEW, SEV_VIOLATION, SEV_LABEL_ZH, SEV_RANK
-from .util import CN_TZ
+from .util import CN_TZ, csv_safe_row
 
 
 @dataclass
@@ -50,7 +52,7 @@ HEADER = ["emp_id", "pseudonym", "work_date", "period_key", "severity", "分级"
           "触发规则ID", "条文依据", "指标(整数分/分钟)", "行级来源", "解释"]
 
 
-def build_anomalies(conn: sqlite3.Connection, run_id: str) -> list[AnomalyItem]:
+def build_anomalies(conn: Connection, run_id: str) -> list[AnomalyItem]:
     rows = conn.execute(
         # LEFT JOIN：O-2 之后存在「未归属」结论（表头缺列、员工不存在等），
         # 用 INNER JOIN 会把它们从异常报表里悄悄丢掉。
@@ -93,7 +95,7 @@ def build_anomalies(conn: sqlite3.Connection, run_id: str) -> list[AnomalyItem]:
     return out
 
 
-def _with_rel_path(conn: sqlite3.Connection, refs: list[dict]) -> list[dict]:
+def _with_rel_path(conn: Connection, refs: list[dict]) -> list[dict]:
     out = []
     for ref in refs:
         fid = ref.get("file_id")
@@ -113,17 +115,20 @@ def severity_rollup(anomalies: list[AnomalyItem]) -> dict[str, int]:
     return counts
 
 
-def rule_hit_counts(conn: sqlite3.Connection, run_id: str) -> list[dict]:
+def rule_hit_counts(conn: Connection, run_id: str) -> list[dict]:
+    # 同一 run 内同一规则/分级按一组统计；rule_version 用 MAX 聚合，既满足 PG 的
+    # GROUP BY 要求，又不改变既有分组行数与“一行一规则/分级”的口径。
     rows = conn.execute(
-        "SELECT rule_id, rule_version, severity, COUNT(*) AS c FROM finding WHERE run_id = ? "
-        "GROUP BY rule_id, severity ORDER BY c DESC",
+        "SELECT rule_id, MAX(rule_version) AS rule_version, severity, COUNT(*) AS c "
+        "FROM finding WHERE run_id = ? "
+        "GROUP BY rule_id, severity ORDER BY c DESC, rule_id, severity",
         (run_id,),
     ).fetchall()
     return [{"rule_id": r["rule_id"], "rule_version": r["rule_version"], "severity": r["severity"],
              "count": int(r["c"])} for r in rows]
 
 
-def worst_streak(conn: sqlite3.Connection, run_id: str, severity: str = SEV_VIOLATION) -> dict:
+def worst_streak(conn: Connection, run_id: str, severity: str = SEV_VIOLATION) -> dict:
     """连续触发同一级别异常的最长天数（严格按日历相邻日计）——
     面试里「你怎么证明不是碰巧一条」的那块证据。"""
     rows = conn.execute(
@@ -155,20 +160,33 @@ def worst_streak(conn: sqlite3.Connection, run_id: str, severity: str = SEV_VIOL
     return best
 
 
-def write_anomaly_report(conn: sqlite3.Connection, cfg: Config, run_id: str,
+def write_anomaly_report(conn: Connection, cfg: Config, run_id: str,
                          path: Path | None = None) -> Path:
+    """写异常报表：先落同目录临时文件，成功后 os.replace 原子替换目标。
+
+    失败时旧文件保持不变，也不会留下半截 CSV；调用方不能只凭 rc 判断有没有产物。
+    """
     anomalies = build_anomalies(conn, run_id)
     out = path or (cfg.reports_dir / f"异常报表-{run_id}.csv")
     out.parent.mkdir(parents=True, exist_ok=True)
-    with out.open("w", encoding="utf-8-sig", newline="") as fh:
-        w = csv.writer(fh, lineterminator="\n")
-        w.writerow(HEADER)
-        for a in anomalies:
-            w.writerow(a.as_row())
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{out.name}.", suffix=".tmp",
+                                    dir=str(out.parent))
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        with tmp.open("w", encoding="utf-8-sig", newline="") as fh:
+            w = csv.writer(fh, lineterminator="\n")
+            w.writerow(HEADER)
+            for a in anomalies:
+                w.writerow(csv_safe_row(a.as_row()))
+        os.replace(tmp, out)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
     return out
 
 
-def decide_review(conn: sqlite3.Connection, cfg: Config, review_id: int, reviewer: str,
+def decide_review(conn: Connection, cfg: Config, review_id: int, reviewer: str,
                   decision: str, note: str, *, amount_cents: int | None = None) -> dict:
     """人工复核门禁。REVIEW/VIOLATION 结论必须有复核记录才算闭环（audit 追加，不改历史）。
 
@@ -188,25 +206,26 @@ def decide_review(conn: sqlite3.Connection, cfg: Config, review_id: int, reviewe
     if row["decided_at"]:
         raise ValueError(f"review_id={review_id} 已有复核结论，不得覆盖（只允许追加新单）")
     ts = datetime.now(CN_TZ).isoformat()
-    conn.execute(
-        "UPDATE review_item SET status = ?, reviewer = ?, decided_at = ?, note = ?, "
-        "amount_cents_input = ?, amount_entered_by = ?, amount_entered_at = ? WHERE review_id = ?",
-        (decision, reviewer, ts, note, amount_cents,
-         f"human:{reviewer}" if amount_cents is not None else None,
-         ts if amount_cents is not None else None, review_id),
-    )
-    seq, entry = append_audit(
-        conn, run_id=row["run_id"], actor=f"human:{reviewer}", action="review.decision",
-        payload={"review_id": review_id, "source_type": row["source_type"],
-                 "source_id": row["source_id"], "decision": decision, "note": note,
-                 # 金额进审计链是**人工录入**的记录（谁录的、何时），不是引擎输出
-                 "amount_cents_input": amount_cents},
-        ts=ts, cfg=cfg,
-    )
+    with transaction_if_needed(conn):
+        conn.execute(
+            "UPDATE review_item SET status = ?, reviewer = ?, decided_at = ?, note = ?, "
+            "amount_cents_input = ?, amount_entered_by = ?, amount_entered_at = ? WHERE review_id = ?",
+            (decision, reviewer, ts, note, amount_cents,
+             f"human:{reviewer}" if amount_cents is not None else None,
+             ts if amount_cents is not None else None, review_id),
+        )
+        seq, entry = append_audit(
+            conn, run_id=row["run_id"], actor=f"human:{reviewer}", action="review.decision",
+            payload={"review_id": review_id, "source_type": row["source_type"],
+                     "source_id": row["source_id"], "decision": decision, "note": note,
+                     # 金额进审计链是**人工录入**的记录（谁录的、何时），不是引擎输出
+                     "amount_cents_input": amount_cents},
+            ts=ts, cfg=cfg,
+        )
     return {"review_id": review_id, "decision": decision, "audit_seq": seq, "entry_hash": entry}
 
 
-def review_queue(conn: sqlite3.Connection, *, run_id: str | None = None,
+def review_queue(conn: Connection, *, run_id: str | None = None,
                  only_open: bool = True, limit: int = 200) -> list[dict]:
     """复核台队列：结论 + 条文 + 行级来源 + 已有复核记录，一条查询取全（视图②的数据源）。"""
     where = ["r.status = 'OPEN'"] if only_open else ["1=1"]
@@ -236,7 +255,7 @@ def review_queue(conn: sqlite3.Connection, *, run_id: str | None = None,
     return [dict(r) for r in rows]
 
 
-def review_backlog(conn: sqlite3.Connection) -> list[dict]:
+def review_backlog(conn: Connection) -> list[dict]:
     rows = conn.execute(
         "SELECT run_id, COUNT(*) AS c FROM review_item WHERE status = 'OPEN' GROUP BY run_id ORDER BY c DESC"
     ).fetchall()

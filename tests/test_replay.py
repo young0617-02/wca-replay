@@ -146,9 +146,14 @@ def test_no_inputs_package_reports_why_it_cannot_be_replayed(conn, cfg):
 
 
 def test_replay_refuses_a_different_rule_pack(packed, monkeypatch):
-    """版本守卫：包是 v4 算的就用 v4 的代码比；换版本的差异必须走 REV 对账，不能靠重放掩盖。"""
+    """版本守卫：包是 v4 算的就用 v4 的代码比；换版本的差异必须走 REV 对账，不能靠重放掩盖。
+
+    v5 起显式保留 v4 回放（`_legacy_rule_packs`）；这里把 legacy 集合清空，
+    继续证明“非当前且非 legacy 的版本必须拒绝”这条守卫还在。
+    """
     _, zip_path, _ = packed
     monkeypatch.setattr("src.replay._current_rule_pack", lambda: "rp-someother.v9")
+    monkeypatch.setattr("src.replay._legacy_rule_packs", lambda: set())
     res = replay(zip_path)
     assert not res["ok"] and "规则包版本不一致" in res["reason"]
     assert res["chain"]["ok"], "链本身还是完整的，拒的是版本而不是数据"
