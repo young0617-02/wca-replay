@@ -392,14 +392,13 @@ def _parse_expected_anchor(value: object) -> dict | None:
     return result
 
 
-def _base_result(package: Path | str, manifest: dict) -> dict:
+def _base_result(package: Path | str, manifest: dict, *,
+                 anchor_expected: bool = False) -> dict:
     triple = manifest.get("triple") if isinstance(manifest.get("triple"), dict) else {}
     scope = manifest.get("scope_json") if isinstance(manifest.get("scope_json"), dict) else {}
     return {
         "package": str(package), "run_id": manifest.get("run_id", ""),
         "expected_triple": triple,
-        "chain": {"ok": False, "broken_at_seq": None, "reason": "未校验", "length": 0,
-                  "head_hash": ""},
         "inputs_packed": 0, "inputs_missing": [],
         "engine_expected": manifest.get("engine_version", ""),
         "engine_actual": ENGINE_VERSION,
@@ -417,9 +416,11 @@ def _base_result(package: Path | str, manifest: dict) -> dict:
             manifest.get("producer"), dict) else {},
         "producer_ok": True, "producer_reason": "",
         "artifact": {}, "findings_binding": {},
-        "anchor_checked": False, "partial": False,
+        "anchor_expected": anchor_expected, "anchor_checked": False, "anchor_ok": None,
+        "partial": False,
         "package_sha256": "", "package_sha256_checked": False, "package_sha256_ok": None,
         "artifacts_digest": "", "artifacts_digest_checked": False, "artifacts_digest_ok": None,
+        "artifacts_digest_expected": "",
         "final_conclusions_expected": 0, "final_conclusions_packaged": 0,
         "input_fingerprint_recomputed": False,
         "ok": False, "reason": "",
@@ -444,7 +445,9 @@ def replay(package: Path | str, *, limits: ZipLimits | None = None,
     """
     pkg_path = Path(package)
     package_sha = package_verify._sha256_file(pkg_path) if pkg_path.is_file() else ""
-    result = _base_result(package, {})
+    anchor_expected = bool(expect_anchor if expect_anchor is not None
+                           else os.environ.get("WCA_EXPECT_ANCHOR"))
+    result = _base_result(package, {}, anchor_expected=anchor_expected)
     result["package_sha256"] = package_sha
     if expect_package_sha256:
         result["package_sha256_checked"] = True
@@ -461,10 +464,10 @@ def replay(package: Path | str, *, limits: ZipLimits | None = None,
         manifest = json.loads(
             _package_member(d, "manifest.json").read_text(encoding="utf-8"))
         if not isinstance(manifest, dict):
-            result = _base_result(package, {})
+            result = _base_result(package, {}, anchor_expected=anchor_expected)
             result["reason"] = "MANIFEST FAIL manifest 不是对象"
             return result
-        result = _base_result(package, manifest)
+        result = _base_result(package, manifest, anchor_expected=anchor_expected)
         result["package_sha256"] = package_sha
         result["package_sha256_checked"] = bool(expect_package_sha256)
         result["package_sha256_ok"] = (
@@ -517,6 +520,7 @@ def replay(package: Path | str, *, limits: ZipLimits | None = None,
         if expect_artifacts_digest:
             result["artifacts_digest_checked"] = True
             expected_artifacts = str(expect_artifacts_digest).strip().lower()
+            result["artifacts_digest_expected"] = expected_artifacts
             if expected_artifacts != result["artifacts_digest"]:
                 result["artifacts_digest_ok"] = False
                 result["reason"] = (
@@ -553,6 +557,7 @@ def replay(package: Path | str, *, limits: ZipLimits | None = None,
                        "pinned_params": {k: scope[k] for k in PINNED_SCOPE_PARAMS
                                          if k in scope}})
         if expected_anchor:
+            result["anchor_checked"] = True
             mismatched = []
             if expected_anchor["schema_version"] != schema_ver:
                 mismatched.append("schema_version")
@@ -575,10 +580,12 @@ def replay(package: Path | str, *, limits: ZipLimits | None = None,
                         return str(package_projection or "（包内无）")
                     return str(triple.get(key))
 
+                result["anchor_ok"] = False
                 result["reason"] = ("ANCHOR FAIL 外部锚点与包内不一致：" + ",".join(
                     f"{k}（期望 {expected_anchor.get(k)} / 包内 {_actual(k)}）"
                     for k in mismatched))
                 return result
+            result["anchor_ok"] = True
         elif expected:
             mismatched = [k for k in TRIPLE_KEYS if expected[k] != triple.get(k)]
             result["expected_external_triple"] = expected
@@ -761,12 +768,11 @@ def replay(package: Path | str, *, limits: ZipLimits | None = None,
             conn.close()
         finally:
             shutil.rmtree(work, ignore_errors=True)
-        result["anchor_checked"] = bool(expected_anchor)
         pinned_ok = result.get("signature_trust") == "pinned"
-        external_ok = (pinned_ok and result["anchor_checked"]
-                       and result["package_sha256_checked"])
-        result["partial"] = not external_ok
-        if result["partial"] and result["ok"]:
+        external_ok = (pinned_ok and result.get("anchor_ok") is True
+                       and result.get("package_sha256_ok") is True)
+        result["partial"] = bool(result["ok"] and not external_ok)
+        if result["partial"]:
             missing = []
             if not pinned_ok:
                 missing.append("外部公钥 pin")

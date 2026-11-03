@@ -238,7 +238,7 @@ def cmd_export(args) -> int:
     signature = manifest.get("signature") or {}
     if signature:
         print(f"  Ed25519 签名 key_id={signature.get('key_id', '')}（包内公钥只证明自洽；"
-              "来源可信需复核方用 --public-key 固定公钥）")
+              "来源身份需复核方用 --public-key 固定公钥并通过独立渠道核验 key_id）")
     else:
         print("  未签名（v2）；如需签名：--signing-key <私钥文件> 或 WCA_SIGNING_KEY_FILE")
     print("  复核方：用发行 wheel 的 wca-verify（不执行包内 verify.py）做字节层/工件绑定，"
@@ -330,15 +330,24 @@ def cmd_replay(args) -> int:
               + (" —— 已要求 --require-signature" if getattr(args, "require_signature", False)
                  else ""))
     artifact = res.get("artifact") or {}
-    if artifact:
-        print(f"  工件逐文件：{artifact.get('files_status', 'NOT CHECKED')} "
-              f"checked={artifact.get('checked', 0)}"
-              + (f"；{artifact.get('reason')}" if artifact.get("files_status") == "FAIL" else ""))
-        print(f"  VERIFY SCRIPT：{artifact.get('verify_script_status', 'NOT CHECKED')}")
-        print(f"  ARTIFACTS DIGEST manifest-internal："
-              f"{artifact.get('digest_status', 'NOT CHECKED')}")
-        print(f"  EXTRA FILE：{artifact.get('extras_status', 'NOT CHECKED')}"
-              + (f"：{','.join(artifact.get('extras') or [])}" if artifact.get("extras") else ""))
+    early = not res.get("signature_checked")
+    print(f"  工件逐文件：{artifact.get('files_status', 'NOT CHECKED')} "
+          f"checked={artifact.get('checked', 0)}"
+          + (f"；{artifact.get('reason')}" if artifact.get("files_status") == "FAIL" else ""))
+    print(f"  VERIFY SCRIPT：{artifact.get('verify_script_status', 'NOT CHECKED')}")
+    internal_digest = artifact.get("digest_status", "NOT CHECKED")
+    external_digest = ("OK" if res.get("artifacts_digest_ok") else "FAIL") \
+        if res.get("artifacts_digest_checked") else "NOT CHECKED"
+    digest_line = (f"  ARTIFACTS DIGEST manifest-internal {internal_digest} / "
+                   f"external={external_digest}")
+    if external_digest == "FAIL":
+        digest_line += (f" expected={res.get('artifacts_digest_expected')} "
+                        f"actual={res.get('artifacts_digest')}")
+    elif external_digest == "NOT CHECKED":
+        digest_line += ("（早退，尚未走到摘要比对）" if early else "（未传外部期望值）")
+    print(digest_line)
+    print(f"  EXTRA FILE：{artifact.get('extras_status', 'NOT CHECKED')}"
+          + (f"：{','.join(artifact.get('extras') or [])}" if artifact.get("extras") else ""))
     findings_binding = res.get("findings_binding") or {}
     if findings_binding:
         print(f"  发现摘要：{'一致' if findings_binding.get('ok') else '不一致'}"
@@ -347,16 +356,16 @@ def cmd_replay(args) -> int:
     sha_status = ("NOT CHECKED" if not res.get("package_sha256_checked")
                   else ("OK" if res.get("package_sha256_ok") else "FAIL"))
     print(f"  PACKAGE SHA256 computed={res.get('package_sha256') or 'NOT AVAILABLE'} "
-          f"/ external={sha_status}")
-    if res.get("artifacts_digest_checked"):
-        print(f"  ARTIFACTS DIGEST external="
-              f"{'OK' if res.get('artifacts_digest_ok') else 'FAIL'}")
-    else:
-        print("  ARTIFACTS DIGEST external=NOT CHECKED")
-    if not res.get("anchor_checked"):
-        print("  ANCHOR NOT CHECKED（未完成外部锚点校验；不能算完整验收）")
-    else:
+          f"/ external={sha_status}"
+          + ("（未传外部期望值）" if sha_status == "NOT CHECKED" else ""))
+    if res.get("anchor_ok") is True:
         print("  ANCHOR CHECK OK")
+    elif res.get("anchor_checked"):
+        print(f"  ANCHOR FAIL —— {res.get('reason')}")
+    elif res.get("anchor_expected"):
+        print("  ANCHOR NOT CHECKED（早退，尚未走到锚点校验；不能算完整验收）")
+    else:
+        print("  ANCHOR NOT CHECKED（未传外部锚点；不能算完整验收）")
     if "actual_triple" not in res:
         print(f"  RESULT {'PARTIAL' if res.get('partial') else 'FAIL'}"
               f" —— {res['reason']}")
@@ -815,7 +824,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="包外记录的 manifest.artifacts_digest（包根工件清单摘要）")
     p.add_argument("--public-key", action="append", default=None, dest="public_key",
                    help="外部固定公钥（文件路径或 Base64），可重复传入以支持轮换；"
-                        "pin 只表示与供给公钥匹配，来源可信需独立渠道核验 key_id")
+                        "pin 只表示与供给公钥匹配，来源身份需独立渠道核验 key_id")
     p.add_argument("--require-signature", action="store_true",
                    help="旧 v1/v2 包无签名也判失败；v3 缺签名始终失败")
     p.set_defaults(fn=cmd_replay)

@@ -363,7 +363,9 @@ def verify_package(package: Path | str, *, public_keys: list[str] | tuple[str, .
         "artifact": {}, "findings": {}, "inputs_digest": "", "inputs_digest_ok": False,
         "signature_present": False, "signature_ok": False, "signature_trust": "none",
         "signature_key_id": "", "signature_reason": "", "signature_checked": False,
-        "anchor_checked": False, "anchor_reason": "ANCHOR NOT CHECKED",
+        "anchor_checked": False, "anchor_expected": bool(
+            expect_anchor or os.environ.get("WCA_EXPECT_ANCHOR")),
+        "anchor_reason": "ANCHOR NOT CHECKED",
         "package_sha256": "", "package_sha256_checked": False, "package_sha256_ok": None,
         "package_sha256_expected": "",
         "artifacts_digest": "", "artifacts_digest_checked": False, "artifacts_digest_ok": None,

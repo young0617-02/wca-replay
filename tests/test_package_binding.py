@@ -101,6 +101,23 @@ def _assert_both_fail(pkg: Path, pub: Path, anchor: str, *,
     return out, str(res.get("reason") or "")
 
 
+def _unexpected_fail_lines(text: str, allowed: tuple[str, ...]) -> list[str]:
+    """只允许与实际改动对应的 FAIL 标签；其余任何带 FAIL 的行都算误报。"""
+    bad: list[str] = []
+    for line in text.splitlines():
+        if "FAIL" not in line:
+            continue
+        if any(label in line for label in allowed):
+            continue
+        bad.append(line.strip())
+    return bad
+
+
+def _lines_starting(text: str, prefix: str) -> list[str]:
+    """只统计以标签开头的检查行，避免把 RESULT 原因文本计入。"""
+    return [line.strip() for line in text.splitlines() if line.strip().startswith(prefix)]
+
+
 def test_good_package_passes_independent_verify(conn, cfg, tmp_path):
     _out, zip_path, manifest, _key, pub = _build_signed(conn, cfg, tmp_path)
     anchor = _anchor(manifest)
@@ -108,6 +125,9 @@ def test_good_package_passes_independent_verify(conn, cfg, tmp_path):
                         "--expect-package-sha256", sha256_hex(zip_path.read_bytes()))
     assert code == 0, out
     assert "RESULT OK" in out and "pinned (key matches supplied pin" in out
+    assert "来源可信" not in out, out
+    assert "independent key_id verification not done" in out, out
+    assert len(_lines_starting(out, "ARTIFACTS DIGEST")) == 1, out
     res = replay(zip_path, expect_anchor=anchor, public_keys=[str(pub)])
     assert res["ok"], res["reason"]
     assert res["producer_ok"] is True
@@ -127,6 +147,8 @@ def test_a_findings_severity_change_fails_both(conn, cfg, tmp_path):
     out, reason = _assert_both_fail(pkg, pub, _anchor(manifest))
     assert "ARTIFACT" in out or "FINDINGS" in out or "结论" in out
     assert "ARTIFACT" in reason or "FINDINGS" in reason or "结论" in reason
+    assert _unexpected_fail_lines(out, ("ARTIFACTS FAIL", "RESULT FAIL")) == [], out
+    assert len(_lines_starting(out, "ARTIFACTS DIGEST")) == 1, out
 
 
 def test_a2_findings_change_with_recomputed_artifacts_fails_digest(conn, cfg, tmp_path):
@@ -152,6 +174,7 @@ def test_a2_findings_change_with_recomputed_artifacts_fails_digest(conn, cfg, tm
     code, out = _verify(pkg, "--public-key", str(pub), "--expect-anchor", _anchor(manifest))
     assert code != 0, out
     assert "FINDINGS DIGEST FAIL" in out, out
+    assert _unexpected_fail_lines(out, ("FINDINGS DIGEST FAIL", "RESULT FAIL")) == [], out
     res = replay(pkg, expect_anchor=_anchor(manifest), public_keys=[str(pub)])
     assert not res["ok"]
     assert "FINDINGS DIGEST" in str(res.get("reason") or "")
@@ -171,6 +194,7 @@ def test_h_source_line_no_change_fails_by_artifact_hash(conn, cfg, tmp_path):
     out, reason = _assert_both_fail(pkg, pub, _anchor(manifest))
     assert "ARTIFACT FAIL" in out, out
     assert "ARTIFACT FAIL" in reason, reason
+    assert _unexpected_fail_lines(out, ("ARTIFACTS FAIL", "RESULT FAIL")) == [], out
 
 
 def test_b_input_timestamp_change_fails_both(conn, cfg, tmp_path):
@@ -184,6 +208,7 @@ def test_b_input_timestamp_change_fails_both(conn, cfg, tmp_path):
     out, reason = _assert_both_fail(pkg, pub, _anchor(manifest))
     assert "INPUTS" in out or "INPUT" in out
     assert "INPUTS" in reason or "INPUT" in reason
+    assert _unexpected_fail_lines(out, ("INPUTS DIGEST FAIL", "RESULT FAIL")) == [], out
 
 
 def test_c_extra_confirmed_conclusion_fails_both(conn, cfg, tmp_path):
@@ -196,6 +221,7 @@ def test_c_extra_confirmed_conclusion_fails_both(conn, cfg, tmp_path):
     out, reason = _assert_both_fail(pkg, pub, _anchor(manifest))
     assert "ARTIFACT" in out or "CONCLUSION" in out
     assert "ARTIFACT" in reason or "CONCLUSION" in reason
+    assert _unexpected_fail_lines(out, ("ARTIFACTS FAIL", "RESULT FAIL")) == [], out
 
 
 def test_d_replaced_verify_script_is_not_executed(conn, cfg, tmp_path):
@@ -215,6 +241,7 @@ def test_d_replaced_verify_script_is_not_executed(conn, cfg, tmp_path):
     res = replay(pkg, expect_anchor=_anchor(manifest), public_keys=[str(pub)])
     assert not res["ok"]
     assert "VERIFY SCRIPT" in str(res.get("reason") or "")
+    assert _unexpected_fail_lines(out, ("VERIFY SCRIPT FAIL", "RESULT FAIL")) == [], out
 
 
 def test_e_deleted_findings_fails_both(conn, cfg, tmp_path):
@@ -224,6 +251,7 @@ def test_e_deleted_findings_fails_both(conn, cfg, tmp_path):
     out, reason = _assert_both_fail(pkg, pub, _anchor(manifest))
     assert "ARTIFACT" in out or "FINDINGS" in out
     assert "ARTIFACT" in reason or "FINDINGS" in reason
+    assert _unexpected_fail_lines(out, ("ARTIFACTS FAIL", "RESULT FAIL")) == [], out
 
 
 def test_f_extra_file_fails_both(conn, cfg, tmp_path):
@@ -233,6 +261,7 @@ def test_f_extra_file_fails_both(conn, cfg, tmp_path):
     out, reason = _assert_both_fail(pkg, pub, _anchor(manifest))
     assert "EXTRA" in out or "UNDECLARED" in out or "ARTIFACT" in out
     assert "EXTRA" in reason or "UNDECLARED" in reason or "ARTIFACT" in reason
+    assert _unexpected_fail_lines(out, ("EXTRA FILE FAIL", "RESULT FAIL")) == [], out
 
 
 def test_g_not_covered_markdown_change_fails_both(conn, cfg, tmp_path):
@@ -243,6 +272,7 @@ def test_g_not_covered_markdown_change_fails_both(conn, cfg, tmp_path):
     out, reason = _assert_both_fail(pkg, pub, _anchor(manifest))
     assert "ARTIFACT" in out
     assert "ARTIFACT" in reason
+    assert _unexpected_fail_lines(out, ("ARTIFACTS FAIL", "RESULT FAIL")) == [], out
 
 
 def test_missing_anchor_is_partial_not_ok(conn, cfg, tmp_path, capsys):
@@ -276,6 +306,19 @@ def test_package_sha_and_artifacts_digest_are_enforced(conn, cfg, tmp_path):
     code, out = _verify(zip_path, "--public-key", str(pub), "--expect-anchor", anchor,
                         "--expect-package-sha256", "0" * 64)
     assert code != 0 and "PACKAGE SHA256 FAIL" in out, out
+    assert len(_lines_starting(out, "ARTIFACTS DIGEST")) == 1, out
+
+    bad_digest = _verify(zip_path, "--public-key", str(pub), "--expect-anchor", anchor,
+                         "--expect-package-sha256", package_sha,
+                         "--expect-artifacts-digest", "0" * 64)
+    assert bad_digest[0] != 0, bad_digest[1]
+    assert "ARTIFACTS DIGEST" in bad_digest[1], bad_digest[1]
+    assert len(_lines_starting(bad_digest[1], "ARTIFACTS DIGEST")) == 1, bad_digest[1]
+    digest_line = next(line for line in bad_digest[1].splitlines()
+                       if "ARTIFACTS DIGEST" in line)
+    assert "manifest-internal OK / external FAIL" in digest_line, digest_line
+    assert f"expected={'0' * 64}" in digest_line, digest_line
+    assert f"actual={artifacts_digest}" in digest_line, digest_line
 
     res = replay(zip_path, expect_anchor=anchor, public_keys=[str(pub)],
                  expect_package_sha256=package_sha,
@@ -299,11 +342,22 @@ def test_result_ok_requires_pin_anchor_and_package_sha(conn, cfg, tmp_path):
                      "--expect-package-sha256", package_sha)
     assert no_key[0] != 0, no_key[1]
     assert "RESULT OK" not in no_key[1] and "RESULT PARTIAL" in no_key[1], no_key[1]
+    assert "package self-check (NOT source trust)" in no_key[1], no_key[1]
+    assert "external=OK" in no_key[1], no_key[1]
+    assert "来源可信" not in no_key[1], no_key[1]
 
     no_sha = _verify(zip_path, "--public-key", str(pub), "--expect-anchor", anchor)
     assert no_sha[0] != 0, no_sha[1]
     assert "RESULT OK" not in no_sha[1] and "RESULT PARTIAL" in no_sha[1], no_sha[1]
-    assert "PACKAGE SHA256" in no_sha[1] and "NOT CHECKED" in no_sha[1], no_sha[1]
+    assert "PACKAGE SHA256" in no_sha[1] and "external=NOT CHECKED" in no_sha[1], no_sha[1]
+    assert "PACKAGE SHA256 OK" not in no_sha[1], no_sha[1]
+
+    no_anchor = _verify(zip_path, "--public-key", str(pub),
+                        "--expect-package-sha256", package_sha)
+    assert no_anchor[0] != 0, no_anchor[1]
+    assert "RESULT OK" not in no_anchor[1] and "RESULT PARTIAL" in no_anchor[1], no_anchor[1]
+    anchor_line = next(line for line in no_anchor[1].splitlines() if "ANCHOR" in line)
+    assert "NOT CHECKED" in anchor_line and "未传外部锚点" in anchor_line, anchor_line
 
 
 def test_early_failure_has_only_relevant_fail_labels(conn, cfg, tmp_path):
@@ -319,9 +373,12 @@ def test_early_failure_has_only_relevant_fail_labels(conn, cfg, tmp_path):
     code, out = _verify(pkg, "--public-key", str(pub), "--expect-anchor", _anchor(manifest))
     assert code != 0 and "RESULT FAIL" in out, out
     assert "ARTIFACT" in out and "findings.csv" in out, out
-    for unrelated in ("VERIFY SCRIPT FAIL", "SIGNATURE FAIL", "CHAIN FAIL",
-                      "PACKAGE SHA256 FAIL", "ANCHOR FAIL"):
-        assert unrelated not in out, (unrelated, out)
+    assert _unexpected_fail_lines(out, ("ARTIFACTS FAIL", "RESULT FAIL")) == [], out
+    assert len(_lines_starting(out, "ARTIFACTS DIGEST")) == 1, out
+    for label in ("VERIFY SCRIPT NOT CHECKED", "ARTIFACTS DIGEST", "SIGNATURE NOT CHECKED",
+                  "ANCHOR NOT CHECKED"):
+        line = next(line for line in out.splitlines() if label in line)
+        assert "早退" in line, line
 
 
 def test_external_artifacts_digest_failure_shows_internal_ok(conn, cfg, tmp_path):
@@ -331,9 +388,11 @@ def test_external_artifacts_digest_failure_shows_internal_ok(conn, cfg, tmp_path
                         "--expect-package-sha256", sha256_hex(zip_path.read_bytes()),
                         "--expect-artifacts-digest", "0" * 64)
     assert code != 0, out
-    assert "manifest-internal OK" in out, out
-    assert "external FAIL" in out, out
-    assert "expected=0000000000000000000000000000000000000000000000000000000000000000" in out, out
+    assert len(_lines_starting(out, "ARTIFACTS DIGEST")) == 1, out
+    line = next(line for line in out.splitlines() if "ARTIFACTS DIGEST" in line)
+    assert "manifest-internal OK / external FAIL" in line, line
+    assert "expected=0000000000000000000000000000000000000000000000000000000000000000" in line, line
+    assert f"actual={manifest['artifacts_digest']}" in line, line
 
 
 def test_replay_early_failure_does_not_report_chain_break_or_no_signature(conn, cfg, tmp_path, capsys):
@@ -348,6 +407,38 @@ def test_replay_early_failure_does_not_report_chain_break_or_no_signature(conn, 
     assert "SIGNATURE NOT CHECKED" in text, text
     assert "断裂" not in text, text
     assert "签名：无" not in text, text
+    assert "ANCHOR NOT CHECKED" in text and "早退" in text, text
+    assert len(_lines_starting(text, "ARTIFACTS DIGEST")) == 1, text
+
+
+def test_replay_wrong_anchor_reports_anchor_fail_not_not_checked(conn, cfg, tmp_path, capsys):
+    _out, zip_path, manifest, _key, pub = _build_signed(conn, cfg, tmp_path)
+    anchor = _anchor(manifest)
+    wrong = anchor[:-1] + ("0" if anchor[-1] != "0" else "1")
+    code = cli.main(["replay", str(zip_path), "--public-key", str(pub),
+                     "--expect-anchor", wrong])
+    text = capsys.readouterr().out + capsys.readouterr().err
+    assert code != 0, text
+    assert "ANCHOR FAIL" in text, text
+    assert "ANCHOR NOT CHECKED" not in text, text
+    assert "SIGNATURE FAIL" not in text, text
+    assert "CHAIN NOT CHECKED" not in text, text
+
+
+def test_replay_external_artifacts_digest_failure_shows_expected_actual(conn, cfg, tmp_path, capsys):
+    _out, zip_path, manifest, _key, pub = _build_signed(conn, cfg, tmp_path)
+    code = cli.main(["replay", str(zip_path), "--public-key", str(pub),
+                     "--expect-anchor", _anchor(manifest),
+                     "--expect-package-sha256", sha256_hex(zip_path.read_bytes()),
+                     "--expect-artifacts-digest", "0" * 64])
+    text = capsys.readouterr().out + capsys.readouterr().err
+    assert code != 0, text
+    assert len(_lines_starting(text, "ARTIFACTS DIGEST")) == 1, text
+    line = next(line for line in text.splitlines() if "ARTIFACTS DIGEST" in line)
+    assert "manifest-internal OK" in line and "external=FAIL" in line, line
+    assert "expected=" + "0" * 64 in line, line
+    assert f"actual={manifest['artifacts_digest']}" in line, line
+    assert "ANCHOR NOT CHECKED" in text and "早退" in text, text
 
 
 def test_missing_relative_public_key_reports_path_not_base64(conn, cfg, tmp_path):

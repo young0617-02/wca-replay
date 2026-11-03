@@ -445,7 +445,7 @@ PACKAGE_README = (
     "wca-verify（独立实现，不执行包内代码），再用 wca replay 重放引擎比对三元组。\r\n"
     "v3 包带 manifest.signature（Ed25519）与 artifact_sha256/artifacts_digest/"
     "verify_script_sha256：包内公钥只能证明包内自洽；`--public-key` 只表示与供给的公钥 pin 匹配，"
-    "来源可信仍需双方通过独立渠道核验 key_id。验签需要 PyNaCl，版本见 "
+    "来源身份仍需双方通过独立渠道核验 key_id。验签需要 PyNaCl，版本见 "
     "verify-requirements.txt。\r\n"
     "包内 policies/ 含规则包定义、条文/稳定引用、口径声明、13 项存疑与 CONFIDENCE；"
     "不把整份 docs/ 打包。\r\n"
@@ -1331,8 +1331,8 @@ VERIFY_SNIPPET = r'''"""包内便利复核脚本（不是信任依据）；正�
 可选签名约束：--public-key <公钥文件或Base64>（可重复）作为外部 pin；--require-signature。
 签名验签依赖 PyNaCl（见包内 verify-requirements.txt）；未安装且包内有签名时失败关闭。
 期望输出：EPOCH OK + MANIFEST CHECKSUM OK + CHAIN OK + INPUTS OK + ARTIFACT OK + SIGNATURE OK。
-SIGNATURE OK 只表示签名有效：pinned 只表示“与供给公钥副本匹配”，不代表来源可信；
-来源可信必须由双方独立渠道核验 key_id。package self-check 仅包内自洽，必须打印
+SIGNATURE OK 只表示签名有效：pinned 只表示“与供给公钥副本匹配”，不代表来源身份已核验；
+来源身份必须由双方独立渠道核验 key_id。package self-check 仅包内自洽，必须打印
 NOT source trust。
 任一校验失败都会打印 RESULT FAIL 并返回非零退出码；链、输入与签名一致仍不代表结论正确，
 结论是否一致要重跑引擎（`python -m src.cli replay <包>`）。

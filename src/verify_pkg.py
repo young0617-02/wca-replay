@@ -22,11 +22,35 @@ def _public_keys(values: list[str] | None) -> list[str]:
     return out
 
 
+def _note(name: str, status: str, result: dict, checks: dict, early: bool) -> str:
+    """给 NOT CHECKED 补足原因；从未走到不能写成 FAIL。"""
+    if status != "NOT CHECKED":
+        return ""
+    if name in ("package_sha", "artifacts_digest_external"):
+        return "（早退，尚未走到外部比对）" if early else "（未传外部期望值）"
+    if name == "anchor":
+        if result.get("anchor_expected"):
+            return "（早退，尚未走到锚点校验）" if early else "（未完成外部锚点校验）"
+        return "（未传外部锚点）"
+    if name == "signature":
+        if result.get("signature_checked"):
+            return "（包内无签名；v2 旧包仅在 --require-signature 时失败）"
+        return "（早退，尚未走到验签）" if early else "（未验签）"
+    if name == "signature_pinned":
+        return "（早退，尚未走到验签）" if early else "（未提供外部公钥或 pin 未命中）"
+    return "（早退，尚未走到该检查）" if early else "（未走到该检查）"
+
+
 def _print_result(result: dict) -> None:
     checks = result.get("checks") or {}
+    early = any(value == "FAIL" for value in checks.values())
 
     def st(name: str) -> str:
         return str(checks.get(name, "NOT CHECKED"))
+
+    def line(label: str, status: str, name: str, detail: str = "") -> None:
+        print(f"{label} {status}" + (f" {detail}" if detail else "")
+              + _note(name, status, result, checks, early))
 
     if result.get("schema"):
         print(f"MANIFEST SCHEMA v{result.get('manifest_schema_version')}")
@@ -35,61 +59,69 @@ def _print_result(result: dict) -> None:
         print("PRODUCER", producer.get("version"), producer.get("commit"),
               "python=" + str(producer.get("python")),
               "rule_pack=" + str(producer.get("rule_pack_version")))
-    print(f"MANIFEST CHECKSUM {st('manifest')}")
+    line("MANIFEST CHECKSUM", st("manifest"), "manifest")
     artifact = result.get("artifact") or {}
-    print(f"ARTIFACTS {st('artifacts')} checked={artifact.get('checked', 0)}")
-    if artifact.get("verify_script_sha256"):
-        print(f"VERIFY SCRIPT {st('verify_script')}"
-              f" sha256={artifact.get('verify_script_sha256')}")
-    else:
-        print(f"VERIFY SCRIPT {st('verify_script')}")
-    print(f"ARTIFACTS DIGEST manifest-internal {st('artifacts_digest_internal')}"
-          f" {result.get('artifacts_digest') or ''}".rstrip())
-    print(f"EXTRA FILE {st('extras')}"
-          + (f"：{','.join(artifact.get('extras') or [])}" if artifact.get("extras") else ""))
+    line("ARTIFACTS", st("artifacts"), "artifacts", f"checked={artifact.get('checked', 0)}")
+    script_detail = (f"sha256={artifact.get('verify_script_sha256')}"
+                     if artifact.get("verify_script_sha256") else "")
+    line("VERIFY SCRIPT", st("verify_script"), "verify_script", script_detail)
+
+    # 内部清单摘要与外部比对只打一行，且只在外部比对通过时才是 external OK。
+    internal = st("artifacts_digest_internal")
+    external = st("artifacts_digest_external") if result.get("artifacts_digest_checked") \
+        else "NOT CHECKED"
+    digest_line = (f"ARTIFACTS DIGEST manifest-internal {internal} / external {external}")
+    if external == "FAIL":
+        digest_line += (f" expected={result.get('artifacts_digest_expected')} "
+                        f"actual={result.get('artifacts_digest')}")
+    elif external == "NOT CHECKED":
+        digest_line += ("（早退，尚未走到摘要比对）" if early else "（未传外部期望值）")
+    print(digest_line)
+
+    line("EXTRA FILE", st("extras"), "extras",
+         ("：" + ",".join(artifact.get("extras") or [])) if artifact.get("extras") else "")
     findings = result.get("findings") or {}
-    print(f"FINDINGS DIGEST {st('findings')}"
-          f" {str(findings.get('actual_digest', ''))}".rstrip())
+    line("FINDINGS DIGEST", st("findings"), "findings",
+         str(findings.get("actual_digest", "")))
     if findings.get("ok"):
         print(f"COUNTS 发现（未签认） {findings.get('rows', 0)} 条 / "
               f"已确认结论 {findings.get('final_rows', 0)} 条")
         print("RULE VERSIONS " + json.dumps(findings.get("rule_versions") or {},
                                             ensure_ascii=False, sort_keys=True))
     chain = result.get("chain") or {}
-    print(f"CHAIN {st('chain')}"
-          + (f" events={chain.get('length', 0)}" if chain.get("checked") else ""))
-    if result.get("inputs_digest"):
-        print(f"INPUTS DIGEST {st('inputs')} {result.get('inputs_digest')}")
-    else:
-        print(f"INPUTS DIGEST {st('inputs')}")
+    line("CHAIN", st("chain"), "chain",
+         f"events={chain.get('length', 0)}" if chain.get("checked") else "")
+    line("INPUTS DIGEST", st("inputs"), "inputs", str(result.get("inputs_digest") or ""))
+
     sig_status = st("signature")
     if sig_status == "FAIL":
         print(f"SIGNATURE FAIL —— {result.get('signature_reason') or result.get('reason')}")
-    elif sig_status == "NOT CHECKED":
-        print("SIGNATURE NOT CHECKED")
-    else:
+    elif sig_status == "OK":
         trust = ("pinned (key matches supplied pin; independent key_id verification not done)"
                  if result.get("signature_trust") == "pinned"
                  else "package self-check (NOT source trust)")
-        print(f"SIGNATURE {sig_status} / {trust} / "
+        print(f"SIGNATURE OK / {trust} / "
               f"key_id={result.get('signature_key_id') or '?'}")
-    print(f"SIGNATURE PINNED {st('signature_pinned')}")
+    elif result.get("signature_checked"):
+        print("SIGNATURE NOT CHECKED（包内无签名；v2 旧包仅在 --require-signature 时失败）")
+    else:
+        print("SIGNATURE NOT CHECKED（早退，尚未走到验签）")
+    line("SIGNATURE PINNED", st("signature_pinned"), "signature_pinned")
+
     computed_sha = result.get("package_sha256") or "NOT AVAILABLE"
     sha_status = st("package_sha")
     print(f"PACKAGE SHA256 computed={computed_sha} / external={sha_status}"
           + (f" expected={result.get('package_sha256_expected')}"
-             if sha_status == "FAIL" else ""))
-    if result.get("artifacts_digest_checked"):
-        ext_status = st("artifacts_digest_external")
-        line = (f"ARTIFACTS DIGEST manifest-internal {st('artifacts_digest_internal')} / "
-                f"external {ext_status}")
-        if ext_status == "FAIL":
-            line += (f" expected={result.get('artifacts_digest_expected')} "
-                     f"actual={result.get('artifacts_digest')}")
-        print(line)
+             if sha_status == "FAIL" else "")
+          + _note("package_sha", sha_status, result, checks, early))
+    anchor_status = st("anchor")
+    if anchor_status == "OK":
+        print("ANCHOR CHECK OK")
+    elif anchor_status == "FAIL":
+        print(f"ANCHOR FAIL —— {result.get('anchor_reason') or result.get('reason')}")
     else:
-        print(f"ARTIFACTS DIGEST external NOT CHECKED")
-    print(f"ANCHOR {st('anchor')}")
+        print("ANCHOR NOT CHECKED" + _note(
+            "anchor", anchor_status, result, checks, early))
     if result.get("ok"):
         print("RESULT OK")
     elif result.get("partial"):
