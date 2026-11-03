@@ -18,6 +18,7 @@ import pytest
 
 from conftest import EMPLOYEES, load_base, punch, schedule
 from src import api as api_mod
+from src import signing
 from src.auth import hash_password, load_users_file
 from src.config import Config
 from src.db import connect, init_db
@@ -298,6 +299,23 @@ def test_export_single_entry_hash_matches_script(ui):
             assert body["counts"].get(key) == script_manifest["counts"][key], f"{key} 计数不一致"
     assert body["counts"]["audit_events"] > script_manifest["counts"]["audit_events"],         "第二次导出应当留下新的审计事件（追加，不改写）"
     assert body["chain_ok"] is True
+
+
+def test_api_export_reports_signed_when_server_key_configured(ui, tmp_path, monkeypatch):
+    """服务端配置私钥时，Web 与 CLI 共用 export_package，响应带签名增量字段。"""
+    client, conn, cfg, out = ui
+    key = signing.generate_keypair()
+    key_path = tmp_path / "web-ed25519.key"
+    signing.write_private_key(key_path, key)
+    monkeypatch.setenv("WCA_SIGNING_KEY_FILE", str(key_path))
+
+    login(client, "rv1")
+    res = client.post("/api/export", json={"run_id": out.run_id})
+    assert res.status_code == 200, res.text[:200]
+    body = res.json()
+    assert body["signed"] is True
+    assert body["signature_key_id"] == signing.key_id_for_public_key(
+        key.verify_key.encode())
 
 
 def test_export_page_uses_delivery_wording_and_writes_event(ui):
