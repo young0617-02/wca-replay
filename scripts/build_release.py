@@ -127,7 +127,7 @@ Get-Content RELEASE.json -Encoding UTF8 | ConvertFrom-Json
 
 `RELEASE.json` 至少要核对：`version`、`build_time`、`git_commit`、
 `python_requires`、`supported_rule_pack_versions`、`evidence_schema_versions`。
-`SHA256SUMS` 覆盖本目录内除自身外的全部文件。
+`SHA256SUMS` 覆盖本目录内除自身与 `SHA256SUMS.sig` 外的全部文件。
 
 ## 2. 建干净 venv 并安装（不要复用项目 .venv）
 

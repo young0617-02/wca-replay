@@ -131,12 +131,9 @@ Get-Content SHA256SUMS -Encoding UTF8 | ForEach-Object {
 }
 Get-Content RELEASE.json -Encoding UTF8 | ConvertFrom-Json
 
-# 0.4.0 起：验发行物自身签名（需 PyNaCl）
-$sums = [IO.File]::ReadAllBytes("SHA256SUMS")
-$sig = [Convert]::FromBase64String((Get-Content SHA256SUMS.sig -Raw).Trim())
-$pub = [Convert]::FromBase64String((Get-Content RELEASE.json -Raw | ConvertFrom-Json).release_signature.public_key_b64)
-# 也可直接按 VERIFY-SIGNATURE.txt 的 PyNaCl 片段执行：
-# VerifyKey($pub).verify($sums, $sig) -> 打印 SHA256SUMS SIGNATURE OK
+# 0.4.0 起：按 VERIFY-SIGNATURE.txt 里的 PyNaCl 片段验证 SHA256SUMS.sig
+# （该文件含 key_id、public_key_b64 与可直接执行的 Python 代码）
+# 期望输出：SHA256SUMS SIGNATURE OK
 ```
 
 `RELEASE.json` 必查字段：`version`、`build_time`、`git_commit`、`python_requires`、
@@ -415,7 +412,7 @@ wca replay package/<包>.zip --public-key trusted-public-key.pub `
   `ANCHOR CHECK OK`、`RESULT OK`。
 - 不传 `--expect-anchor`：`ANCHOR NOT CHECKED` + `RESULT PARTIAL`（exit 2），不是完整验收。
 - `KEY-NOTE.txt` 已写明：`trusted-public-key.pub` 与包内 `manifest.signature.public_key_b64`
-  是同一把钥匙的两份副本，仅供技术验证，**不构成来源可信**；正式交付应由双方通过独立渠道交换指纹。
+  是同一把钥匙的两份副本，仅供技术验证，**不构成来源身份核验**；正式交付应由双方通过独立渠道交换指纹。
 - **P0-3 独立信任根属于交付流程，不在软件验收范围内**。软件通过只说明工件绑定/复算/验签链路
   在本发行物上成立，不能说明公钥属于某个已核验的交付主体，也不能替代第三方签名、时间戳或指纹交换。
 - 复测方仍需自行构造 A–H 坏包并留存命令/输出/退出码；本交接包按要求不放源码、docs、reports、
@@ -423,9 +420,9 @@ wca replay package/<包>.zip --public-key trusted-public-key.pub `
 
 ## 10. 0.4.0 门禁、policies 与含已确认结论包实测（2026-11-04）
 
-发行物：`dist/wca-replay-0.4.0/`，共 **341,089 字节**；commit
-`d796aff7198ed87d9c180f27484d2c7c9c5abe5a`；wheel 298,696 字节，
-sha256 `cb10142baeed3a44026fd620b78ddffb2d057641ecdeda1895883d9663c632a3`。
+发行物：`dist/wca-replay-0.4.0/`，共 **342,004 字节**；commit
+`31a10a75bd8926722a8cf7b6548fe05b12376bc3`；wheel 299,593 字节，
+sha256 `792c9df3307646a6a14eac993360b040cfc37c3599b7c898895bf8471815494c`。
 发行物增加 `SHA256SUMS.sig`（Ed25519，key_id
 `ed25519:5e797e1842cf49c7043ba238f2a085b08c87d0a49663440f989cdc7df9ee5bb6`）与
 `VERIFY-SIGNATURE.txt`；`SHA256SUMS` 覆盖除自身与 `.sig` 外的发行文件，签名已实测
@@ -433,22 +430,24 @@ sha256 `cb10142baeed3a44026fd620b78ddffb2d057641ecdeda1895883d9663c632a3`。
 
 **RESULT OK 门禁**：`wca-verify` 只有同时满足“签名 pin 命中 + 外部锚点通过 +
 外部 package_sha256 通过”才给 `RESULT OK`。无公钥 / 无包 SHA / 无锚点三种组合均为
-`RESULT PARTIAL`（exit 2）；源码 `tests/test_package_binding.py` 22 项覆盖。工具输出已把
-“来源可信”改为 `pinned (key matches supplied pin; independent key_id verification not done)`，
-不再比 `KEY-NOTE.txt` 更乐观。
+`RESULT PARTIAL`（exit 2）；源码 `tests/test_package_binding.py` **24 项**覆盖。工具输出已统一为
+中性表述 `pinned (key matches supplied pin; independent key_id verification not done)`，不再比
+`KEY-NOTE.txt` 更乐观；`RESULT OK` 只表示包内检查与三项外部比对通过，不是来源身份核验。
+外部 `--expect-artifacts-digest` 是附加比对：传了必须匹配，未传不影响三项门禁。
 
 **policies 进包**：0.4.0 包 `ARTIFACTS OK checked=14`（9 个原工件 + 5 个 policies 文件）；
 `policies/` 纳入 `artifact_sha256`、`artifacts_digest` 与签名，并加入 allowlist，不会误报
 `EXTRA FILE`。`policies/字段口径与条文依据-对外版.md` 保留 13 项存疑逐条；`CONFIDENCE.md`
-标注成熟度/未定项。包体从 0.3.0 的 55,876 字节增至 68,357 字节（仅必要文本）。
+标注成熟度/未定项。包体从 0.3.0 的 55,876 字节增至 68,393 字节（仅必要文本）。
 
 **P0-4 含已确认结论的包（临时库，不写活动库）**：
-`var/confirmed-conclusions/packages/run-20261104T030208-8b57f589.zip`，68,357 字节，
-sha256 `564003d6d46c93412325e9f9245900e58cc459cea0572e34c1c1d20c9eee62fe`；
+`var/confirmed-conclusions/packages/run-20261104T035902-56213dcc.zip`，68,393 字节，
+sha256 `19ebf3b1fc2d60b29aa70fa05a4110552156c7dda533e9e484af772811f8a53b`；
 `counts` 发现 116 / 已确认结论 2；`responsibility.signed=true`；
-`artifacts_digest=086f46d720f230388e3baa9b3410077508961209bfd8d7dd772ea74ac692757f`；
+`artifacts_digest=e67d118595d71727378ce5f7d5a3f5b9ae953869e0fc1cdb9ed12c5d525bf7a1`；
+包签名 key_id `ed25519:21f234a538eb433d39b704db0124e24e877be5d981c50bdfd42264cf0b6af065`；
 锚点 `3,rp-2026.11.gd-pilot-standard.v5,8b3b54a09aa8ede51697b899ddf2d2e738262d6a612b9bee4e34037a6aa8456e,01bd44034d61a8ead8248a1b7845b794488b46a26424c488bb525ff0d25ac10a`。
-在仓库外 `%TEMP%\wca-030-clean\venv`（已装 0.4.0 wheel）实测：
+在仓库外 `%TEMP%\wca-040-clean\venv`（新建 venv，只装本发行 wheel + 带哈希锁）实测：
 
 ```text
 wca-verify ... --expect-anchor ... --expect-package-sha256 ... --expect-artifacts-digest ...
@@ -456,7 +455,7 @@ COUNTS 发现（未签认） 116 条 / 已确认结论 2 条
 SIGNATURE OK / pinned (key matches supplied pin; independent key_id verification not done)
 PACKAGE SHA256 ... / external=OK
 ARTIFACTS DIGEST manifest-internal OK / external OK
-ANCHOR OK
+ANCHOR CHECK OK
 RESULT OK
 
 wca replay ...
@@ -470,4 +469,6 @@ RESULT OK
 - **仍不能证明**：人工确认的业务正确性、确认人身份与审批权限；`replay` 不重建人工确认，只核对
   包内 `conclusions_final.csv` 行数与 manifest `counts.final_conclusions`。
 - `SHA256SUMS.sig` 只签 SHA256SUMS，不覆盖 `.sig` 自身；公钥/锚点/包 SHA 同时被替换仍会失守。
+- `producer.commit` 必须等于发行 wheel 的 `BUILD_COMMIT`。用旧提交 `d796aff` 导出的 0.4.0 开发包，
+  会被本发行物（`31a10a7`）以 `PRODUCER FAIL` 拒收；这是“同版本代码”核对，不是包损坏。
 - 0.4.0 发行物未入库；`dist/` 已 gitignore。
