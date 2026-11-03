@@ -12,6 +12,14 @@
       "pw_hash": "scrypt$16384,8,1$820466822acb2e885ee10862ac5f3512$afd87c25c3af368a512669db94e94755f00e0669bf0e4bf65314c4d4ef6c561e2c68d484a6e8e60e08ec454d6ab803add04e432f36c4aaba6531a906e81ad95b"
     },
     {
+      "username": "au1",
+      "emp_id": "E002",
+      "roles": [
+        "AU"
+      ],
+      "pw_hash": "scrypt$16384,8,1$2ad44c20b8a0a1a5a3f1a4f0c1e9aae1$cc617365519342612a56dcbe8b2088bee54abb796f94c664a9c22fdf890422aef8401d0808c205e4dd93df7cd0ee7e9726bce89e49fa2264cef4132d4d012915"
+    },
+    {
       "username": "em1",
       "emp_id": "E004",
       "roles": [

@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from src.service_manager import (
+    ROOT,
     ServiceManager,
     load_services_config,
     pid_alive,
@@ -88,6 +89,14 @@ def wait_until(fn, timeout: float = 8.0, interval: float = 0.05) -> bool:
 def env(tmp_path: Path):
     (tmp_path / "run").mkdir()
     return tmp_path
+
+
+@pytest.fixture(autouse=True)
+def _offline_db_env(monkeypatch, tmp_path):
+    """启停工具不需要业务库；给显式 SQLite 回退，保证离线测试不依赖仓库 .env/PostgreSQL。"""
+    monkeypatch.setenv("WCA_DB_BACKEND", "sqlite")
+    monkeypatch.setenv("WCA_DB_PATH", str(tmp_path / "service.sqlite3"))
+    monkeypatch.setenv("WCA_DB_IDENTITY_PATH", str(tmp_path / "db_target.json"))
 
 
 def outcome(rep, name: str, action: str | None = None):
@@ -394,10 +403,21 @@ def test_cli_reports_exit_codes(env):
     from src.service_cli import EXIT_FAILED, EXIT_OK, main_start, main_stop
 
     path = make_config(env)
-    assert main_start(["--config", str(path), "--env", str(env / "absent.env")]) in (
+    # 服务启停本身不连业务库；显式给 SQLite 回退，避免默认 PostgreSQL 配置在无 .env 时阻断测试。
+    app_env = env / "service.env"
+    app_env.write_text("\n".join([
+        "WCA_DB_BACKEND=sqlite",
+        f"WCA_DB_PATH={env / 'service.sqlite3'}",
+        f"WCA_DB_IDENTITY_PATH={env / 'db_target.json'}",
+        f"WCA_REPORTS_DIR={env / 'reports'}",
+        f"WCA_PACKAGES_DIR={env / 'packages'}",
+        f"WCA_USERS_PATH={env / 'users.json'}",
+        f"WCA_UPLOAD_DIR={env / 'uploads'}",
+    ]) + "\n", encoding="utf-8")
+    assert main_start(["--config", str(path), "--env", str(app_env)]) in (
         EXIT_OK, EXIT_FAILED)
     # 起不来（服务脚本里的 run 目录已存在但依赖缺失等）也要有明确退出码，不能 0 蒙混
-    rc = main_stop(["--config", str(path), "--env", str(env / "absent.env")])
+    rc = main_stop(["--config", str(path), "--env", str(app_env)])
     assert rc in (EXIT_OK, EXIT_FAILED)
     assert main_stop(["--config", str(path), "--status"]) == EXIT_OK
     missing = main_start(["--config", str(env / "nope.json")])
@@ -493,3 +513,90 @@ def test_precheck_wording_follows_restart_policy(env):
         finally:
             stopper.close()
         mgr.close()
+
+
+# ---------------------------------------- 解释器用错时的预检（2026-10-09 真事故）
+# 现象：在 cmd 里用全局 python 直跑 tools/start_services.py，服务子进程死在
+# `ImportError: cannot import name 'sentinel' from 'typing_extensions'`，
+# 而工具等满 30s 超时后只说「端口 8000 若被占」——把解释器问题误诊成端口问题。
+
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def test_probe_imports_names_the_first_missing_module():
+    from src.service_manager import probe_imports
+
+    assert probe_imports(sys.executable, ["json", "os"]) is None, "能导入的模块不该被报成缺失"
+    assert probe_imports(sys.executable, ["json", "wca_definitely_not_installed_xyz"]) == \
+        "wca_definitely_not_installed_xyz"
+    assert probe_imports(sys.executable, []) is None, "没声明 requires_import 就不该去探"
+
+
+def test_interpreter_hint_distinguishes_two_diseases():
+    from src.service_manager import interpreter_hint
+
+    outside = interpreter_hint("C:/somewhere/else/python.exe")
+    assert "不是" in outside and "uv run python tools/start_services.py" in outside
+    # 只测“路径在项目 .venv 内”这个分支；不要求当前测试解释器必须是项目 .venv，
+    # 否则 `uv run --isolated` 这类合法隔离环境会被测试假设误伤。
+    venv_python = ROOT / ".venv" / ("Scripts/python.exe" if sys.platform == "win32"
+                                    else "bin/python")
+    inside = interpreter_hint(str(venv_python))
+    assert "不是" not in inside and "uv sync" in inside, inside
+
+
+def test_precheck_blocks_before_spawning_when_interpreter_lacks_deps(env):
+    """预检必须在**启动之前**拦住，而不是等 ready_timeout 超时。"""
+    script = env / "fake_service.py"
+    script.write_text(FAKE_SERVICE, encoding="utf-8")
+    spec = fake_spec(env, script, "api", start_order=10, stop_order=10)
+    spec["requires_import"] = ["wca_definitely_not_installed_xyz"]
+    spec["ready_timeout_s"] = 20          # 若没拦住，这一跑就要白等 20s
+    path = make_config(env, services=[spec])
+
+    mgr = ServiceManager(load_services_config(path), env_snapshot={})
+    try:
+        t0 = time.perf_counter()
+        rep = mgr.start_all()
+        elapsed = time.perf_counter() - t0
+    finally:
+        mgr.close()
+    pre = outcome(rep, "api", "precheck")
+    assert pre is not None and not pre.ok and pre.status == "missing-interpreter-deps"
+    assert "uv sync" in pre.hint or "uv run" in pre.hint, pre.hint
+    assert "wca_definitely_not_installed_xyz" in pre.message, pre.message
+    assert elapsed < 10, f"没拦住就去启动子进程了（耗时 {elapsed:.1f}s）"
+    assert outcome(rep, "api", "start") is None, "预检失败就不该再走启动步骤"
+
+
+def test_import_failure_is_not_reported_as_a_port_problem(env):
+    """子进程自己打印 ImportError 后退出时，hint 必须说导入失败，不能甩锅端口。"""
+    script = env / "dying_service.py"
+    script.write_text("import sys\n"
+                      "print('ImportError: cannot import name sentinel from typing_extensions',"
+                      " file=sys.stderr)\n"
+                      "sys.exit(3)\n", encoding="utf-8")
+    path = make_config(env, services=[{
+        "name": "api", "managed": True, "start_order": 10, "stop_order": 10,
+        "argv": [sys.executable, str(script)], "cwd": str(env),
+        "host": "127.0.0.1", "port": _free_port(), "probe": "port",
+        "ready_timeout_s": 3, "grace_period_s": 2,
+    }])
+    mgr = ServiceManager(load_services_config(path), env_snapshot={})
+    try:
+        rep = mgr.start_all(restart_if_running=False)
+    finally:
+        stopper = ServiceManager(load_services_config(path), env_snapshot={})
+        try:
+            stopper.stop_all(force=True)
+        finally:
+            stopper.close()
+        mgr.close()
+    started = outcome(rep, "api", "start")
+    assert started is not None and not started.ok
+    assert "导入失败" in started.hint, started.hint
+    assert "若被占" not in started.hint, "解释器问题不该再提端口"

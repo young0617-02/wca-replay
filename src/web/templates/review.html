@@ -76,14 +76,15 @@
 <section>
   <h2>导出举证包</h2>
   <div class="row">
-    <button id="doExport">签发并导出（当前运行 {{ run_id or '—' }}）</button>
+    <button id="doExport">登记交付事件并导出举证包（当前运行 {{ run_id or '—' }}）</button>
     <span id="exportMsg" class="ai"></span>
   </div>
   <p class="ai">该按钮调用与 <code>python -m src.cli export</code> 同一个 <code>export_package</code>，
-    不是第二套导出实现；包内含审计链、三元组与独立 <code>verify.py</code>。</p>
+    不是第二套导出实现；RV 导出时会先向审计链追加 <code>evidence.sign</code>（具名登记交付，
+    <strong>非密码学签名（仅写入审计事件）</strong>）。包内含审计链、三元组与独立 <code>verify.py</code>。</p>
 </section>
 {% endblock %}
 
 {% block script %}
-<script>wcaBindReview();</script>
+<script nonce="{{ csp_nonce }}">wcaBindReview();</script>
 {% endblock %}

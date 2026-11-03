@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import socket
@@ -62,6 +63,7 @@ class ServiceSpec:
     ready_timeout_s: float = 30.0
     grace_period_s: float = 12.0
     required_when: dict[str, Any] | None = None
+    requires_import: list[str] = field(default_factory=list)
     notes: str = ""
 
     @property
@@ -125,6 +127,7 @@ def load_services_config(path: Path | str | None = None, app_cfg: Any | None = N
             ready_timeout_s=float(row.get("ready_timeout_s", defaults.get("ready_timeout_s", 30))),
             grace_period_s=float(row.get("grace_period_s", defaults.get("grace_period_s", 12))),
             required_when=row.get("required_when"),
+            requires_import=[str(x) for x in (row.get("requires_import") or [])],
             notes=str(row.get("notes", "")),
         )
         if spec.managed and not spec.argv:
@@ -141,6 +144,48 @@ def load_services_config(path: Path | str | None = None, app_cfg: Any | None = N
                          + "\n恢复建议：修正 config/services.json 后重试；"
                          "服务列表支持增删条目，字段含义见 docs/服务启停.md")
     return cfg
+
+
+def probe_imports(python: str, modules: list[str], cwd: str | None = None) -> str | None:
+    """用**将要启动服务的那个解释器**试导入，返回第一个导不进的模块名（全都能导入则 None）。
+
+    为什么不在启动器进程内 `importlib.import_module` 试：本项目的服务是用
+    `argv[0]`（= 调用方的 `sys.executable`）拉起的子进程。用 cmd 里的全局 python 直接跑
+    `tools/start_services.py` 时，启动器自己可能什么都能导（因为它不 import fastapi），
+    而子进程起来就死在 `ImportError: cannot import name 'sentinel' from 'typing_extensions'`，
+    30 秒超时后工具只会说"端口若被占"——把解释器问题误诊成端口问题。
+    所以要探就得探**那个解释器**。
+    """
+    if not modules:
+        return None
+    code = "; ".join(f"import {m}" for m in modules)
+    try:
+        res = subprocess.run([python, "-c", code], cwd=cwd, capture_output=True,
+                             text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return modules[0]
+    if res.returncode == 0:
+        return None
+    out = (res.stderr or "") + (res.stdout or "")
+    for m in modules:
+        if re.search(rf"import name '?{re.escape(m)}'?|No module named '?{re.escape(m)}'?", out):
+            return m
+    return modules[0]
+
+
+def interpreter_hint(python: str) -> str:
+    """按"解释器是不是项目环境"给出两种不同的下一步，别把两种病因开同一张方子。"""
+    venv_dir = (ROOT / ".venv").resolve()
+    try:
+        resolved = Path(python).resolve()
+        inside = resolved.is_relative_to(venv_dir) or venv_dir in resolved.parents
+    except (OSError, ValueError):
+        inside = False
+    if inside:
+        return (f"解释器就是项目环境（{python}），但依赖导不进——先 `uv sync` 按 uv.lock 重建环境；"
+                "仍失败则看服务自己的日志")
+    return (f"当前解释器 {python} **不是**项目环境（{venv_dir}）。本仓库依赖只走 uv，"
+            f"请用 `uv run python tools/start_services.py`（或先激活 .venv 再跑）")
 
 
 def is_required(spec: ServiceSpec, env_snapshot: dict[str, str]) -> bool:
@@ -502,6 +547,15 @@ class ServiceManager:
                              f"stub 再启动本服务；本工具不会去猜一个没配置好的模型地址"))
                 continue
             st = states.get(s.name)
+            if s.requires_import and s.managed:
+                missing = probe_imports(s.argv[0] if s.argv else sys.executable,
+                                        s.requires_import, s.cwd)
+                if missing:
+                    out.append(ServiceOutcome(
+                        s.name, "precheck", False, "missing-interpreter-deps", port=s.port,
+                        message=f"将要启动它的解释器导不进 {missing}（依赖只装在项目 .venv 里）",
+                        hint=interpreter_hint(s.argv[0] if s.argv else sys.executable)))
+                    continue
             if st and st.origin == "foreign":
                 out.append(ServiceOutcome(
                     s.name, "precheck", False, "port-occupied", port=s.port,
@@ -561,11 +615,18 @@ class ServiceManager:
             tail = _tail(log_path, 12)
             self._force_kill(proc.pid, spec)
             self.store.remove(spec.name)
+            # 日志里是 ImportError 就别甩锅给端口——这是本工具曾经指错过的一次真事故
+            if re.search(r"ImportError|ModuleNotFoundError", tail):
+                hint = (f"子进程是**导入失败**，不是端口问题。{interpreter_hint(spec.argv[0] if spec.argv else sys.executable)}"
+                        f"；完整日志 {log_path}")
+            else:
+                hint = (f"看完整日志 {log_path}；端口 {spec.port} 若被占，"
+                        f"改 config/services.json 里的 port")
             return ServiceOutcome(
                 spec.name, "start", False, "failed", pid=proc.pid, port=spec.port,
                 elapsed_ms=self._ms(t0),
                 message=f"{spec.ready_timeout_s:.0f}s 内未就绪；日志尾部：{tail}",
-                hint=f"看完整日志 {log_path}；端口 {spec.port} 若被占，改 config/services.json 里的 port")
+                hint=hint)
 
         self.store.write({
             "schema": STATE_SCHEMA, "name": spec.name, "pid": proc.pid,

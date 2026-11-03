@@ -1,10 +1,18 @@
 // 界面只用原生 fetch：没有前端框架、没有构建流水线（需求 §6.2 / NFR-07）。
 // 每个动作都是"调服务端的一个接口"，服务端再调用与脚本同一个函数。
 
+function wcaCsrfToken() {
+  const meta = document.querySelector('meta[name="csrf-token"]');
+  return meta ? meta.content : "";
+}
+
 async function wcaPost(path, body) {
+  const headers = { "Content-Type": "application/json" };
+  const token = wcaCsrfToken();
+  if (token) headers["X-CSRF-Token"] = token;
   const res = await fetch(path, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     credentials: "same-origin",
     body: JSON.stringify(body || {}),
   });
@@ -53,6 +61,64 @@ function wcaBindCheck() {
   });
 }
 
+function wcaBindApprovalForm(mode, docNo) {
+  const form = document.getElementById("approvalForm");
+  if (!form) return;
+  const msg = document.getElementById("approvalMsg");
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    msg.textContent = "保存中…";
+    const data = Object.fromEntries(new FormData(form).entries());
+    const path = mode === "new" ? "/api/approvals/draft"
+      : `/api/approvals/${encodeURIComponent(docNo)}/edit`;
+    try {
+      const r = await wcaPost(path, data);
+      msg.textContent = `已保存 ${r.doc_no} v${r.version_no}（审计链已记录）`;
+      if (mode === "new") location.href = `/approvals/${encodeURIComponent(r.doc_no)}`;
+    } catch (e) { msg.textContent = "保存失败：" + e.message; }
+  });
+}
+
+function wcaBindApprovalPublish() {
+  document.querySelectorAll("button[data-doc][data-version]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const doc = btn.dataset.doc;
+      const version = btn.dataset.version;
+      const out = document.getElementById("pub-" + version);
+      if (out) out.textContent = "发布中…";
+      try {
+        const r = await wcaPost(`/api/approvals/${encodeURIComponent(doc)}/publish`,
+                                { version_no: Number(version) });
+        if (out) out.textContent = `已发布 v${r.version_no}，覆盖员工 ${r.coverage_employees}`;
+        location.reload();
+      } catch (e) {
+        if (out) out.textContent = "发布失败：" + e.message;
+      }
+    });
+  });
+}
+
+function wcaBindApprovalImport(maxBytes, maxRows) {
+  const btn = document.getElementById("doApprovalImport");
+  const msg = document.getElementById("approvalImportMsg");
+  if (!btn) return;
+  btn.addEventListener("click", async () => {
+    const input = document.getElementById("approvalCsv");
+    const file = input && input.files && input.files[0];
+    if (!file) { msg.textContent = "先选一个 .csv 文件"; return; }
+    if (file.size > maxBytes) { msg.textContent = `文件超过 ${maxBytes} 字节上限，拒绝导入`; return; }
+    const content = await file.text();
+    const rows = content.split(/\r?\n/).filter((x) => x.trim()).length - 1;
+    if (rows > maxRows) { msg.textContent = `数据行 ${rows} 超过 ${maxRows} 行上限，拒绝导入`; return; }
+    msg.textContent = "导入中…";
+    try {
+      const r = await wcaPost("/api/approvals/import", { filename: file.name, content });
+      msg.textContent = `已导入 ${r.docs} 个批文 / ${r.versions} 个版本 / ${r.rows} 行`;
+      setTimeout(() => location.reload(), 800);
+    } catch (e) { msg.textContent = "导入失败：" + e.message; }
+  });
+}
+
 function wcaBindReview() {
   document.querySelectorAll("button[data-rid]").forEach((btn) => {
     btn.addEventListener("click", async () => {
@@ -82,9 +148,12 @@ function wcaBindReview() {
     msg.textContent = "导出中…";
     try {
       const r = await wcaPost("/api/export", {});
+      const delivery = r.delivery_event_recorded
+        ? " / 已登记交付事件（非密码学签名）"
+        : " / 未登记交付事件";
       msg.textContent = `举证包 ${(r.package_zip || "").split(/[\\/]/).pop()}：`
         + `结论 ${r.counts.findings} 条 / 审计链 ${r.chain_ok ? "完整" : "已断"} / `
-        + `manifest ${(r.manifest_sha256 || "").slice(0, 12)}…`;
+        + `manifest ${(r.manifest_sha256 || "").slice(0, 12)}…${delivery}`;
     } catch (e) { msg.textContent = "导出失败：" + e.message; }
   });
 }

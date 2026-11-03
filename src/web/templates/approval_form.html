@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}{{ '新建批文草稿' if mode == 'new' else '编辑批文草稿' }}{% endblock %}
+{% block body %}
+<section>
+  <h2>{{ '新建审批草稿' if mode == 'new' else ('编辑草稿 · ' ~ doc.doc_no) }}</h2>
+  <p class="note">草稿保存后仍为 DRAFT；只有点“发布”才会展开 org/employee 范围并生成覆盖投影。
+    所有写操作要求 AD 角色与 CSRF token，操作者与文号会写入审计链。</p>
+
+  <form id="approvalForm">
+    <div class="row"><label>文号 <input name="doc_no" required size="26"
+      value="{{ doc.doc_no if doc else '' }}" {% if mode == 'edit' %}readonly{% endif %}></label>
+      <label>标题 <input name="title" required size="32"
+      value="{{ doc.title if doc else '' }}" {% if mode == 'edit' %}readonly{% endif %}></label></div>
+    <div class="row"><label>发文机关 <input name="issuer" required size="24"
+      value="{{ doc.issuer if doc else '人社局' }}" {% if mode == 'edit' %}readonly{% endif %}></label>
+      <label>工时制
+        <select name="regime" {% if mode == 'edit' %}disabled{% endif %}>
+          {% for r in regimes %}<option value="{{ r }}"
+            {% if (doc and doc.regime == r) or (not doc and r == 'comprehensive_monthly') %}selected{% endif %}>{{ r }}</option>{% endfor %}
+        </select>
+      </label></div>
+    <div class="row"><label>版本号 <input name="version_no" type="number" min="1"
+      value="{{ version.version_no if version else 1 }}" {% if mode == 'edit' %}readonly{% endif %}></label>
+      <label>生效起 <input name="valid_from" required
+        value="{{ version.valid_from if version else '2025-01-01' }}"></label>
+      <label>生效止 <input name="valid_to" required
+        value="{{ version.valid_to if version else '2025-12-31' }}"></label></div>
+    <div class="row"><label>岗位范围（JSON 或逗号） <input name="job_codes" required size="34"
+      value="{{ version.job_codes if version else '[\"warehouse_shift\"]' }}"></label>
+      <label>城市码 <input name="region_code" required size="10"
+        value="{{ version.region_code if version else default_region }}"></label></div>
+    <div class="row"><label>附件 SHA-256（64 位十六进制） <input name="attachment_sha256" required
+      size="70" value="{{ version.attachment_sha256 if version else '' }}"></label></div>
+    <div class="row"><label>范围类型
+        <select name="scope_type">
+          {% set current_type = version.scopes[0].scope_type if version and version.scopes else 'employee' %}
+          <option value="employee" {% if current_type == 'employee' %}selected{% endif %}>employee</option>
+          <option value="org" {% if current_type == 'org' %}selected{% endif %}>org</option>
+        </select></label>
+      <label>范围值（多个用逗号分隔） <input name="scope_value" required size="34"
+        value="{% if version and version.scopes %}{% for s in version.scopes %}{{ s.scope_value }}{% if not loop.last %},{% endif %}{% endfor %}{% else %}T-CMP{% endif %}"></label></div>
+    <div class="row"><label>变更说明 <input name="change_note" size="40"
+      value="{{ version.change_note if version else '' }}"></label></div>
+    <div class="row"><button type="submit">{{ '保存草稿' if mode == 'new' else '保存修改' }}</button>
+      <span id="approvalMsg" class="ai"></span></div>
+  </form>
+  <p class="ai">范围值可填员工 emp_id（employee）或组织 org_id（org）；发布时服务端按岗位/城市展开并检测重叠覆盖。</p>
+  <datalist id="employeeIds">{% for e in employees %}<option value="{{ e.emp_id }}">{{ e.pseudonym }} / {{ e.job_code }}</option>{% endfor %}</datalist>
+  <datalist id="orgIds">{% for o in orgs %}<option value="{{ o.org_id }}">{{ o.org_name }}</option>{% endfor %}</datalist>
+</section>
+{% endblock %}
+
+{% block script %}
+<script nonce="{{ csp_nonce }}">wcaBindApprovalForm({{ ('new' if mode == 'new' else 'edit')|tojson }}, {{ (doc.doc_no if doc else '')|tojson }});</script>
+{% endblock %}

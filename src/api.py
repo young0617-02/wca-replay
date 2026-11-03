@@ -18,16 +18,16 @@ from typing import Any
 from . import ENGINE_VERSION
 from .agent import ComplianceAgent
 from .anomaly import build_anomalies, severity_rollup
-from .config import Config
-from .db import connect, init_db
+from .config import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, Config
+from .db import (DB_BACKEND_SQLITE, Connection, DatabaseError, connect, init_db)
 from .evidence import verify_chain
 
 log = logging.getLogger("wca.api")
 
 # 连接生命周期账本：stop 工具在关停后核对 opened == closed，
-# 「每个请求开的 SQLite 连接都关掉了」因此是可断言的事实，不是靠 code review。
+# 「每个请求开的连接都关掉了」因此是可断言的事实，不是靠 code review。
 _STATS = {"opened": 0, "closed": 0}
-_LIVE: dict[int, sqlite3.Connection] = {}
+_LIVE: dict[int, Connection] = {}
 
 
 def open_connections() -> int:
@@ -44,7 +44,7 @@ def close_leaked_connections() -> int:
     for conn in list(_LIVE.values()):
         try:
             conn.close()
-        except sqlite3.Error:
+        except Exception:
             pass
         _LIVE.pop(id(conn), None)
         _STATS["closed"] += 1
@@ -52,14 +52,13 @@ def close_leaked_connections() -> int:
     return n
 
 
-def borrow_connection(cfg: Config) -> sqlite3.Connection:
+def borrow_connection(cfg: Config) -> Connection:
     """给**异步**端点自管的连接。
 
     异步端点跑在事件循环线程里，而依赖注入的同步生成器跑在线程池线程里；
-    把两者混用会撞上 sqlite3 的线程亲和检查（"created in that same thread"）。
-    所以异步端点用这对函数自己开、自己关，账本仍然记同一本。
+    连接必须一次只在一个线程里用，所以异步端点用这对函数自己开、自己关，账本仍然记同一本。
     """
-    conn = connect(cfg.db_path, cfg.sqlite_synchronous)
+    conn = connect(cfg)
     init_db(conn)
     _STATS["borrowed"] = _STATS.get("borrowed", 0) + 1
     _STATS["opened"] += 1
@@ -67,22 +66,27 @@ def borrow_connection(cfg: Config) -> sqlite3.Connection:
     return conn
 
 
-def return_connection(conn: sqlite3.Connection) -> None:
+def return_connection(conn: Connection) -> None:
     _LIVE.pop(id(conn), None)
     conn.close()
     _STATS["closed"] += 1
 
 
 def checkpoint_wal(cfg: Config) -> str:
-    """把 WAL 里的数据落回主库文件，返回 ok/skip/failed。"""
+    """SQLite 专用收尾：把 WAL 里的数据落回主库文件，返回 ok/skip/failed。
+
+    PostgreSQL 没有 WAL 落盘命令，也没有 -wal/-shm 脏文件，直接返回 skip。
+    """
+    if cfg.db_backend != DB_BACKEND_SQLITE:
+        return "skip(postgresql)"
     if not Path(cfg.db_path).is_file():
         return "skip"
     conn = None
     try:
-        conn = connect(cfg.db_path, cfg.sqlite_synchronous)
+        conn = connect(cfg)
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         return "ok"
-    except sqlite3.Error as exc:
+    except (sqlite3.Error, DatabaseError) as exc:
         log.warning("wal_checkpoint 失败：%s", exc)
         return "failed"
     finally:
@@ -101,18 +105,23 @@ except Exception as exc:  # pragma: no cover - 取决于本机装了什么
     IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
 
 
-def create_app(cfg: Config | None = None) -> Any:
+def create_app(cfg: Config | None = None, *, bound_host: str | None = None) -> Any:
     if not FASTAPI_AVAILABLE:
         raise RuntimeError(
             f"FastAPI 不可用（{IMPORT_ERROR}）。核心功能不依赖它：命令行 `python -m src.cli ask ...` "
             "走的是同一条链路。要起 API 请先 `uv sync`（本仓库依赖只走 uv 通道）。"
         )
     cfg = cfg or Config.load()
+    # M-01：非回环绑定 + 演示口令账号 → 启动期拒绝；回环地址保持演示可用。
+    from .startup_guard import assert_demo_credentials_safe
+
+    assert_demo_credentials_safe(cfg, bound_host)
 
     @asynccontextmanager
     async def lifespan(_app: Any):
-        log.info("api 启动：db=%s rule_pack=%s provider=%s backend=%s",
-                 cfg.db_path, cfg.rule_pack_id, cfg.llm_provider, cfg.embedding_backend)
+        log.info("api 启动：backend=%s db=%s rule_pack=%s provider=%s backend_embedding=%s",
+                 cfg.db_backend, cfg.safe_database_target, cfg.rule_pack_id, cfg.llm_provider,
+                 cfg.embedding_backend)
         try:
             yield
         finally:
@@ -126,9 +135,22 @@ def create_app(cfg: Config | None = None) -> Any:
     app = FastAPI(title="worktime-compliance-agent (MVP, read-only)", version=ENGINE_VERSION,
                   docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
 
+    from .web.security import (DemoCredentialRequestGuardMiddleware, SecurityHeadersMiddleware,
+                               SecuritySettings)
+
+    # 先注册请求层演示口令闸门，再注册安全头；Starlette 后注册的中间件更靠外层，
+    # 因此 503 拒绝响应同样会带上 X-Frame-Options / CSP 等统一安全头。
+    # 这道闸补的是 `uvicorn src.api:app --host 0.0.0.0`：模块级 app 在 create_app 时
+    # 拿不到真实绑定地址，只能按请求 Host 再判一次。
+    app.add_middleware(DemoCredentialRequestGuardMiddleware, cfg=cfg)
+    # 纯 ASGI 中间件：页面、静态文件与 401/403/404/503 都统一带安全头；nonce 与 Cookie 策略
+    # 写入 request.state，路由不需要再各自重复判断 HTTPS。
+    app.add_middleware(SecurityHeadersMiddleware,
+                       settings=SecuritySettings.from_cfg(cfg))
+
     def get_conn():
         """每个请求一条连接，请求结束即关——之前是借出去不还给连接池，属于泄漏。"""
-        conn = connect(cfg.db_path, cfg.sqlite_synchronous)
+        conn = connect(cfg)
         init_db(conn)
         _STATS["opened"] += 1
         _LIVE[id(conn)] = conn
@@ -144,7 +166,7 @@ def create_app(cfg: Config | None = None) -> Any:
         request: Request,
         q: str = Query(..., min_length=1, description="自然语言提问"),
         top_k: int | None = Query(None, ge=1, le=20),
-        conn: sqlite3.Connection = Depends(get_conn),
+        conn: Connection = Depends(get_conn),
     ) -> dict:
         # GAP-05：基线这里是个可由调用方填的 as_emp 参数——等于任何人都能冒充他人。
         # 现在身份只能来自会话；未登录直接 401，越权测试可以直连接口打回。
@@ -182,7 +204,7 @@ def create_app(cfg: Config | None = None) -> Any:
 
     @app.get("/evidence/{run_id}", summary="取举证包（需会话；EM 无导出权）")
     def evidence(run_id: str, request: Request,
-                 conn: sqlite3.Connection = Depends(get_conn)) -> Any:
+                 conn: Connection = Depends(get_conn)) -> Any:
         from .auth import resolve_session
 
         user = resolve_session(conn, request.cookies.get("wca_session"))
@@ -227,10 +249,11 @@ def create_app(cfg: Config | None = None) -> Any:
     return app
 
 
-def serve(cfg: Config | None = None, *, host: str = "127.0.0.1", port: int = 8000) -> None:
+def serve(cfg: Config | None = None, *, host: str = DEFAULT_WEB_HOST,
+          port: int = DEFAULT_WEB_PORT) -> None:
     import uvicorn
 
-    app_ = create_app(cfg)
+    app_ = create_app(cfg, bound_host=host)
     uvicorn.run(app_, host=host, port=port, log_level="info")
 
 

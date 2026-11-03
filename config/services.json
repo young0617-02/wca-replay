@@ -37,14 +37,18 @@
         "src.api_server"
       ],
       "host": "127.0.0.1",
-      "port": 8000,
+      "port": 9763,
       "probe": "port",
       "ready_timeout_s": 30,
       "grace_period_s": 12,
       "env": {
         "WCA_SERVICE": "api"
       },
-      "notes": "由 src/api_server.py 包一层 uvicorn：停止文件是优雅关闭主通道（Windows 分离进程收不到控制台信号）。对外只有 2 个只读 GET（/ask、/evidence/{run_id}），且只绑 127.0.0.1——权限模型在应用层，不要把它暴露到局域网。"
+      "notes": "由 src/api_server.py 包一层 uvicorn：停止文件是优雅关闭主通道（Windows 分离进程收不到控制台信号）。对外只有 2 个只读 GET（/ask、/evidence/{run_id}），且只绑 127.0.0.1——权限模型在应用层，不要把它暴露到局域网。 requires_import：预检会用「将要启动服务的那个解释器」试导入这些模块，导不进就在启动前报清楚（否则 30s 超时只会误指端口被占）。",
+      "requires_import": [
+        "fastapi",
+        "uvicorn"
+      ]
     }
   ]
 }

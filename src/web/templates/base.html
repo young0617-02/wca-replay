@@ -3,8 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  {% if csrf_token %}<meta name="csrf-token" content="{{ csrf_token }}">{% endif %}
   <title>{{ app_name }} · {% block title %}{% endblock %}</title>
-  <style>
+  <style nonce="{{ csp_nonce }}">
     body { font: 14px/1.6 system-ui, "Microsoft YaHei", sans-serif; margin: 0; color: #1b1b1b; }
     header { display: flex; gap: 12px; align-items: center; padding: 10px 16px;
              border-bottom: 1px solid #ddd; background: #fafafa; flex-wrap: wrap; }
@@ -23,6 +24,7 @@
                                       border-radius: 3px; }
     button { cursor: pointer; }
     .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .logout-form { margin: 0; }
     .note { background: #fff8e1; border-left: 3px solid #f9a825; padding: 8px 10px; }
     .ai { font-size: 12px; color: #7a5900; }
     pre { white-space: pre-wrap; word-break: break-all; background: #f7f7f7; padding: 8px;
@@ -38,10 +40,12 @@
   <nav>
     <a href="/">① 导入与异常</a> ·
     <a href="/review">② 复核台</a> ·
-    <a href="/qa">③ 制度问答</a>
+    <a href="/qa">③ 制度问答</a> ·
+    <a href="/approvals">④ 审批台账</a>
   </nav>
   {% if me is defined and me %}
-    <form method="post" action="/logout" style="margin:0">
+    <form method="post" action="/logout" class="logout-form">
+      {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
       <button type="submit">退出（{{ me.username }} / {{ me.roles|join('、') }}）</button>
     </form>
   {% endif %}

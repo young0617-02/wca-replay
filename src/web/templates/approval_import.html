@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}审批台账 CSV 导入{% endblock %}
+{% block body %}
+<section>
+  <h2>审批台账 CSV 批量导入</h2>
+  <p class="note">整批校验、单事务写入：任一行非法会回滚全部，不做半份台账。
+    上限 {{ max_bytes }} 字节 / {{ max_rows }} 行；超限直接拒绝，不截断。仅 AD 可用。</p>
+  <div class="row">
+    <input id="approvalCsv" type="file" accept=".csv">
+    <button id="doApprovalImport" type="button">导入</button>
+    <span id="approvalImportMsg" class="ai"></span>
+  </div>
+  <p class="ai">必需列：<code>{{ fields|join(', ') }}</code></p>
+  <p class="ai">同一批文/版本的多行必须 title/issuer/regime/期限/岗位/城市/附件一致；否则整批拒绝。</p>
+</section>
+{% endblock %}
+
+{% block script %}
+<script nonce="{{ csp_nonce }}">wcaBindApprovalImport({{ max_bytes|tojson }}, {{ max_rows|tojson }});</script>
+{% endblock %}

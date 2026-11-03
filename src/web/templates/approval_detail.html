@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}批文详情 · {{ doc.doc_no }}{% endblock %}
+{% block body %}
+<section>
+  <h2>批文详情：{{ doc.doc_no }}</h2>
+  <table>
+    <tbody>
+      <tr><th>标题</th><td>{{ doc.title }}</td><th>发文机关</th><td>{{ doc.issuer }}</td></tr>
+      <tr><th>工时制</th><td>{{ doc.regime }}</td><th>状态</th><td>{{ doc.status }}</td></tr>
+      <tr><th>当前版本</th><td>{{ ('v' ~ doc.current_version) if doc.current_version else '—' }}</td>
+          <th>更新时间</th><td>{{ doc.updated_at }}</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2>版本链（{{ versions|length }} 个版本）</h2>
+  <table>
+    <thead><tr><th>版本</th><th>状态</th><th>生效期</th><th>岗位范围</th><th>城市</th>
+      <th>范围（org/employee）</th><th>附件 SHA-256</th><th>发布</th></tr></thead>
+    <tbody>
+    {% for v in versions %}
+      <tr>
+        <td>v{{ v.version_no }}</td>
+        <td>{{ v.status }}</td>
+        <td>{{ v.valid_from }} ~ {{ v.valid_to }}</td>
+        <td><code>{{ v.job_codes }}</code></td>
+        <td>{{ v.region_code }}</td>
+        <td>
+          {% for s in v.scopes %}{{ s.scope_type }}:{{ s.scope_value }}{% if not loop.last %}；{% endif %}
+          {% else %}—{% endfor %}
+        </td>
+        <td><code title="{{ v.attachment_sha256 }}">{{ v.attachment_sha256 }}</code></td>
+        <td>
+          {% if v.status == 'DRAFT' and 'AD' in me.roles %}
+            <button data-doc="{{ doc.doc_no }}" data-version="{{ v.version_no }}">发布此版本</button>
+            <span id="pub-{{ v.version_no }}" class="ai"></span>
+          {% else %}
+            <span class="ai">{{ v.published_by or '—' }} {{ v.published_at or '' }}</span>
+          {% endif %}
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="8">没有版本</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% if 'AD' in me.roles %}<p><a href="/approvals/{{ doc.doc_no }}/edit">编辑草稿版本</a></p>{% endif %}
+</section>
+
+<section>
+  <h2>说明</h2>
+  <p class="ai">批文与版本只做登记与发布，不改变员工申报的工时制；发布只生成 employee_approval_coverage 覆盖投影。
+    旧 worktime_approval 台账保持只读，不被本页面改写。</p>
+</section>
+{% endblock %}
+
+{% block script %}
+<script nonce="{{ csp_nonce }}">wcaBindApprovalPublish();</script>
+{% endblock %}

@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}员工审批覆盖{% endblock %}
+{% block body %}
+<section>
+  <h2>员工审批覆盖投影</h2>
+  <form method="get" action="/approvals/coverage" class="row">
+    <input name="emp_id" placeholder="员工 emp_id" value="{{ emp_id }}" required>
+    <button type="submit">查询</button>
+  </form>
+  {% if employee %}
+    <p>员工 {{ employee.emp_id }}（{{ employee.pseudonym }}）· 岗位 {{ employee.job_code }} ·
+      城市 {{ employee.region_code }} · 申报工时制 {{ employee.worktime_regime }}</p>
+  {% endif %}
+</section>
+
+<section>
+  <table>
+    <thead><tr><th>文号</th><th>版本</th><th>工时制</th><th>生效期</th>
+      <th>岗位范围</th><th>城市</th><th>附件 SHA-256</th><th>发布时间</th></tr></thead>
+    <tbody>
+    {% for c in coverage %}
+      <tr>
+        <td>{{ c.doc_no }}</td><td>v{{ c.version_no }}</td><td>{{ c.regime }}</td>
+        <td>{{ c.valid_from }} ~ {{ c.valid_to }}</td>
+        <td><code>{{ c.job_codes }}</code></td><td>{{ c.region_code }}</td>
+        <td><code title="{{ c.attachment_sha256 }}">{{ c.attachment_sha256 }}</code></td>
+        <td>{{ c.published_at }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="8">{% if emp_id %}该员工没有已发布覆盖投影{% else %}输入员工 emp_id 查询{% endif %}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

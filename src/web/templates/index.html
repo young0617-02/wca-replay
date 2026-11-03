@@ -83,7 +83,7 @@
 {% endblock %}
 
 {% block script %}
-<script>
+<script nonce="{{ csp_nonce }}">
   wcaBindImport();
   wcaBindCheck();
 </script>

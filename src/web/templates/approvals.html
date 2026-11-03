@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}审批台账{% endblock %}
+{% block body %}
+<section>
+  <h2>④ 审批台账（批文 {{ docs|length }} 条）</h2>
+  <p class="note">只读视图：AU 与 AD 都可查看批文、版本链、范围和员工覆盖投影。
+    AD 可新建/编辑草稿、发布与批量导入；所有写操作在服务端校验角色与 CSRF，并把操作者与批文标识写入审计链。</p>
+  {% if 'AD' in me.roles %}
+    <div class="row">
+      <a href="/approvals/new"><button type="button">新建草稿</button></a>
+      <a href="/approvals/import"><button type="button">CSV 批量导入</button></a>
+    </div>
+  {% endif %}
+</section>
+
+<section>
+  <h2>按员工查覆盖投影</h2>
+  <form method="get" action="/approvals/coverage" class="row">
+    <input name="emp_id" placeholder="员工 emp_id，例如 T-CMP" value="{{ emp_id|default('') }}" required>
+    <button type="submit">查询</button>
+  </form>
+</section>
+
+<section>
+  <table>
+    <thead><tr><th>文号</th><th>标题</th><th>工时制</th><th>状态</th><th>生效期</th>
+      <th>版本数</th><th>当前版本</th><th>操作</th></tr></thead>
+    <tbody>
+    {% for d in docs %}
+      <tr>
+        <td><a href="/approvals/{{ d.doc_no }}">{{ d.doc_no }}</a></td>
+        <td>{{ d.title }}</td>
+        <td>{{ d.regime }}</td>
+        <td>
+          {% if d.status == 'PUBLISHED' %}已发布
+          {% elif d.status == 'DRAFT' %}草稿
+          {% else %}{{ d.status }}{% endif %}
+        </td>
+        <td>{{ d.valid_from or '—' }} ~ {{ d.valid_to or '—' }}</td>
+        <td>{{ d.version_count }}</td>
+        <td>{{ ('v' ~ d.current_version) if d.current_version else '—' }}</td>
+        <td><a href="/approvals/{{ d.doc_no }}">查看</a>
+          {% if 'AD' in me.roles %}<a href="/approvals/{{ d.doc_no }}/edit">编辑草稿</a>{% endif %}
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="8">尚无批文。{% if 'AD' in me.roles %}可先新建草稿或 CSV 导入。{% endif %}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

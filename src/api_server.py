@@ -23,7 +23,8 @@ import uvicorn
 
 from . import ENGINE_VERSION
 from .api import checkpoint_wal, close_leaked_connections, connection_stats, create_app
-from .config import Config
+from .config import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, Config
+from .startup_guard import DemoCredentialError
 
 STOP_POLL_S = 0.2
 
@@ -49,7 +50,7 @@ async def _amain(cfg: Config, name: str, host: str, port: int, run_dir: Path) ->
         log.warning("清理上次遗留的停止请求文件 %s", stop_path)
         stop_path.unlink(missing_ok=True)
 
-    app = create_app(cfg)
+    app = create_app(cfg, bound_host=host)
     config = uvicorn.Config(
         app, host=host, port=port, log_level="info", access_log=False,
         lifespan="on", backlog=128, timeout_graceful_shutdown=10,
@@ -78,8 +79,8 @@ async def _amain(cfg: Config, name: str, host: str, port: int, run_dir: Path) ->
 def main(argv: list[str] | None = None) -> int:
     args = list(argv if argv is not None else sys.argv[1:])
     name = os.environ.get("WCA_SERVICE_NAME") or (args[0] if args else "api")
-    host = os.environ.get("WCA_HOST", "127.0.0.1")
-    port = int(os.environ.get("WCA_PORT", "8000"))
+    host = os.environ.get("WCA_HOST", DEFAULT_WEB_HOST)
+    port = int(os.environ.get("WCA_PORT", str(DEFAULT_WEB_PORT)))
     run_dir = Path(os.environ.get("WCA_RUN_DIR", "var/run"))
     run_dir.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
@@ -93,6 +94,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         return asyncio.run(_amain(cfg, name, host, port, run_dir))
+    except DemoCredentialError as exc:
+        print(f"启动失败：{exc}", file=sys.stderr)
+        return 2
     except KeyboardInterrupt:
         return 130
 

@@ -18,11 +18,11 @@ import pytest
 
 from conftest import EMPLOYEES, load_base, punch, schedule
 from src import api as api_mod
-from src.auth import hash_password
+from src.auth import hash_password, load_users_file
 from src.config import Config
 from src.db import connect, init_db
 from src.engine import run_check
-from src.evidence import export_package
+from src.evidence import export_package, verify_chain
 from src.ingest import import_csv_file
 from src.kb import build_kb
 
@@ -31,11 +31,12 @@ pytestmark = pytest.mark.skipif(not api_mod.FASTAPI_AVAILABLE,
 
 ROOT = Path(__file__).resolve().parent.parent
 ACCOUNTS = {"op1": "wca-test-op1-pw", "rv1": "wca-test-rv1-pw", "em1": "wca-test-em1-pw",
-            "ad1": "wca-test-ad1-pw"}
+            "ad1": "wca-test-ad1-pw", "au1": "wca-test-au1-pw"}
 # 账号绑定夹具自己的员工（不是 data/raw 那批演示数据）：
 #   op1 / em1 / ad1 都是 T-STD，只是角色不同；rv1 是主管 T-FLX；被问的他人是 T-OTHER。
 ROLE_BINDINGS = [("op1", "T-STD", ["OP", "EM"]), ("rv1", "T-FLX", ["RV"]),
-                 ("em1", "T-STD", ["EM"]), ("ad1", "T-STD", ["AD"])]
+                 ("em1", "T-STD", ["EM"]), ("ad1", "T-STD", ["AD"]),
+                 ("au1", "T-STD", ["AU"])]
 
 
 @pytest.fixture
@@ -49,7 +50,8 @@ def ui(tmp_path):
                    "pw_hash": hash_password(ACCOUNTS[u])} for u, e, r in ROLE_BINDINGS],
     }, ensure_ascii=False), encoding="utf-8")
 
-    cfg = Config.load(env_path=None, WCA_DB_PATH=str(db),
+    cfg = Config.load(env_path=None, WCA_DB_BACKEND="sqlite", WCA_DB_PATH=str(db),
+                      WCA_DB_IDENTITY_PATH=str(tmp_path / "db_target.json"),
                       WCA_DATA_DIR=str(tmp_path / "data"), WCA_REPORTS_DIR=str(tmp_path / "reports"),
                       WCA_PACKAGES_DIR=str(tmp_path / "packages"),
                       WCA_USERS_PATH=str(users_file),
@@ -79,12 +81,70 @@ def ui(tmp_path):
     return client, conn, cfg, out
 
 
+def _csrf_from_page(client) -> str:
+    """按角色找一个可打开的页面，取服务端下发的 CSRF token。"""
+    for path in ("/", "/review", "/qa", "/approvals"):
+        page = client.get(path)
+        if page.status_code != 200:
+            continue
+        match = re.search(r'name="csrf-token" content="([^"]+)"', page.text)
+        if match:
+            return match.group(1)
+    raise AssertionError("登录后没有找到带 CSRF token 的页面")
+
+
 def login(client, username: str, password: str | None = None):
     res = client.post("/login", data={"username": username,
                                       "password": password or ACCOUNTS[username]},
                       follow_redirects=False)
     assert res.status_code in (302, 303), f"登录未重定向：{res.status_code} {res.text[:120]}"
+    # 会话写接口统一要求 CSRF；这里的 header 只模拟页面 meta 的行为，
+    # 反向测试会显式删除它，证明服务端不是靠“测试客户端默认放行”。
+    client.headers["X-CSRF-Token"] = _csrf_from_page(client)
     return res
+
+
+def test_session_write_without_csrf_is_rejected_without_side_effect(ui):
+    client, conn, cfg, out = ui
+    login(client, "op1")
+    token = client.headers["X-CSRF-Token"]
+    del client.headers["X-CSRF-Token"]
+    before = int(conn.execute("SELECT COUNT(*) c FROM run").fetchone()["c"])
+    assert client.post("/api/check", json={"region_code": cfg.region_code,
+                                          "start": "2025-09-01",
+                                          "end": "2025-09-05"}).status_code == 403
+    assert client.post("/api/import", json={"filename": "x.csv", "content": "a,b\n"}).status_code == 403
+    assert client.post("/api/export", json={}).status_code == 403
+    assert client.post("/api/ask", json={"question": "加班怎么算"}).status_code == 403
+    assert client.post("/logout").status_code == 403
+    after = int(conn.execute("SELECT COUNT(*) c FROM run").fetchone()["c"])
+    assert after == before, "缺 CSRF 的写请求不得产生 run"
+    client.headers["X-CSRF-Token"] = token
+    assert client.post("/api/check", json={"region_code": cfg.region_code,
+                                          "start": "2025-09-01",
+                                          "end": "2025-09-05"}).status_code == 200
+
+
+def test_au_login_is_read_only_and_write_is_403(ui):
+    client, conn, cfg, out = ui
+    login(client, "au1")
+    assert client.get("/qa").status_code == 200
+    assert client.post("/api/check", json={}).status_code == 403
+    assert client.post("/api/import", json={}).status_code == 403
+    bad = client.post("/login", data={"username": "au1", "password": "wrong"},
+                      follow_redirects=True)
+    assert "wca-test-au1-pw" not in bad.text
+
+
+def test_au_demo_account_is_hash_only_and_read_only():
+    cfg = Config.load(env_path=ROOT / "nonexistent.env", WCA_DB_BACKEND="sqlite")
+    users = load_users_file(cfg)
+    au = next(u for u in users if u["username"] == "au1")
+    assert au["roles"] == ["AU"]
+    assert str(au["pw_hash"]).startswith("scrypt$")
+    text = Path(cfg.users_path).read_text(encoding="utf-8")
+    assert "wca-demo-au1" not in text
+    assert "scrypt$" in text
 
 
 def test_ui_parity_two_channels_agree(ui):
@@ -240,6 +300,28 @@ def test_export_single_entry_hash_matches_script(ui):
     assert body["chain_ok"] is True
 
 
+def test_export_page_uses_delivery_wording_and_writes_event(ui):
+    """界面不再说“签发”；导出动作写入 evidence.sign，并明确非密码学签名。"""
+    client, conn, cfg, out = ui
+    login(client, "rv1")
+    html = client.get("/review").text
+    assert "签发" not in html, "页面不得再出现“签发”字样"
+    assert "登记交付事件" in html
+    assert "非密码学签名" in html
+
+    res = client.post("/api/export", json={"run_id": out.run_id})
+    assert res.status_code == 200, res.text[:200]
+    body = res.json()
+    assert body["delivery_event_recorded"] is True
+
+    row = conn.execute(
+        "SELECT actor, action, run_id FROM audit_event WHERE action = 'evidence.sign' "
+        "ORDER BY seq DESC LIMIT 1").fetchone()
+    assert (row["actor"], row["action"], row["run_id"]) == (
+        "human:rv1", "evidence.sign", out.run_id)
+    assert verify_chain(conn, cfg).ok
+
+
 def test_passwords_and_secrets_never_leak(ui):
     """NFR-15：口令只存 scrypt 哈希；密钥不进响应、日志与页面。"""
     client, conn, cfg, out = ui
@@ -268,15 +350,21 @@ def test_route_whitelist_replaces_count_assertion(ui):
     paths = {p for _, p in routes}
     allowed = {"/login", "/logout", "/", "/review", "/qa", "/ask", "/evidence/{run_id}",
                "/api/import", "/api/check", "/api/review/{review_id}/decision", "/api/export",
-               "/api/ask", "/api/session", "/static"}
+               "/api/ask", "/api/session", "/static",
+               "/approvals", "/approvals/coverage", "/approvals/new", "/approvals/import",
+               "/approvals/{doc_no}", "/approvals/{doc_no}/edit",
+               "/api/approvals/draft", "/api/approvals/import",
+               "/api/approvals/{doc_no}/edit", "/api/approvals/{doc_no}/publish"}
     unexpected = paths - allowed
     assert not unexpected, f"界面之外新增了未登记的接口：{sorted(unexpected)}"
     # 所有写接口都必须 POST（幂等读接口才是 GET）；GET /login 只是渲染表单，写入口是 POST /login
     write_only = {"/api/import", "/api/check", "/api/export", "/api/ask", "/logout"}
     for method, path in routes:
-        if path in write_only or path.startswith("/api/review/"):
+        if path in write_only or path.startswith(("/api/review/", "/api/approvals/")):
             assert method == "POST", f"{path} 的写语义接口不应该是 {method}"
-        if path in {"/", "/review", "/qa", "/api/session", "/ask", "/evidence/{run_id}"}:
+        if path in {"/", "/review", "/qa", "/api/session", "/ask", "/evidence/{run_id}",
+                    "/approvals", "/approvals/coverage", "/approvals/new", "/approvals/import",
+                    "/approvals/{doc_no}", "/approvals/{doc_no}/edit"}:
             assert method == "GET", f"{path} 是只读视图/读取口，不该有 {method} 面"
     methods_of_login = {m for m, p in routes if p == "/login"}
     assert methods_of_login == {"GET", "POST"}, f"登录接口形态变了：{methods_of_login}"
