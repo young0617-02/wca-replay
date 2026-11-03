@@ -25,7 +25,7 @@ uv run python -m src.cli export --run <run_id> --signing-key var/keys/ed25519.ke
    锚点不要写回包内；`package_sha256` 只对 zip 有效。
 4. 交付物：zip 包、公开公钥、四/五段锚点记录、包文件 SHA-256 与 `artifacts_digest`。私钥、原始数据库、内部路径不交付。
 
-## 2. 验收方（0.3.0 起）
+## 2. 验收方（0.4.0 起）
 
 ```powershell
 # 在发行物目录安装 wheel + 锁定依赖后（见 §5）
@@ -108,9 +108,11 @@ RESULT FAIL
 |---|---|
 | `worktime_compliance_agent-<版本>-py3-none-any.whl` | 验算代码；含 `wca` / `wca-replay` / `wca-verify` 入口与 `src/schema.sql`、`config/region_profile.json` |
 | `requirements.lock.txt` | `uv export --frozen --all-groups --format requirements.txt --no-emit-project` 的完整锁定清单，**逐包带 `--hash=sha256:`**；含 dev group（pytest），验算不需要它，但保留完整闭包 |
-| `SHA256SUMS` | 对目录内除自身外每个文件的 SHA-256 |
-| `RELEASE.json` | 版本、构建时间、`git_commit`、Python 要求、支持规则包、证据包 schema 版本 |
-| `README-验收.md` | 一页安装/运行/核对说明 |
+| `SHA256SUMS` | 对目录内除自身与 `SHA256SUMS.sig` 外每个文件的 SHA-256 |
+| `SHA256SUMS.sig` | 对 `SHA256SUMS` 原始字节的 Ed25519 detached 签名（Base64；0.4.0 起） |
+| `VERIFY-SIGNATURE.txt` | key_id、公钥副本与 `SHA256SUMS.sig` 验证片段（0.4.0 起） |
+| `RELEASE.json` | 版本、构建时间、`git_commit`、Python 要求、支持规则包、证据包 schema 版本、`release_signature`（0.4.0 起） |
+| `README-验收.md` | 一页安装/运行/核对说明；含 `conclusion_digest` 九字段边界与 `rule_version` 语义 |
 
 发行物不入库（`dist/` 已 gitignore）。构建脚本强制工作树干净，并把 commit 写进 wheel 内的
 `src/_release_info.py`；因此 `RELEASE.json.git_commit`、wheel 内 `BUILD_COMMIT` 与包内
@@ -128,11 +130,20 @@ Get-Content SHA256SUMS -Encoding UTF8 | ForEach-Object {
   "OK $name"
 }
 Get-Content RELEASE.json -Encoding UTF8 | ConvertFrom-Json
+
+# 0.4.0 起：验发行物自身签名（需 PyNaCl）
+$sums = [IO.File]::ReadAllBytes("SHA256SUMS")
+$sig = [Convert]::FromBase64String((Get-Content SHA256SUMS.sig -Raw).Trim())
+$pub = [Convert]::FromBase64String((Get-Content RELEASE.json -Raw | ConvertFrom-Json).release_signature.public_key_b64)
+# 也可直接按 VERIFY-SIGNATURE.txt 的 PyNaCl 片段执行：
+# VerifyKey($pub).verify($sums, $sig) -> 打印 SHA256SUMS SIGNATURE OK
 ```
 
 `RELEASE.json` 必查字段：`version`、`build_time`、`git_commit`、`python_requires`、
-`supported_rule_pack_versions`、`evidence_schema_versions`。任一文件哈希不符，或
-`git_commit` 与你方记录的发行提交不符，**拒收**，不要继续安装。
+`supported_rule_pack_versions`、`evidence_schema_versions`；0.4.0 起另查
+`release_signature.key_id` 是否与你方独立渠道记录的 key_id 一致。任一文件哈希不符，
+或 `git_commit` 与你方记录的发行提交不符，**拒收**，不要继续安装。`SHA256SUMS.sig`
+只证明 `SHA256SUMS` 与私钥匹配，**不是可复现构建证明**，也不代表来源身份已核验。
 
 ### 5.2 干净 venv（不能复用项目 `.venv`）
 
@@ -185,7 +196,9 @@ py -3.12 -m venv .venv-clean
 - `wca-verify` **不执行包内 `verify.py`**：它只读取文件、重算哈希、重算链、重算 `inputs_digest`、验签、从 `findings.csv` 反算 `conclusion_digest`。包内 `verify.py` 被替换时，独立验算器报告 `VERIFY SCRIPT FAIL`，且不会运行替换后的脚本。
 - **额外文件失败关闭**：包根与 `inputs/` 出现未在 `artifact_sha256` / `inputs/manifest.json` 声明的文件，直接 `EXTRA FILE FAIL`。没有 `--allow-extra-files` 开关；原因是额外文件可能夹带数据或指令，验收器不应替接收方猜测“哪些额外文件无害”。
 - **发现 vs 已确认结论**：`findings.csv` 行数对应 manifest `counts.findings`（未签认）；`conclusions_final.csv` 行数对应 `counts.final_conclusions`（已签认）。`wca-verify` 从 `findings.csv` 按公开规范化算法反算 `conclusion_digest`，并输出 `FINDINGS DIGEST OK`；`wca replay` 也执行同一反算。
+- **摘要覆盖范围**：`conclusion_digest` 只覆盖 `rule_id`、`rule_version`、`emp_id`、`work_date`、`period_key`、`severity`、`metric`、`citations`、`explanation` 九个规范字段。`source_rel_path`、`source_line_no`、`severity_label` 不进摘要，由 `artifact_sha256["findings.csv"]` 负责。**单个 `FINDINGS DIGEST OK` 不等于整张表未变**，必须同时 `ARTIFACTS OK`。
 - `manifest.counts.rule_versions` 记录单条规则的版本分布（例如 v4 规则 100 条、v5 规则 16 条）。**`rule_version` 是单条规则版本，不等于 rule pack 版本**；v5 包中保留未改判据的 v4 规则是预期，不是包版本漂移。
+- **policies/**：包内 `policies/` 含 `RULE-PACK.md`、`LAW-REFERENCES.md`、`口径声明-对外版.md`、`字段口径与条文依据-对外版.md`（13 项存疑逐条）、`CONFIDENCE.md`；全部进入 `artifact_sha256`/`artifacts_digest`/签名，0.4.0 包 `ARTIFACTS OK checked=14`。
 - **锚点选择：部分通过，而非静默 OK**。`wca-verify` / `wca replay` 未传 `--expect-anchor` 时仍执行字节层检查，但输出 `ANCHOR NOT CHECKED` + `RESULT PARTIAL`（exit 2）；理由是：内部/预检仍需要看字节层结果，但对外验收必须有包外锚点，`PARTIAL` 明确阻断“没有锚点也算通过”。`--expect-triple` 只是 legacy 外部比对，不约束 schema，也不给 `RESULT OK`。
 - 锚点记录可另带 `package_sha256`（zip 字节 SHA-256）与 `artifacts_digest`（包根工件清单摘要）；用 `--expect-package-sha256` / `--expect-artifacts-digest` 传入，不匹配失败关闭。目录包不能比较 `package_sha256`。
 
@@ -245,7 +258,7 @@ RESULT OK
 
 # wca replay 复算同一包
 导出代码：version=0.2.0 commit=f170b272f0dcff51aa88d4489526af6d202c0716 python=3.12.8 rule_pack=rp-2026.11.gd-pilot-standard.v5
-签名：有效 / pinned（来源可信） / key_id=ed25519:f574b0f5edd417721f4d5077439a33f91ba04359e6b01e45192efdaf35e815c5
+签名：有效 / pinned（仅与供给公钥匹配；0.4.0 起统一为中性表述） / key_id=ed25519:f574b0f5edd417721f4d5077439a33f91ba04359e6b01e45192efdaf35e815c5
 = rule_pack_version: 期望 rp-2026.11.gd-pilot-… 实得 rp-2026.11.gd-pilot-…
 = input_fingerprint: 期望 0e225473cf3fd6156326… 实得 0e225473cf3fd6156326…
 = conclusion_digest: 期望 01bd44034d61a8ead824… 实得 01bd44034d61a8ead824…
@@ -328,7 +341,7 @@ COUNTS 发现（未签认） 116 条 / 已确认结论 0 条
 RULE VERSIONS {"rp-2026.10.gd-pilot-standard.v4": 100, "rp-2026.11.gd-pilot-standard.v5": 16}
 CHAIN OK events=8
 INPUTS DIGEST OK e9d901308ad4864d005c09fa12a3041e1a49648a469d4b6bc225d59e87a11368
-SIGNATURE OK / pinned（来源可信） / key_id=ed25519:8680c06aff744854a46e8e68082af7f3800fa0fc5f7e36288eafbff480966915
+SIGNATURE OK / pinned (key matches supplied pin; independent key_id verification not done) / key_id=ed25519:8680c06aff744854a46e8e68082af7f3800fa0fc5f7e36288eafbff480966915
 PACKAGE SHA256 OK 15f3c7f6e2236640ea99ccdd7642e73ff5be295a8d97c9552f27eadd4d88888e
 ANCHOR CHECK OK
 RESULT OK
@@ -407,3 +420,54 @@ wca replay package/<包>.zip --public-key trusted-public-key.pub `
   在本发行物上成立，不能说明公钥属于某个已核验的交付主体，也不能替代第三方签名、时间戳或指纹交换。
 - 复测方仍需自行构造 A–H 坏包并留存命令/输出/退出码；本交接包按要求不放源码、docs、reports、
   测试、数据库、私钥或旧版发行物。
+
+## 10. 0.4.0 门禁、policies 与含已确认结论包实测（2026-11-04）
+
+发行物：`dist/wca-replay-0.4.0/`，共 **341,089 字节**；commit
+`d796aff7198ed87d9c180f27484d2c7c9c5abe5a`；wheel 298,696 字节，
+sha256 `cb10142baeed3a44026fd620b78ddffb2d057641ecdeda1895883d9663c632a3`。
+发行物增加 `SHA256SUMS.sig`（Ed25519，key_id
+`ed25519:5e797e1842cf49c7043ba238f2a085b08c87d0a49663440f989cdc7df9ee5bb6`）与
+`VERIFY-SIGNATURE.txt`；`SHA256SUMS` 覆盖除自身与 `.sig` 外的发行文件，签名已实测
+`SHA256SUMS SIGNATURE OK`。**这不是可复现构建证明**，只是发行物文件签名。
+
+**RESULT OK 门禁**：`wca-verify` 只有同时满足“签名 pin 命中 + 外部锚点通过 +
+外部 package_sha256 通过”才给 `RESULT OK`。无公钥 / 无包 SHA / 无锚点三种组合均为
+`RESULT PARTIAL`（exit 2）；源码 `tests/test_package_binding.py` 22 项覆盖。工具输出已把
+“来源可信”改为 `pinned (key matches supplied pin; independent key_id verification not done)`，
+不再比 `KEY-NOTE.txt` 更乐观。
+
+**policies 进包**：0.4.0 包 `ARTIFACTS OK checked=14`（9 个原工件 + 5 个 policies 文件）；
+`policies/` 纳入 `artifact_sha256`、`artifacts_digest` 与签名，并加入 allowlist，不会误报
+`EXTRA FILE`。`policies/字段口径与条文依据-对外版.md` 保留 13 项存疑逐条；`CONFIDENCE.md`
+标注成熟度/未定项。包体从 0.3.0 的 55,876 字节增至 68,357 字节（仅必要文本）。
+
+**P0-4 含已确认结论的包（临时库，不写活动库）**：
+`var/confirmed-conclusions/packages/run-20261104T030208-8b57f589.zip`，68,357 字节，
+sha256 `564003d6d46c93412325e9f9245900e58cc459cea0572e34c1c1d20c9eee62fe`；
+`counts` 发现 116 / 已确认结论 2；`responsibility.signed=true`；
+`artifacts_digest=086f46d720f230388e3baa9b3410077508961209bfd8d7dd772ea74ac692757f`；
+锚点 `3,rp-2026.11.gd-pilot-standard.v5,8b3b54a09aa8ede51697b899ddf2d2e738262d6a612b9bee4e34037a6aa8456e,01bd44034d61a8ead8248a1b7845b794488b46a26424c488bb525ff0d25ac10a`。
+在仓库外 `%TEMP%\wca-030-clean\venv`（已装 0.4.0 wheel）实测：
+
+```text
+wca-verify ... --expect-anchor ... --expect-package-sha256 ... --expect-artifacts-digest ...
+COUNTS 发现（未签认） 116 条 / 已确认结论 2 条
+SIGNATURE OK / pinned (key matches supplied pin; independent key_id verification not done)
+PACKAGE SHA256 ... / external=OK
+ARTIFACTS DIGEST manifest-internal OK / external OK
+ANCHOR OK
+RESULT OK
+
+wca replay ...
+= input_fingerprint / = conclusion_digest
+发现（未签认） 期望 116 / 实得 116
+已确认结论（包内）期望 2 / 实际 2 条（replay 不重建人工确认）
+RESULT OK
+```
+
+- 证据路径：`var/confirmed-conclusions/`（临时 SQLite、包、公钥、私钥均不入库；`var/` 已 gitignore）。
+- **仍不能证明**：人工确认的业务正确性、确认人身份与审批权限；`replay` 不重建人工确认，只核对
+  包内 `conclusions_final.csv` 行数与 manifest `counts.final_conclusions`。
+- `SHA256SUMS.sig` 只签 SHA256SUMS，不覆盖 `.sig` 自身；公钥/锚点/包 SHA 同时被替换仍会失守。
+- 0.4.0 发行物未入库；`dist/` 已 gitignore。
