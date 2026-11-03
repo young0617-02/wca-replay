@@ -232,3 +232,41 @@ EXPECTED FAIL：replay exit=1（PRODUCER FAIL，失败关闭）
 该真实包：`run-20261104T001053-25ebf744`，54,872 字节，自含输入 8 个 / 301,679 字节，
 锚点 `3,rp-2026.11.gd-pilot-standard.v5,0e225473cf3fd6156326063213a7fa332f64347298a170a5391104fff544287b,01bd44034d61a8ead8248a1b7845b794488b46a26424c488bb525ff0d25ac10a`。
 完整日志：`var/release-clean/clean-room-output.txt`（`var/` 已 gitignore）。
+
+## 7. 交接目录结构（2026-11-04 验收演练）
+
+本轮交接目录：`handoff/20261104-验收演练/`，共 **372,067 字节**（11 个文件，含交付清单）：
+
+```text
+handoff/20261104-验收演练/                                     372,067
+├── READ-ME-FIRST.txt                                          1,375
+├── 交付清单.txt                                                1,680
+├── trusted-public-key.pub                                        46
+├── anchor.txt                                                  1,051
+├── anchor.json                                                   266
+├── package/
+│   └── run-20261104T001053-25ebf744.zip                       54,872
+└── release/                                                   312,777
+    ├── README-验收.md                                          4,705
+    ├── RELEASE.json                                              858
+    ├── requirements.lock.txt                                  33,003
+    ├── SHA256SUMS                                                365
+    └── worktime_compliance_agent-0.2.0-py3-none-any.whl      273,846
+```
+
+`handoff/` 已 gitignore。交付时整体复制该目录即可；**不要**把仓库源码、`docs/`、`reports/`、
+测试集、数据库、演练日志、私钥或攻击者密钥带进去。
+
+- `release/` 是 `dist/wca-replay-0.2.0/` 的副本：wheel、`RELEASE.json`、`README-验收.md`
+  与 dist 字节一致。交接副本的 `requirements.lock.txt` 头部去掉了本机绝对路径（依赖版本与
+  哈希未变），`release/SHA256SUMS` 已按交接副本重算，因此 `release/` 比 dist 少 99 字节。
+- `release/SHA256SUMS` 只覆盖 `release/` 内除自身外的文件；`package/`、公钥与锚点不在其中。
+  复核命令见 `交付清单.txt` 里的 `Get-FileHash` 片段。
+- `anchor.json` 只有四段字段 `schema_version` / `rule_pack_version` / `input_fingerprint` /
+  `conclusion_digest`，与 `--expect-anchor` 参数一致；锚点类型、记录时间、记录人、每段含义
+  在 `anchor.txt`。
+- `trusted-public-key.pub` 是裸 Base64 公钥（不是 PEM），因此用实际扩展名 `.pub`；只含公钥。
+- 搬离仓库技术检查：把整个目录复制到 `%TEMP%\wca-handoff-techcheck`，在仓库外新建 venv，
+  只装副本的 `release/requirements.lock.txt`（`--require-hashes`）与 wheel（`--no-deps`），
+  再跑 `wca-verify`；输出 `RESULT OK`，`import src` 指向该 venv 的 `site-packages`。
+  `replay` 故意未跑，留给盲跑会话。
