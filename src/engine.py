@@ -6,16 +6,17 @@ run 记录「规则版本 + 输入指纹 + 结论摘要」三元组；同一三�
 from __future__ import annotations
 
 import json
-import sqlite3
 import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
 from . import ENGINE_VERSION
 from .config import Config
-from .db import get_meta, insert_many, set_meta, transaction
+from .db import Connection, Row, get_meta, insert_many, set_meta, transaction
 from .evidence import append_audit, conclusion_digest, genesis_of, input_fingerprint, set_genesis
 from .observability import Timer
+from .rules.approvals import (approval_ledger_digest, coverage_ledger_digest,
+                              load_approvals, load_coverage_approvals)
 from .rules.dayfacts import DayFacts, compute_day_facts, load_employee_bundle, stamp
 from .rules.findings import (SEV_DEFENSIBLE, SEV_REVIEW, SEV_VIOLATION, Finding,
                              UNATTRIBUTED)
@@ -27,7 +28,7 @@ def profile_tiers(cfg: Config, region_code: str) -> list[str]:
     """该城市档的地域层级（国家/省/市），供举证包与报表写明结论是按哪一级条文算的。"""
     city = cfg.region_profile.city(region_code)
     return list(city.tier) if city else []
-from .rules.rulepack import DAY_RULES, EmpScope, RULE_PACK_VERSION
+from .rules.rulepack import RULE_PACK_V4, RULE_PACK_V5, RULE_PACK_V6, EmpScope, rules_for_pack
 
 RULE_PACK_KEY = "rule_pack_version"
 CRITERIA_FROZEN_KEY = "criteria_frozen_on"  # R7：判据冻结日，之后修订须留痕
@@ -43,6 +44,7 @@ class CheckOutcome:
     elapsed_us: int = 0
     employees: int = 0
     days: int = 0
+    warnings: list[str] = field(default_factory=list)
 
     def counts_by_severity(self) -> dict[str, int]:
         out = {SEV_DEFENSIBLE: 0, SEV_REVIEW: 0, SEV_VIOLATION: 0}
@@ -56,7 +58,7 @@ def new_run_id(started: datetime) -> str:
 
 
 
-def load_employees(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+def load_employees(conn: Connection) -> list[Row]:
     return conn.execute(
         "SELECT emp_id, pseudonym, job_code, org_id, region_code, worktime_regime, "
         "contract_approved_flex, pay_base_cents, pay_base_hourly_cents, normal_hourly_cents, "
@@ -64,7 +66,7 @@ def load_employees(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     ).fetchall()
 
 
-def build_scope(conn: sqlite3.Connection, cfg: Config, calendar: HolidayCalendar, emp: sqlite3.Row,
+def build_scope(conn: Connection, cfg: Config, calendar: HolidayCalendar, emp: Row,
                 start: date, end: date) -> EmpScope:
     decision = decide(
         emp_id=emp["emp_id"],
@@ -84,6 +86,13 @@ def build_scope(conn: sqlite3.Connection, cfg: Config, calendar: HolidayCalendar
         decision=decision,
         daily_std_minutes=cfg.daily_std_minutes,
         weekly_std_minutes=cfg.weekly_std_minutes,
+        approvals=(load_coverage_approvals(conn, emp["emp_id"])
+                   if cfg.rule_pack_id == RULE_PACK_V6 else
+                   load_approvals(conn, emp["emp_id"])
+                   if cfg.rule_pack_id == RULE_PACK_V5 else []),
+        range_start=start,
+        range_end=end,
+        rule_pack_version=cfg.rule_pack_id,
     )
     # O-1：整段区间只预取一次，逐日改为纯计算（原来每个「员工×日」发 8 条 SQL）
     bundle = load_employee_bundle(conn, cfg, emp["emp_id"], start, end)
@@ -100,6 +109,29 @@ def build_scope(conn: sqlite3.Connection, cfg: Config, calendar: HolidayCalendar
         (emp["emp_id"],),
     ).fetchall()
     for r in issues:
+        # QUAL-DUP 大量重复时，ingest 存一条按员工汇总的摘要；这里按天展开，
+        # 保持 QUAL-01 的 issue_count / 前 3 个样本 / 前 5 个行号引用与治理前一致。
+        if str(r["rule_id"]) == "QUAL-DUP":
+            try:
+                payload = json.loads(str(r["detail"] or "{}"))
+            except (TypeError, ValueError):
+                payload = {}
+            if payload.get("qual_dup_summary"):
+                for day, meta in sorted((payload.get("days") or {}).items()):
+                    count = int(meta.get("count", 0))
+                    samples = list(meta.get("samples") or [])
+                    refs = list(meta.get("line_refs") or [])
+                    for idx in range(count):
+                        file_id, line_no = (refs[idx] if idx < len(refs)
+                                            else (r["file_id"], r["line_no"]))
+                        scope.quality_issues.append({
+                            "rule_id": "QUAL-DUP", "severity": r["severity"],
+                            "work_date": day,
+                            "raw_value": (samples[idx] if idx < len(samples)
+                                          else str(r["raw_value"] or "")),
+                            "file_id": file_id, "line_no": line_no,
+                        })
+                continue
         scope.quality_issues.append({
             "rule_id": r["rule_id"], "severity": r["severity"], "work_date": r["work_date"],
             "raw_value": r["raw_value"], "file_id": r["file_id"], "line_no": r["line_no"],
@@ -120,7 +152,7 @@ ATTENDANCE_UPSERT_SQL = (
 )
 
 
-def persist_attendance_day(conn: sqlite3.Connection, scope: EmpScope) -> None:
+def persist_attendance_day(conn: Connection, scope: EmpScope) -> None:
     """批量 UPSERT，整批包在一个事务里（O-1 收尾）。
 
     连接是 autocommit（`isolation_level=None`），不加事务时 executemany 的**每一行**
@@ -166,17 +198,17 @@ def _dedupe_refs(refs: list[dict]) -> list[dict]:
     return sorted(out, key=lambda x: (str(x["file_id"]), str(x["line_no"])))
 
 
-def run_check(conn: sqlite3.Connection, cfg: Config, *, start: date, end: date,
+def run_check(conn: Connection, cfg: Config, *, start: date, end: date,
               emp_ids: list[str] | None = None, actor: str = "system:engine",
               notes: str = "", top_k: int | None = None) -> CheckOutcome:
     if start > end:
         raise ValueError(f"区间非法：start={start} > end={end}")
-    if cfg.rule_pack_id != RULE_PACK_VERSION:
-        # 结论元数据带的是代码里的版本，run 行带的是配置里的版本；两者不一致时
-        # 举证包会被贴上错误的可复现声明，必须挡住。
+    rules = rules_for_pack(cfg.rule_pack_id)
+    if rules is None:
+        # v4 包保留回放能力；v5 默认；未知版本必须拒绝，不能静默挑一套规则。
         raise ValueError(
-            f"规则包版本不一致：代码 RULE_PACK_VERSION={RULE_PACK_VERSION}，"
-            f"配置 WCA_RULE_PACK={cfg.rule_pack_id}。改判据要升版本，配置必须跟着改。")
+            f"不支持的规则包版本：WCA_RULE_PACK={cfg.rule_pack_id}。"
+            f"可用版本：{RULE_PACK_V4}、{RULE_PACK_V5}。改判据要升版本，配置必须跟着改。")
     timer = Timer()
     set_genesis(conn, cfg)
     started = datetime.now(cfg_tz())
@@ -206,6 +238,26 @@ def run_check(conn: sqlite3.Connection, cfg: Config, *, start: date, end: date,
         wanted = set(emp_ids)
         employees = [e for e in employees if e["emp_id"] in wanted]
 
+    warnings: list[str] = []
+    if cfg.rule_pack_id == RULE_PACK_V5:
+        # v5 的 REG-01/COMP-C01 依赖审批台账；台账变化必须改变输入指纹。
+        # v4 不加入这个字段，历史包的指纹与结论摘要保持不变。
+        scope["approval_ledger_sha256"] = approval_ledger_digest(
+            conn, [str(e["emp_id"]) for e in employees])
+    elif cfg.rule_pack_id == RULE_PACK_V6:
+        # v6 只采信 P0 覆盖投影；投影变化必须改变输入指纹。
+        scope["approval_coverage_sha256"] = coverage_ledger_digest(
+            conn, [str(e["emp_id"]) for e in employees])
+        legacy_rows = int(conn.execute(
+            "SELECT COUNT(*) AS c FROM worktime_approval").fetchone()["c"])
+        if legacy_rows:
+            # 告警只走 CheckOutcome.warnings，不写进 scope：scope 是输入指纹的一部分，
+            # 而旧表在不在包内（replay 只重建覆盖投影）会改变指纹，导致同一 v6 包
+            # 在“旧表仍有行”的库上导出、在 replay 临时库里无法复现三元组。
+            warnings.append(
+                f"旧 worktime_approval 仍有 {legacy_rows} 行未迁移；"
+                "v6 只采信 employee_approval_coverage，REG-01 将不按旧表计算")
+
     findings: list[Finding] = []
     total_days = 0
     referenced_files: set[int] = set()   # O-11a：指纹只覆盖本次真正引用到的输入文件
@@ -222,7 +274,7 @@ def run_check(conn: sqlite3.Connection, cfg: Config, *, start: date, end: date,
                 if issue.get("file_id") is not None:
                     referenced_files.add(int(issue["file_id"]))
         with timer("engine.rules"):
-            for rule_fn in DAY_RULES:
+            for rule_fn in rules:
                 findings.extend(rule_fn(es, cfg))
 
     fingerprint = input_fingerprint(conn, scope, file_ids=referenced_files)
@@ -260,11 +312,15 @@ def run_check(conn: sqlite3.Connection, cfg: Config, *, start: date, end: date,
                     (run_id, "finding", f"{f.rule_id}:{f.emp_id}:{f.work_date or f.period_key}",
                      "OPEN", "校验引擎自动开单，待人工复核"),
                 )
-    append_audit(conn, run_id=run_id, actor=actor, action="check.run",
-                 payload={"triple": {"rule_pack_version": cfg.rule_pack_id,
-                                     "input_fingerprint": fingerprint, "conclusion_digest": digest},
-                          "counts": counts, "findings": len(findings), "employees": len(employees)},
-                 ts=started.isoformat(), cfg=cfg)
+        # 审计 append 与 run/finding 同事务：append_audit 的 advisory lock 会覆盖
+        # 审计写入直到本事务提交，两个并发 run_check 不会抢同一个 audit_event.seq。
+        append_audit(conn, run_id=run_id, actor=actor, action="check.run",
+                     payload={"triple": {"rule_pack_version": cfg.rule_pack_id,
+                                         "input_fingerprint": fingerprint,
+                                         "conclusion_digest": digest},
+                              "counts": counts, "findings": len(findings),
+                              "employees": len(employees)},
+                     ts=started.isoformat(), cfg=cfg)
 
     for seg, vals in timer.samples().items():
         conn.execute(
@@ -278,11 +334,11 @@ def run_check(conn: sqlite3.Connection, cfg: Config, *, start: date, end: date,
     return CheckOutcome(
         run_id=run_id, findings=findings, input_fingerprint=fingerprint, conclusion_digest=digest,
         counts=counts, elapsed_us=timer.total_us(),
-        employees=len(employees), days=total_days,
+        employees=len(employees), days=total_days, warnings=warnings,
     )
 
 
-def _unattributed_findings(conn: sqlite3.Connection, cfg: Config) -> list[Finding]:
+def _unattributed_findings(conn: Connection, cfg: Config) -> list[Finding]:
     """O-2：归属不到员工的质量问题（表头缺列、员工不存在、emp_id 为空）汇成一条未归属结论。
 
     旧行为是这类行只存在于 ingest_issue 与举证包 quality_issues.csv，
@@ -339,7 +395,7 @@ def cfg_tz():
     return CN_TZ
 
 
-def criteria_status(conn: sqlite3.Connection) -> dict:
+def criteria_status(conn: Connection) -> dict:
     """R7 判据冻结状态：冻结日之后的修订必须留痕。"""
     return {
         "rule_pack_version": get_meta(conn, RULE_PACK_KEY, ""),

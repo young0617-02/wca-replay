@@ -5,11 +5,11 @@
 
 from __future__ import annotations
 
-import sqlite3
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 
 from ..config import Config
+from ..db import Connection, Row
 from ..util import CN_TZ, clamp_minutes, iso_minute, parse_date, parse_timestamp
 from .holidays import (
     DAY_PLAIN_REST,
@@ -30,6 +30,7 @@ class PunchEvent:
     raw_text: str
     file_id: int | None
     line_no: int | None
+    device_id: str = ""
     from_correction: bool = False
 
     @property
@@ -55,6 +56,8 @@ class DayFacts:
     crossed_midnight: bool = False
     quality_flags: list[str] = field(default_factory=list)
     source_refs: list[dict] = field(default_factory=list)
+    conflicts: list[dict] = field(default_factory=list)  # OFF-01：同时点同类型的多来源冲突
+    plan_present: bool = False                           # SHIFT-01：是否有排班计划
     regime: str = "standard"
     comp_time_granted: bool = False
     planned_minutes: int = 0
@@ -118,13 +121,13 @@ class EmployeeBundle:
     punch_refs: dict[str, list[dict]]
     corrections: dict[str, list[PunchEvent]]
     corr_refs: dict[str, list[dict]]
-    plans: dict[str, sqlite3.Row]
+    plans: dict[str, Row]
     leaves: list[dict]
     trips: list[dict]
     comp_days: set[str]
 
 
-def load_employee_bundle(conn: sqlite3.Connection, cfg: Config, emp_id: str,
+def load_employee_bundle(conn: Connection, cfg: Config, emp_id: str,
                          start: date, end: date) -> EmployeeBundle:
     """按员工一次性预取（5 条 SQL），替代原来「每员工每工作日 8 条 SQL」。"""
     emp = conn.execute("SELECT worktime_regime FROM employee WHERE emp_id = ?", (emp_id,)).fetchone()
@@ -132,12 +135,14 @@ def load_employee_bundle(conn: sqlite3.Connection, cfg: Config, emp_id: str,
     punches: dict[str, list[PunchEvent]] = {}
     punch_refs: dict[str, list[dict]] = {}
     for r in conn.execute(
-        "SELECT punch_id, event_ts, punch_type, raw_text, day_anchor, source_file_id, source_line_no "
+        "SELECT punch_id, event_ts, punch_type, raw_text, day_anchor, device_id, "
+        "source_file_id, source_line_no "
         "FROM punch WHERE emp_id = ? ORDER BY event_ts, punch_id", (emp_id,)
     ).fetchall():
         punches.setdefault(r["day_anchor"], []).append(PunchEvent(
             ts=parse_timestamp(r["event_ts"]), punch_type=r["punch_type"], raw_text=r["raw_text"],
-            file_id=r["source_file_id"], line_no=r["source_line_no"]))
+            file_id=r["source_file_id"], line_no=r["source_line_no"],
+            device_id=str(r["device_id"] or "")))
         if r["source_file_id"] is not None:
             punch_refs.setdefault(r["day_anchor"], []).append(
                 {"file_id": r["source_file_id"], "line_no": r["source_line_no"]})
@@ -158,7 +163,7 @@ def load_employee_bundle(conn: sqlite3.Connection, cfg: Config, emp_id: str,
             corr_refs.setdefault(anchor, []).append(
                 {"file_id": c["source_file_id"], "line_no": c["source_line_no"]})
 
-    plans: dict[str, sqlite3.Row] = {}
+    plans: dict[str, Row] = {}
     for pl in conn.execute(
         "SELECT work_date, planned_start, planned_end, rest_minutes, crosses_midnight, "
         "source_file_id, source_line_no FROM shift_plan WHERE emp_id = ? AND work_date BETWEEN ? AND ?",
@@ -206,11 +211,35 @@ def compute_day_facts(bundle: EmployeeBundle, cfg: Config, calendar: HolidayCale
     first_in = ins[0] if ins else None
     last_out = outs[-1] if outs else None
 
+    # OFF-01：同一时点、同一类型出现不同设备或不同来源 -> 两条事实都保留，只标记冲突。
+    # 这里只观察事件，不改变配对结果、minutes_worked 或 source_refs。
+    conflicts: list[dict] = []
+    by_event: dict[tuple[str, str], list[PunchEvent]] = {}
+    for event in events:
+        by_event.setdefault((iso_minute(event.ts), event.punch_type), []).append(event)
+    for (event_ts, punch_type), group in sorted(by_event.items()):
+        identities = {
+            (e.from_correction, e.device_id, e.file_id, e.line_no) for e in group
+        }
+        if len(identities) < 2:
+            continue
+        conflicts.append({
+            "event_ts": event_ts,
+            "punch_type": punch_type,
+            "sources": [
+                {"kind": "correction" if e.from_correction else "punch",
+                 "device_id": e.device_id, "file_id": e.file_id, "line_no": e.line_no}
+                for e in sorted(group, key=lambda x: (x.from_correction, x.device_id,
+                                                      str(x.file_id), str(x.line_no)))
+            ],
+        })
+
     try:
         day_info: DayInfo | None = calendar.classify(work_date)
     except YearNotCovered:
         day_info = None
     plan = bundle.plans.get(iso)
+    # plan_present 在 DayFacts 构造时传入，避免先引用未创建的对象
 
     facts = DayFacts(
         emp_id=bundle.emp_id,
@@ -219,6 +248,8 @@ def compute_day_facts(bundle: EmployeeBundle, cfg: Config, calendar: HolidayCale
         holiday_label=day_info.holiday_label if day_info else "",
         regime=bundle.regime,
         source_refs=refs,
+        conflicts=conflicts,
+        plan_present=plan is not None,
         notice_doc_id=day_info.notice_doc_id if day_info else "",
         ambiguous_day_type=day_info.ambiguous if day_info else False,
         workday_arrangement_unverified=(
@@ -288,7 +319,7 @@ def compute_day_facts(bundle: EmployeeBundle, cfg: Config, calendar: HolidayCale
 
 
 def build_day_facts(
-    conn: sqlite3.Connection,
+    conn: Connection,
     cfg: Config,
     emp_id: str,
     work_date: date,
@@ -310,7 +341,7 @@ def anchor_day(ts: datetime, cfg: Config) -> str:
     return day_anchor_of(ts, cfg)
 
 
-def iter_employee_dates(conn: sqlite3.Connection, emp_id: str,
+def iter_employee_dates(conn: Connection, emp_id: str,
                         start: date, end: date, cfg: Config) -> list[date]:
     """该员工在区间内出现过工作日锚点的日期集合（含排班计划日期）。"""
     rows = conn.execute(

@@ -7,11 +7,19 @@ from .quantities import (  # noqa: F401
     RATE_RESTDAY_OT_PERMILLE,
     RATE_WEEKDAY_OT_PERMILLE,
 )
-from .rulepack import RULE_CATALOG, RULE_PACK_VERSION, EmpScope  # noqa: F401
+from .rulepack import (  # noqa: F401
+    RULE_CATALOG,
+    RULE_PACK_V4,
+    RULE_PACK_V5,
+    RULE_PACK_VERSION,
+    EmpScope,
+    rules_for_pack,
+)
 
 __all__ = [
     "HolidayCalendar", "YearNotCovered", "Finding",
     "SEV_DEFENSIBLE", "SEV_REVIEW", "SEV_VIOLATION",
-    "RULE_CATALOG", "RULE_PACK_VERSION", "EmpScope",
+    "RULE_CATALOG", "RULE_PACK_V4", "RULE_PACK_V5", "RULE_PACK_VERSION", "EmpScope",
+    "rules_for_pack",
     "RATE_WEEKDAY_OT_PERMILLE", "RATE_RESTDAY_OT_PERMILLE", "RATE_HOLIDAY_OT_PERMILLE",
 ]

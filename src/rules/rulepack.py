@@ -15,12 +15,14 @@
 
 from __future__ import annotations
 
+import calendar
 from dataclasses import dataclass, field
 from datetime import date
 
 from ..config import Config
 from ..util import round_half_up
 from . import citations as C
+from .approvals import evaluate_approval_evidence
 from .dayfacts import DayFacts
 from .findings import SEV_DEFENSIBLE, SEV_REVIEW, SEV_VIOLATION, Finding
 from .holidays import DAY_PLAIN_REST, DAY_REST_SWAP, DAY_STATUTORY_HOLIDAY, DAY_WORKDAY
@@ -30,11 +32,16 @@ from .quantities import (
     RATE_WEEKDAY_OT_PERMILLE,
 )
 from .regime import (
+    CYCLE_DAYS,
+    REGIME_FLEXIBLE,
     REGIME_STANDARD,
     RegimeDecision,
 )
 
-RULE_PACK_VERSION = "rp-2026.10.gd-pilot-standard.v4"
+RULE_PACK_V4 = "rp-2026.10.gd-pilot-standard.v4"
+RULE_PACK_V5 = "rp-2026.11.gd-pilot-standard.v5"
+RULE_PACK_V6 = "rp-2026.11.gd-pilot-standard.v6"
+RULE_PACK_VERSION = RULE_PACK_V5   # 默认仍 v5；v6 需显式 WCA_RULE_PACK 启用
 
 # 《劳动法》第 36 条：平均每周不超过 44 小时（40 小时来自国务院令第 174 号第 3 条）
 WEEKLY_STATUTORY_CAP_MINUTES = 44 * 60
@@ -53,6 +60,12 @@ class EmpScope:
     weekly_std_minutes: int
     facts: list[DayFacts] = field(default_factory=list)
     quality_issues: list[dict] = field(default_factory=list)
+    approvals: list[dict] = field(default_factory=list)
+    range_start: date | None = None
+    range_end: date | None = None
+    # 产出该员工结论的规则包版本；v6 用它把 finding.rule_version 标成 v6，
+    # v4/v5 仍沿用 RuleMeta.version，保证历史包摘要可复现。
+    rule_pack_version: str = RULE_PACK_V4
     # 城市档：地方倍数条文与是否建档，来自 config/region_profile.json（src 里没有市名）
     local_citations: list[str] = field(default_factory=list)
     region_label: str = ""
@@ -70,7 +83,8 @@ class RuleMeta:
     tier: str            # day / week / month / quality / scope
     citations: list[str]
     severity_kind: str   # pay(报酬类，最高需复核) / cap(上限类，可下违规) / scope / quality
-    version: str = RULE_PACK_VERSION
+    # v5 保留 v4 规则的回放：未改语义的旧规则继续标记 v4；新增规则标记 v5。
+    version: str = RULE_PACK_V4
 
 
 RULE_CATALOG: list[RuleMeta] = [
@@ -99,6 +113,15 @@ RULE_CATALOG: list[RuleMeta] = [
              [C.MOHRSS_503_3, C.MOHRSS_503_7], "scope"),
     RuleMeta("SCOPE-04", "员工所属城市不在档位表内，只出国家层面结论", "scope",
              [C.LABOR_LAW_44], "scope"),
+    # ---------------------------------------------------------------- v5 新增
+    RuleMeta("REG-01", "特殊工时审批覆盖核验（缺失/过期/岗位/城市）", "scope",
+             [C.MOHRSS_503_3, C.MOHRSS_503_7], "scope", RULE_PACK_V5),
+    RuleMeta("COMP-C01", "综合工时周期统计（总工时与法定标准差值）", "period",
+             [C.MOHRSS_503_5, C.WAGE_PAYMENT_13], "scope", RULE_PACK_V5),
+    RuleMeta("SHIFT-01", "多段班次不可拼接（打卡事实不闭合）", "quality",
+             [C.POLICY_ATTENDANCE, C.MOHRSS_503_6], "quality", RULE_PACK_V5),
+    RuleMeta("OFF-01", "离线补传冲突（同时点同类型多来源）", "quality",
+             [C.POLICY_ATTENDANCE, C.LCT_4], "quality", RULE_PACK_V5),
 ]
 
 CATALOG_BY_ID = {m.rule_id: m for m in RULE_CATALOG}
@@ -114,6 +137,7 @@ def _finding(
     work_date: str | None = None,
     period_key: str | None = None,
     citations: list[str] | None = None,
+    source_refs: list[dict] | None = None,
 ) -> Finding:
     meta = CATALOG_BY_ID[rule_id]
     if facts is not None and work_date is None:
@@ -126,15 +150,17 @@ def _finding(
         for cite in emp.local_citations:          # 报酬类结论按员工所属城市补地方条文
             if cite not in base:
                 base.append(cite)
+    refs = list(source_refs) if source_refs is not None else (list(facts.source_refs) if facts else [])
     return Finding(
         rule_id=rule_id,
-        rule_version=meta.version,
+        rule_version=(emp.rule_pack_version
+                      if emp.rule_pack_version == RULE_PACK_V6 else meta.version),
         emp_id=emp.emp_id,
         severity=severity,
         explanation=explanation,
         citations=base,
         metric=metric,
-        source_refs=(list(facts.source_refs) if facts else []),
+        source_refs=refs,
         work_date=work_date,
         period_key=period_key,
     )
@@ -531,4 +557,209 @@ def rule_quality(emp: EmpScope, cfg: Config) -> list[Finding]:
     return out
 
 
-DAY_RULES = [rule_day, rule_week, rule_month, rule_scope, rule_quality]
+# ------------------------------------------------------------------ v5 新增规则
+REG01_REVIEW_CITATIONS = [C.MOHRSS_503_3, C.MOHRSS_503_7]
+
+
+def rule_reg_01(emp: EmpScope, cfg: Config) -> list[Finding]:
+    """特殊工时审批覆盖：只核验台账，不改变 effective_regime，不下违规/倍数/金额。"""
+    declared = emp.decision.declared_regime
+    if declared == REGIME_STANDARD or (declared not in CYCLE_DAYS
+                                       and declared != REGIME_FLEXIBLE):
+        return []
+    evidence = evaluate_approval_evidence(
+        declared_regime=declared, job_code=emp.job_code, region_code=emp.region_code,
+        approvals=emp.approvals, start=emp.range_start, end=emp.range_end,
+    )
+    if evidence.covered:
+        return []
+    selected = evidence.selected or {}
+    text = (
+        f"员工申报 {declared}，但审批台账不能证明覆盖本次校验："
+        + "；".join(evidence.reasons)
+        + f"。实际执行工时制仍按 regime.decide 的 {emp.regime} 处理（本规则不改变它）；"
+        "本结论只要求补正/复核审批证据，不产出违规、倍数或金额。"
+    )
+    return [_finding(
+        emp, "REG-01", SEV_REVIEW, text,
+        {
+            "declared_regime": declared,
+            "effective_regime": emp.regime,
+            "reasons": evidence.reasons,
+            "approval_rows_checked": evidence.checked,
+            "doc_no": str(selected.get("doc_no") or ""),
+            "valid_from": str(selected.get("valid_from") or ""),
+            "valid_to": str(selected.get("valid_to") or ""),
+            "job_codes": str(selected.get("job_codes") or ""),
+            "region_code": str(selected.get("region_code") or ""),
+            "attachment_present": int(bool(str(selected.get("attachment_sha256") or ""))),
+        },
+        citations=REG01_REVIEW_CITATIONS,
+    )]
+
+
+def _month_periods(start: date, end: date) -> list[tuple[str, date, date]]:
+    out: list[tuple[str, date, date]] = []
+    y, m = start.year, start.month
+    while (y, m) <= (end.year, end.month):
+        last = calendar.monthrange(y, m)[1]
+        p_start, p_end = date(y, m, 1), date(y, m, last)
+        out.append((f"{y:04d}-{m:02d}", p_start, p_end))
+        m += 1
+        if m == 13:
+            y, m = y + 1, 1
+    return out
+
+
+def _quarter_periods(start: date, end: date) -> list[tuple[str, date, date]]:
+    out: list[tuple[str, date, date]] = []
+    for y in range(start.year, end.year + 1):
+        for q in range(1, 5):
+            first_month = 3 * q - 2
+            last_month = 3 * q
+            p_start = date(y, first_month, 1)
+            p_end = date(y, last_month, calendar.monthrange(y, last_month)[1])
+            out.append((f"{y:04d}-Q{q}", p_start, p_end))
+    return out
+
+
+def _year_periods(start: date, end: date) -> list[tuple[str, date, date]]:
+    return [(f"{y:04d}", date(y, 1, 1), date(y, 12, 31))
+            for y in range(start.year, end.year + 1)]
+
+
+def _periods_for(declared_regime: str, start: date, end: date) -> list[tuple[str, date, date]]:
+    if declared_regime == "comprehensive_monthly":
+        return _month_periods(start, end)
+    if declared_regime == "comprehensive_quarterly":
+        return _quarter_periods(start, end)
+    if declared_regime == "comprehensive_yearly":
+        return _year_periods(start, end)
+    return []
+
+
+def _merge_refs(facts: list[DayFacts]) -> list[dict]:
+    seen: set[tuple] = set()
+    out: list[dict] = []
+    for f in facts:
+        for ref in f.source_refs:
+            key = (ref.get("file_id"), ref.get("line_no"))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({"file_id": key[0], "line_no": key[1]})
+    return sorted(out, key=lambda x: (str(x["file_id"]), str(x["line_no"])))
+
+
+def rule_comp_c01(emp: EmpScope, cfg: Config) -> list[Finding]:
+    """综合工时完整周期统计：只算总工时与法定标准差值，不下违规、不出倍数。"""
+    dec = emp.decision
+    if dec.declared_regime not in CYCLE_DAYS:
+        return []
+    if not (dec.approved and dec.eligible_by_job):
+        return []
+    if emp.range_start is None or emp.range_end is None:
+        return []
+    out: list[Finding] = []
+    for period_key, p_start, p_end in _periods_for(dec.declared_regime,
+                                                   emp.range_start, emp.range_end):
+        if p_start < emp.range_start or p_end > emp.range_end:
+            continue
+        period_facts = [f for f in emp.facts if p_start <= f.work_date <= p_end]
+        expected_days = (p_end - p_start).days + 1
+        if len({f.work_date for f in period_facts}) < expected_days:
+            continue
+        if any("CALENDAR-YEAR-NOT-COVERED" in f.quality_flags for f in period_facts):
+            continue
+        if not any(f.punch_count > 0 or f.minutes_worked > 0 for f in period_facts):
+            continue
+        total = sum(f.minutes_worked for f in period_facts)
+        standard = sum(emp.daily_std_minutes for f in period_facts
+                       if f.day_type == DAY_WORKDAY)
+        difference = total - standard
+        severity = SEV_REVIEW if difference > 0 else SEV_DEFENSIBLE
+        out.append(_finding(
+            emp, "COMP-C01", severity,
+            f"{period_key} 完整周期统计：实际总工时 {total} 分钟，法定标准 {standard} 分钟，"
+            f"差值 {difference:+d} 分钟（{dec.declared_regime}）。"
+            "本结论只作统计，不判违规、不出倍数；周期是否被批准覆盖仍以 REG-01 台账核验为准。",
+            {
+                "cycle": dec.declared_regime,
+                "period_key": period_key,
+                "coverage_days": expected_days,
+                "workdays": sum(1 for f in period_facts if f.day_type == DAY_WORKDAY),
+                "minutes_worked": total,
+                "standard_minutes": standard,
+                "difference_minutes": difference,
+            },
+            period_key=period_key,
+            source_refs=_merge_refs(period_facts),
+        ))
+    return out
+
+
+def rule_shift_01(emp: EmpScope, cfg: Config) -> list[Finding]:
+    """当日 >2 次打卡且无排班：事实不闭合，只标复核；不改 minutes_worked。"""
+    out: list[Finding] = []
+    for facts in emp.facts:
+        if facts.punch_count <= 2 or facts.plan_present:
+            continue
+        flags = set(facts.quality_flags)
+        if {"PUNCH-MISSING", "PUNCH-ORDER"} & flags:
+            continue   # 缺卡/顺序异常已由 QUAL-01 负责，避免重复
+        out.append(_finding(
+            emp, "SHIFT-01", SEV_REVIEW,
+            f"{facts.work_date} 当日打卡 {facts.punch_count} 次（>2）且无排班计划，"
+            "无法判断哪些事件属于同一段班次；不拼接、不修改 minutes_worked，"
+            "保留原始行并要求人工核对班次切分。",
+            {"punch_count": facts.punch_count, "minutes_worked": facts.minutes_worked,
+             "planned_minutes": facts.planned_minutes, "plan_present": 0},
+            facts,
+        ))
+    return out
+
+
+def rule_off_01(emp: EmpScope, cfg: Config) -> list[Finding]:
+    """离线补传冲突：同时点同类型多来源，两条都保留，冲突日不计倍数。"""
+    out: list[Finding] = []
+    for facts in emp.facts:
+        if not facts.conflicts:
+            continue
+        out.append(_finding(
+            emp, "OFF-01", SEV_REVIEW,
+            f"{facts.work_date} 存在 {len(facts.conflicts)} 组同时点、同打卡类型的多来源冲突；"
+            "两条事实均已保留，不静默丢弃任一条；本日不进入倍数结论，"
+            "须人工确认以哪条为准并补正离线补传记录。",
+            {"conflict_count": len(facts.conflicts), "conflicts": facts.conflicts,
+             "minutes_worked": facts.minutes_worked, "punch_count": facts.punch_count,
+             "multiplier_excluded": 1},
+            facts,
+        ))
+    return out
+
+
+_MULTIPLIER_RULES = {"OT-D01", "OT-D02", "OT-D03"}
+
+
+def rule_day_v5(emp: EmpScope, cfg: Config, *, base_findings: list[Finding] | None = None
+                ) -> list[Finding]:
+    """v5 日级包装：v4 日规则照跑，但冲突日不得进入倍数结论。"""
+    base = list(base_findings) if base_findings is not None else rule_day(emp, cfg)
+    conflict_dates = {f.work_date.isoformat() for f in emp.facts if f.conflicts}
+    return [f for f in base
+            if not (f.work_date in conflict_dates and f.rule_id in _MULTIPLIER_RULES)]
+
+
+# ------------------------------------------------------------------ 规则包注册
+DAY_RULES_V4 = [rule_day, rule_week, rule_month, rule_scope, rule_quality]
+DAY_RULES_V5 = [rule_day_v5, rule_week, rule_month, rule_scope, rule_quality,
+                rule_reg_01, rule_comp_c01, rule_shift_01, rule_off_01]
+DAY_RULES = DAY_RULES_V5
+
+_RULES_BY_PACK = {RULE_PACK_V4: DAY_RULES_V4, RULE_PACK_V5: DAY_RULES_V5,
+                  RULE_PACK_V6: DAY_RULES_V5}
+
+
+def rules_for_pack(rule_pack_id: str) -> list | None:
+    """按规则包版本选规则；未知版本返回 None，由调用方明确报错而不是猜。"""
+    return _RULES_BY_PACK.get(str(rule_pack_id))
