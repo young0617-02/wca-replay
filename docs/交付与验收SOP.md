@@ -420,9 +420,9 @@ wca replay package/<包>.zip --public-key trusted-public-key.pub `
 
 ## 10. 0.4.0 门禁、policies 与含已确认结论包实测（2026-11-04）
 
-发行物：`dist/wca-replay-0.4.0/`，共 **342,004 字节**；commit
-`31a10a75bd8926722a8cf7b6548fe05b12376bc3`；wheel 299,593 字节，
-sha256 `792c9df3307646a6a14eac993360b040cfc37c3599b7c898895bf8471815494c`。
+发行物：`dist/wca-replay-0.4.0/`，共 **342,025 字节**；commit
+`770fecc19a77216033855aa160d73d0215b09bdb`；wheel 299,593 字节，
+sha256 `0492169186f85cbb7824757f4604d78e2b27d498aefc80e69e4e6105be680857`。
 发行物增加 `SHA256SUMS.sig`（Ed25519，key_id
 `ed25519:5e797e1842cf49c7043ba238f2a085b08c87d0a49663440f989cdc7df9ee5bb6`）与
 `VERIFY-SIGNATURE.txt`；`SHA256SUMS` 覆盖除自身与 `.sig` 外的发行文件，签名已实测
@@ -441,11 +441,11 @@ sha256 `792c9df3307646a6a14eac993360b040cfc37c3599b7c898895bf8471815494c`。
 标注成熟度/未定项。包体从 0.3.0 的 55,876 字节增至 68,393 字节（仅必要文本）。
 
 **P0-4 含已确认结论的包（临时库，不写活动库）**：
-`var/confirmed-conclusions/packages/run-20261104T035902-56213dcc.zip`，68,393 字节，
-sha256 `19ebf3b1fc2d60b29aa70fa05a4110552156c7dda533e9e484af772811f8a53b`；
+`var/confirmed-conclusions/packages/run-20261104T040749-5d8f03ff.zip`，68,393 字节，
+sha256 `6d358b9549f4f4bb0c887a75f4327c77e309fd7b3cff55502ce980b29891c477`；
 `counts` 发现 116 / 已确认结论 2；`responsibility.signed=true`；
-`artifacts_digest=e67d118595d71727378ce5f7d5a3f5b9ae953869e0fc1cdb9ed12c5d525bf7a1`；
-包签名 key_id `ed25519:21f234a538eb433d39b704db0124e24e877be5d981c50bdfd42264cf0b6af065`；
+`artifacts_digest=3d401d6cbd3c0700302922b34d4eae3ce273e879b4852655c0dc62d06c8ae20c`；
+包签名 key_id `ed25519:906349de4c40ba4d9aa481ad06dd87c5841fbeb6c8306e6a5783a4520529c8d4`；
 锚点 `3,rp-2026.11.gd-pilot-standard.v5,8b3b54a09aa8ede51697b899ddf2d2e738262d6a612b9bee4e34037a6aa8456e,01bd44034d61a8ead8248a1b7845b794488b46a26424c488bb525ff0d25ac10a`。
 在仓库外 `%TEMP%\wca-040-clean\venv`（新建 venv，只装本发行 wheel + 带哈希锁）实测：
 
@@ -469,6 +469,6 @@ RESULT OK
 - **仍不能证明**：人工确认的业务正确性、确认人身份与审批权限；`replay` 不重建人工确认，只核对
   包内 `conclusions_final.csv` 行数与 manifest `counts.final_conclusions`。
 - `SHA256SUMS.sig` 只签 SHA256SUMS，不覆盖 `.sig` 自身；公钥/锚点/包 SHA 同时被替换仍会失守。
-- `producer.commit` 必须等于发行 wheel 的 `BUILD_COMMIT`。用旧提交 `d796aff` 导出的 0.4.0 开发包，
-  会被本发行物（`31a10a7`）以 `PRODUCER FAIL` 拒收；这是“同版本代码”核对，不是包损坏。
+- `producer.commit` 必须等于发行 wheel 的 `BUILD_COMMIT`。用旧提交 `d796aff` 或 `31a10a7` 导出的
+  0.4.0 开发包，会被本发行物（`770fecc`）以 `PRODUCER FAIL` 拒收；这是“同版本代码”核对，不是包损坏。
 - 0.4.0 发行物未入库；`dist/` 已 gitignore。
