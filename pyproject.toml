@@ -4,14 +4,17 @@ version = "0.2.0"
 description = "举证级工时合规校验与带 ACL 的制度问答 Agent（合成数据 + 公开法条基准）"
 requires-python = ">=3.12"
 
-# 直接依赖只写本项目真正 import 的东西；传递依赖交给 uv.lock 固定。
-# 版本与 requirements.txt 一致，且由 tests/test_dependencies.py 机械对账，防两边漂移。
+# 直接依赖只写本项目真正需要的东西；`psycopg-binary` 是 psycopg 的本地驱动实现，
+# 代码只 import psycopg，但必须显式钉住 binary 包，Windows 上才有可用的 libpq。
+# 版本与 uv.lock 一致，且由 tests/test_dependencies.py 机械对账，防两边漂移。
 dependencies = [
     "fastapi==0.142.2",
     "starlette==1.7.0",
     "uvicorn==0.54.0",
     "httpx==0.28.1",
     "jinja2==3.1.6",
+    "psycopg==3.3.6",
+    "psycopg-binary==3.3.6",
 ]
 
 [dependency-groups]
@@ -33,14 +36,14 @@ constraint-dependencies = [
     "annotated-doc==0.0.5",
     "annotated-types==0.8.0",
     "anyio==4.15.1",
-    "certifi==2026.7.22",
+    "certifi==2026.10.23",
     "click==8.5.0",
     "colorama==0.4.6",
     "h11==0.16.0",
     "httpcore==1.0.9",
     "idna==3.20",
     "iniconfig==2.3.0",
-    "opentelemetry-api==1.45.0",
+    "opentelemetry-api==1.45.2",
     "packaging==26.3",
     "pluggy==1.6.0",
     "pydantic==2.13.5",
