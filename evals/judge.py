@@ -29,7 +29,7 @@ sys.path.insert(0, str(ROOT))
 
 from src.agent import ComplianceAgent  # noqa: E402
 from src.config import Config  # noqa: E402
-from src.db import connect  # noqa: E402
+from src.db import DB_BACKEND_SQLITE, connect  # noqa: E402
 from src.guard import numbers_in  # noqa: E402
 from src.observability import collect_all_spans, stats_for, token_distribution  # noqa: E402
 from src.util import sha256_hex  # noqa: E402
@@ -362,11 +362,13 @@ def main(argv: list[str] | None = None) -> int:
 
     cfg = Config.load(args.db and Path(args.db).parent / ".env")
     if args.db:
+        # 显式 --db 路径只可能是 SQLite 文件；不要把本机 .env 的 PostgreSQL 后端带进来。
+        cfg.db_backend = DB_BACKEND_SQLITE
         cfg.db_path = Path(args.db)
-    if not cfg.db_path.is_file():
+    if cfg.db_backend == DB_BACKEND_SQLITE and not cfg.db_path.is_file():
         print(f"数据库不存在：{cfg.db_path}\n先跑 `python -m src.cli all`", file=sys.stderr)
         return 2
-    conn = connect(cfg.db_path, cfg.sqlite_synchronous)
+    conn = connect(cfg)
     if conn.execute("SELECT COUNT(*) AS c FROM run").fetchone()["c"] == 0:
         print("库里没有校验运行，先执行 `python -m src.cli all`", file=sys.stderr)
         return 2

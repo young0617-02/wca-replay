@@ -213,6 +213,14 @@ def test_demo_script_commands_are_real():
     assert re.search(r"python -m pytest tests/ -q", text), "演示脚本必须包含跑测试这一步"
 
 
+def test_demo_data_documents_missing_e006_approval_ledger():
+    """演示数据不含 E006 审批台账：必须书面说明 116 vs 115 的差异与复现命令。"""
+    text = (ROOT / "data" / "raw" / "README.md").read_text(encoding="utf-8")
+    assert "E006" in text and "审批台账" in text
+    assert "116" in text and "115" in text, "必须写明只跑 ingest 得 116、补台账后得 115"
+    assert "python -m src.cli approval" in text, "必须给出可执行的补齐命令"
+
+
 def test_synthetic_data_is_declared_and_reproducible():
     """A11：合成数据必须声明来源、种子与不可指向真人。"""
     readme = (ROOT / "README.md").read_text(encoding="utf-8")

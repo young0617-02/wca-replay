@@ -92,8 +92,16 @@ MUTANTS: list[Mutant] = [
         "权限实现过度收紧同样要被抓到：本人查不到自己 = 功能失效"),
     Mutant(
         "M7", "审计链 prev 写死为常量", "src/evidence.py",
-        '        prev = str(last["entry_hash"])',
-        '        prev = "0" * 64  # 变异：链不衔接前一条',
+        '        if last is None:\n'
+        '            return genesis_of(conn, cfg), 1, package, None\n'
+        '        return str(last["entry_hash"]), int(last["seq"]) + 1, package, None\n'
+        '\n'
+        '    raise RuntimeError(f"不支持的规则包版本：{package}")',
+        '        if last is None:\n'
+        '            return genesis_of(conn, cfg), 1, package, None\n'
+        '        return "0" * 64, int(last["seq"]) + 1, package, None  # 变异：链不衔接前一条\n'
+        '\n'
+        '    raise RuntimeError(f"不支持的规则包版本：{package}")',
         "tests/test_evidence_chain.py::test_chain_verifies_after_run",
         "链式哈希若不用上一条的哈希，事后根本无法定位哪条被改过"),
     Mutant(
@@ -178,6 +186,73 @@ MUTANTS: list[Mutant] = [
         "tests/test_replay.py::test_replay_reproduces_the_triple_from_the_package_alone",
         "主数据不出现在 source_refs 里，最容易被当成「不属于本次结论」漏打包——"
         "接收方重放时一个员工都查不到，结论全空却看不出问题出在包上"),
+    # ------------------------------------------------------------ v5 / 纪元 / 台账
+    Mutant(
+        "M21", "REG-01 资质缺口升成明显违规", "src/rules/rulepack.py",
+        '        emp, "REG-01", SEV_REVIEW, text,',
+        '        emp, "REG-01", SEV_VIOLATION, text,  # 变异：资质类越权下违规',
+        "tests/test_rules_v5.py::test_reg01_missing_ledger_is_review_and_does_not_change_effective_regime",
+        "审批缺失/过期/岗位或城市不符只能要求复核，不能由系统单方定性违规"),
+    Mutant(
+        "M22", "REG-01 台账缺口被当成已覆盖", "src/rules/rulepack.py",
+        '    if evidence.covered:\n        return []',
+        '    if True:  # 变异：不核验台账，直接放行\n        return []',
+        "tests/test_rules_v5.py::test_reg01_missing_ledger_is_review_and_does_not_change_effective_regime",
+        "缺文号/过期/岗位不符正是特殊工时最危险的证据缺口，不能放行"),
+    Mutant(
+        "M23", "COMP-C01 对未审批员工也统计", "src/rules/rulepack.py",
+        '    if not (dec.approved and dec.eligible_by_job):\n        return []',
+        '    if False:  # 变异：不要求已审批/岗位适用\n        return []',
+        "tests/test_rules_v5.py::test_comp_c01_unapproved_or_ineligible_produces_nothing",
+        "综合工时统计只能用于已审批且岗位适用的员工，否则会把标准工时员工误算进周期"),
+    Mutant(
+        "M24", "COMP-C01 截断周期仍出结论", "src/rules/rulepack.py",
+        '        if p_start < emp.range_start or p_end > emp.range_end:\n            continue',
+        '        if False:  # 变异：不要求完整覆盖周期\n            continue',
+        "tests/test_rules_v5.py::test_comp_c01_truncated_period_produces_nothing",
+        "周期被截断时统计没有法定标准分母，必须不出结论"),
+    Mutant(
+        "M25", "SHIFT-01 有排班也判多段不闭合", "src/rules/rulepack.py",
+        '        if facts.punch_count <= 2 or facts.plan_present:\n            continue',
+        '        if facts.punch_count <= 2:  # 变异：忽略排班计划\n            continue',
+        "tests/test_rules_v5.py::test_shift01_four_punches_with_plan_produces_nothing",
+        "有排班计划时多段班次可由计划解释，不应再报事实不闭合"),
+    Mutant(
+        "M26", "SHIFT-01 与 QUAL-01 重复报缺卡", "src/rules/rulepack.py",
+        '        if {"PUNCH-MISSING", "PUNCH-ORDER"} & flags:\n            continue',
+        '        if False:  # 变异：缺卡/顺序异常也走 SHIFT\n            continue',
+        "tests/test_rules_v5.py::test_shift01_missing_punch_is_left_to_qual01",
+        "缺卡由 QUAL-01 负责；重复报会让复核人收到两条同一事实的不同结论"),
+    Mutant(
+        "M27", "OFF-01 冲突日仍进入倍数结论", "src/rules/rulepack.py",
+        '_MULTIPLIER_RULES = {"OT-D01", "OT-D02", "OT-D03"}',
+        '_MULTIPLIER_RULES = set()  # 变异：冲突日不再过滤倍数',
+        "tests/test_rules_v5.py::test_off01_multiplier_is_suppressed_on_conflict_day",
+        "多来源冲突日无法确定哪条打卡为真，不能进入倍数测算"),
+    Mutant(
+        "M28", "OFF-01 把无冲突日也标成冲突", "src/rules/rulepack.py",
+        '        if not facts.conflicts:\n            continue',
+        '        if False:  # 变异：不再要求存在冲突\n            continue',
+        "tests/test_rules_v5.py::test_off01_no_conflict_produces_nothing",
+        "无冲突日误报会制造不存在的补传争议，复核资源被垃圾结论淹没"),
+    Mutant(
+        "M29", "纪元新段起点错写成切换事件本身", "src/evidence.py",
+        "            (epoch_id, cfg.rule_pack_id, old_pack, prev, seq, seq + 1, entry, ts),",
+        "            (epoch_id, cfg.rule_pack_id, old_pack, prev, seq, seq, entry, ts),  # 变异",
+        "tests/test_evidence_epoch.py::test_v4_then_v5_creates_epoch_without_resetting_old_genesis",
+        "新段起点 seq 若等于切换事件 seq，后续验证会跳过/重放切换边界"),
+    Mutant(
+        "M30", "审批附件哈希格式校验失效", "src/rules/approvals.py",
+        '_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")',
+        '_SHA256_RE = re.compile(r"^.*$")  # 变异：任意字符串都算合法哈希',
+        "tests/test_approval_entry.py::test_upsert_rejects_invalid_record",
+        "附件哈希是原件核验锚点；格式校验一松，坏台账会静默入包"),
+    Mutant(
+        "M31", "v5 包不再打审批台账", "src/evidence.py",
+        '    if include_inputs and str(run["rule_pack_version"]) in (RULE_PACK_V5, RULE_PACK_V6):',
+        '    if False and include_inputs and str(run["rule_pack_version"]) in (RULE_PACK_V5, RULE_PACK_V6):',
+        "tests/test_evidence_approval_package.py::test_v5_package_contains_approval_ledger",
+        "审批台账非空时若不进包，replay 无法重建 REG-01 的输入"),
 ]
 
 
@@ -236,10 +311,13 @@ def main(argv: list[str] | None = None) -> int:
         original = read_source(path)
         text = normalize(original)
         if text.count(m.old) != 1:
+            # 锚点失败时源码没有被改写；仍要按基线 MD5 复核，不能把它误报成“未还原”。
+            unchanged = md5(path) == baseline[path]
             results.append(MutationResult(m.mid, m.title_zh, m.target, m.probe, False,
                                           f"注入锚点在文件中出现 {text.count(m.old)} 次，无法唯一定位",
-                                          False))
-            print(f"[{m.mid}] {m.title_zh}: 注入失败（锚点不唯一）")
+                                          unchanged))
+            print(f"[{m.mid}] {m.title_zh}: 注入失败（锚点不唯一，"
+                  f"未改文件，MD5 {'一致' if unchanged else '不一致'}）")
             continue
         try:
             path.write_bytes(text.replace(m.old, m.new, 1).encode("utf-8"))
