@@ -1440,7 +1440,7 @@ def verify_signature(manifest, audit_chain_head, pinned_public_keys):
 
 
 ANCHOR_KEYS = ("schema_version", "rule_pack_version", "input_fingerprint",
-               "conclusion_digest")
+               "conclusion_digest", "projection_fingerprint")
 
 
 def anchor_schema_version(value):
@@ -1456,14 +1456,17 @@ def anchor_schema_version(value):
 
 def parse_anchor(raw):
     parts = [p.strip() for p in str(raw).split(",")]
-    if len(parts) != 4 or any(not p for p in parts):
-        raise ValueError("期望四元组格式非法（需要 schema_version,rule_pack_version,"
-                         "input_fingerprint,conclusion_digest 四段非空值）")
+    if len(parts) not in (4, 5) or any(not p for p in parts):
+        raise ValueError("期望四元组或五元组格式非法（需要 schema_version,rule_pack_version,"
+                         "input_fingerprint,conclusion_digest，最后一段可选 projection_fingerprint）")
     version = anchor_schema_version(parts[0])
     if version is None:
         raise ValueError("schema_version 无法识别：" + parts[0])
-    return {"schema_version": version, "rule_pack_version": parts[1],
-            "input_fingerprint": parts[2], "conclusion_digest": parts[3]}
+    result = {"schema_version": version, "rule_pack_version": parts[1],
+              "input_fingerprint": parts[2], "conclusion_digest": parts[3]}
+    if len(parts) == 5:
+        result["projection_fingerprint"] = parts[4]
+    return result
 
 
 def load_pinned_public_keys(values):
@@ -1482,12 +1485,12 @@ def load_pinned_public_keys(values):
 def expected_anchors_from_args():
     """解析锚点与签名参数；无四元组时回退 --expect-triple。"""
     parser = argparse.ArgumentParser(
-        description="独立复核举证包；可选传入包外记录的三/四元组作为外部锚点，"
+        description="独立复核举证包；可选传入包外记录的三/四/五元组作为外部锚点，"
                     "以及外部固定公钥做签名 pin。")
     parser.add_argument(
         "--expect-anchor",
-        help="外部期望四元组：schema_version,rule_pack_version,input_fingerprint,"
-             "conclusion_digest；也可用环境变量 WCA_EXPECT_ANCHOR")
+        help="外部期望四元组或五元组：schema_version,rule_pack_version,input_fingerprint,"
+             "conclusion_digest[,projection_fingerprint]；也可用环境变量 WCA_EXPECT_ANCHOR")
     parser.add_argument(
         "--expect-triple",
         help="外部期望三元组：rule_pack_version,input_fingerprint,conclusion_digest"
@@ -1671,12 +1674,25 @@ def main():
         for key in TRIPLE_KEYS:
             if expected_anchor[key] != triple.get(key):
                 mismatched.append(key)
+        expected_projection = expected_anchor.get("projection_fingerprint")
+        package_projection = manifest.get("projection_fingerprint")
+        if expected_projection is not None:
+            if not isinstance(package_projection, str) or not package_projection:
+                mismatched.append("projection_fingerprint")
+                print("ANCHOR FAIL 包内无 projection_fingerprint，第五段无法校验")
+            elif package_projection != expected_projection:
+                mismatched.append("projection_fingerprint")
         if mismatched:
             anchor_ok = False
             print("ANCHOR FAIL 外部锚点与包内不一致：", ",".join(mismatched))
             for key in mismatched:
                 expected_value = expected_anchor[key]
-                actual_value = schema_ver if key == "schema_version" else triple.get(key)
+                if key == "schema_version":
+                    actual_value = schema_ver
+                elif key == "projection_fingerprint":
+                    actual_value = package_projection or "（包内无）"
+                else:
+                    actual_value = triple.get(key)
                 print("  ", key, "期望", expected_value, "包内", str(actual_value))
         else:
             print("ANCHOR CHECK OK")

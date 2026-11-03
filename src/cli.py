@@ -747,8 +747,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="包外记录的外部三元组：rule_pack_version,input_fingerprint,"
                         "conclusion_digest（不约束 schema）；也可用环境变量 WCA_EXPECT_TRIPLE")
     p.add_argument("--expect-anchor", default=None,
-                   help="包外记录的外部四元组：schema_version,rule_pack_version,"
-                        "input_fingerprint,conclusion_digest；也可用环境变量 WCA_EXPECT_ANCHOR")
+                   help="包外记录的四/五元组：schema_version,rule_pack_version,"
+                        "input_fingerprint,conclusion_digest[,projection_fingerprint]；"
+                        "也可用环境变量 WCA_EXPECT_ANCHOR")
     p.add_argument("--public-key", action="append", default=None, dest="public_key",
                    help="外部固定公钥（文件路径或 Base64），可重复传入以支持轮换；"
                         "不传时验签只证明包内自洽，不能证明来源")

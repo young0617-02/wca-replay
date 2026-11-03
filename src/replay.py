@@ -367,24 +367,29 @@ def _parse_expected_triple(value: object) -> dict | None:
 
 
 def _parse_expected_anchor(value: object) -> dict | None:
-    """解析外部四元组：schema_version,rule_pack_version,input_fingerprint,conclusion_digest。"""
+    """解析外部四元组/五元组；第五段可选 projection_fingerprint。"""
     if value in (None, ""):
         return None
     if isinstance(value, str):
         parts = [p.strip() for p in value.split(",")]
-    elif isinstance(value, (tuple, list)) and len(value) == 4:
+    elif isinstance(value, (tuple, list)) and len(value) in (4, 5):
         parts = [str(p).strip() for p in value]
     else:
-        raise ValueError("期望四元组格式非法（需要四段：schema_version,rule_pack_version,"
-                         "input_fingerprint,conclusion_digest）")
-    if len(parts) != 4 or any(not p for p in parts):
-        raise ValueError("期望四元组格式非法（需要四段非空值：schema_version,"
-                         "rule_pack_version,input_fingerprint,conclusion_digest）")
+        raise ValueError("期望四元组或五元组格式非法（需要四段或五段：schema_version,"
+                         "rule_pack_version,input_fingerprint,conclusion_digest"
+                         "[,projection_fingerprint]）")
+    if len(parts) not in (4, 5) or any(not p for p in parts):
+        raise ValueError("期望四元组或五元组格式非法（需要四段/五段非空值：schema_version,"
+                         "rule_pack_version,input_fingerprint,conclusion_digest"
+                         "[,projection_fingerprint]）")
     version = anchor_schema_version(parts[0])
     if version is None:
         raise ValueError("schema_version 无法识别：" + parts[0])
-    return {"schema_version": version, "rule_pack_version": parts[1],
-            "input_fingerprint": parts[2], "conclusion_digest": parts[3]}
+    result = {"schema_version": version, "rule_pack_version": parts[1],
+              "input_fingerprint": parts[2], "conclusion_digest": parts[3]}
+    if len(parts) == 5:
+        result["projection_fingerprint"] = parts[4]
+    return result
 
 
 def _base_result(package: Path | str, manifest: dict) -> dict:
@@ -413,7 +418,7 @@ def _base_result(package: Path | str, manifest: dict) -> dict:
 
 def replay(package: Path | str, *, limits: ZipLimits | None = None,
            expect_triple: str | tuple[str, str, str] | None = None,
-           expect_anchor: str | tuple[str, str, str, str] | None = None,
+           expect_anchor: str | tuple[str, ...] | None = None,
            public_keys: list[str] | tuple[str, ...] | None = None,
            require_signature: bool = False) -> dict:
     """重放一个举证包，返回可比对的字典（不抛异常即代表流程跑通，结论看 ok 字段）。
@@ -488,12 +493,24 @@ def replay(package: Path | str, *, limits: ZipLimits | None = None,
             for key in TRIPLE_KEYS:
                 if expected_anchor[key] != triple.get(key):
                     mismatched.append(key)
+            expected_projection = expected_anchor.get("projection_fingerprint")
+            package_projection = manifest.get("projection_fingerprint")
+            if expected_projection is not None:
+                if not isinstance(package_projection, str) or not package_projection \
+                        or package_projection != expected_projection:
+                    mismatched.append("projection_fingerprint")
             result["expected_external_anchor"] = expected_anchor
             result["external_mismatched_fields"] = mismatched
             if mismatched:
-                result["reason"] = ("外部锚点不一致：" + ",".join(
-                    f"{k}（期望 {expected_anchor.get(k, schema_ver)} / 包内 "
-                    f"{schema_ver if k == 'schema_version' else triple.get(k)}）"
+                def _actual(key: str) -> str:
+                    if key == "schema_version":
+                        return str(schema_ver)
+                    if key == "projection_fingerprint":
+                        return str(package_projection or "（包内无）")
+                    return str(triple.get(key))
+
+                result["reason"] = ("ANCHOR FAIL 外部锚点与包内不一致：" + ",".join(
+                    f"{k}（期望 {expected_anchor.get(k)} / 包内 {_actual(k)}）"
                     for k in mismatched))
                 return result
         elif expected:
