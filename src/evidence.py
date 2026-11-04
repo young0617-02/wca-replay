@@ -137,6 +137,47 @@ def _insert_event(conn: Connection, *, seq: int, run_id: str | None, actor: str,
     )
 
 
+def _seed_genesis_epoch(conn: Connection, cfg: Config) -> dict | None:
+    """全新库在首次使用时写入 genesis 纪元（0.4.9）。
+
+    旧行为：新库没有 `rule_pack_epoch`，迁移时 `prev_rule_pack_version` 只能记
+    `legacy`，旧包回放判断缺依据。现在只要库内既无审计事件也无任何纪元行，
+    就写一条 `prev_rule_pack_version='genesis'` 的显式纪元：
+    版本、生效时刻、段起点都落盘，后续 run 直接进入该段。
+    不写 `rule_pack.epoch.start` 审计事件（此时链尚不存在，事件应由第一个真实 run 产生）。
+    """
+    if cfg.rule_pack_id not in (RULE_PACK_V5, RULE_PACK_V6):
+        return None
+    with transaction_if_needed(conn):
+        if conn.dialect == DB_BACKEND_POSTGRES:
+            conn.execute("SELECT pg_advisory_xact_lock(hashtext(?))", ("wca.audit.append",))
+        again = audit_epoch(conn, cfg.rule_pack_id)
+        if again:
+            return again
+        events = conn.execute("SELECT COUNT(*) c FROM audit_event").fetchone()
+        if events and int(events["c"]) > 0:
+            return None
+        epochs = conn.execute("SELECT COUNT(*) c FROM rule_pack_epoch").fetchone()
+        if epochs and int(epochs["c"]) > 0:
+            return None
+        genesis = genesis_hash(cfg)
+        set_meta(conn, "audit_genesis", genesis)
+        epoch_id = f"epoch-{cfg.rule_pack_id}-genesis"
+        ts = datetime.now(CN_TZ).strftime("%Y-%m-%dT%H:%M:%S+08:00")
+        conn.execute(
+            "INSERT INTO rule_pack_epoch(epoch_id, rule_pack_version, prev_rule_pack_version, "
+            "prev_head_hash, activation_event_seq, segment_start_seq, segment_start_prev_hash, "
+            "switched_at) VALUES(?,?,?,?,?,?,?,?)",
+            (epoch_id, cfg.rule_pack_id, "genesis", genesis, 0, 1, genesis, ts),
+        )
+        return {
+            "epoch_id": epoch_id, "rule_pack_version": cfg.rule_pack_id,
+            "prev_rule_pack_version": "genesis", "prev_head_hash": genesis,
+            "activation_event_seq": 0, "segment_start_seq": 1,
+            "segment_start_prev_hash": genesis, "switched_at": ts,
+        }
+
+
 def ensure_audit_epoch(conn: Connection, cfg: Config) -> dict | None:
     """v5 首次写入旧 v4 链时，追加显式切换事件并建立新审计段。
 
@@ -148,7 +189,12 @@ def ensure_audit_epoch(conn: Connection, cfg: Config) -> dict | None:
     if existing:
         return existing
     stored = get_meta(conn, "audit_genesis")
-    if not stored or stored == genesis_hash(cfg):
+    if not stored:
+        seeded = _seed_genesis_epoch(conn, cfg)
+        if seeded:
+            return seeded
+        return None
+    if stored == genesis_hash(cfg):
         return None
     old_pack = _stored_rule_pack(conn)
     if old_pack == cfg.rule_pack_id:

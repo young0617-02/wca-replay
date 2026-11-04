@@ -15,11 +15,11 @@ from conftest import EMPLOYEES, ORGS, punch, schedule
 from src.config import Config
 from src.db import get_meta
 from src.engine import run_check
-from src.evidence import append_audit, export_package, verify_chain
+from src.evidence import (append_audit, ensure_audit_epoch, export_package, verify_chain)
 from src.ingest import import_csv_file
 from src.replay import replay
 from src.rules.approvals import upsert_approval
-from src.rules.rulepack import RULE_PACK_V4, RULE_PACK_V5
+from src.rules.rulepack import RULE_PACK_V4, RULE_PACK_V5, RULE_PACK_V6
 
 DAY = date(2025, 9, 2)
 
@@ -65,6 +65,40 @@ def _epoch(conn) -> dict | None:
     row = conn.execute("SELECT * FROM rule_pack_epoch WHERE rule_pack_version = ?",
                        (RULE_PACK_V5,)).fetchone()
     return dict(row) if row else None
+
+
+def test_new_db_seeds_genesis_epoch(conn, cfg):
+    """全新库首次使用即写 genesis 纪元：版本、生效时刻、段起点齐全。"""
+    cfg = replace(cfg, rule_pack_id=RULE_PACK_V6)
+    epoch = ensure_audit_epoch(conn, cfg)
+    assert epoch is not None
+    assert epoch["prev_rule_pack_version"] == "genesis"
+    assert epoch["activation_event_seq"] == 0
+    assert epoch["segment_start_seq"] == 1
+    row = conn.execute(
+        "SELECT * FROM rule_pack_epoch WHERE rule_pack_version = ?",
+        (cfg.rule_pack_id,)).fetchone()
+    assert row is not None and row["switched_at"]
+    assert row["segment_start_prev_hash"] == row["prev_head_hash"]
+    assert verify_chain(conn, cfg).ok
+    # 第二次调用幂等，不新增纪元行。
+    again = ensure_audit_epoch(conn, cfg)
+    assert again["epoch_id"] == epoch["epoch_id"]
+    assert conn.execute("SELECT COUNT(*) c FROM rule_pack_epoch").fetchone()["c"] == 1
+
+
+def test_new_db_genesis_segment_verifies_after_first_run(conn, cfg):
+    cfg = replace(cfg, rule_pack_id=RULE_PACK_V6)
+    _seed(conn, cfg)
+    run = run_check(conn, cfg, start=DAY, end=DAY, notes="genesis segment")
+    epoch = ensure_audit_epoch(conn, cfg)
+    assert epoch["prev_rule_pack_version"] == "genesis"
+    events = conn.execute(
+        "SELECT COUNT(*) c FROM audit_event WHERE segment_id = ?",
+        (epoch["epoch_id"],)).fetchone()["c"]
+    assert events >= 1
+    assert verify_chain(conn, cfg).ok
+    assert run.run_id
 
 
 def test_v4_then_v5_creates_epoch_without_resetting_old_genesis(conn, cfg):

@@ -24,6 +24,12 @@
 | 默认规则包切换 | 0.4.8 发布维护者（项目负责人批复） | 2026-11-04（发行物构建时刻 22:46:59 +08:00） | `v5` → `v6` | 本文件 + `reports/0.4.8-批次语义实施.md`（0.4.9 校正） |
 | 运行库首次 v6 run | `system:audit`（`ensure_audit_epoch`） | 首次 run 的 UTC 时间 | 记录 `prev_rule_pack_version` / `rule_pack_version` / `switched_at` | 审计链 `rule_pack.epoch.start` 事件 |
 
+**新库 genesis 纪元（0.4.9 起）**：库内既无审计事件也无纪元行时，首次使用会直接写入一条
+`prev_rule_pack_version='genesis'` 的 `rule_pack_epoch`（版本、生效时刻、`segment_start_seq=1`、
+`segment_start_prev_hash` 均为显式值）；随后第一个 run 的审计事件落在该段。因此“新库没有纪元
+记录”不再是常态。`prev_rule_pack_version='legacy'` 只保留给**既有历史库**（已有审计事件但
+从未记录纪元）迁移时使用，不是新库语义。
+
 旧包不回改、不重签：v5 包继续用 0.4.7 wheel 回放，v6 包用 0.4.8 wheel；配对关系见
 `OLD-WHEELS.md` 与 README。切换按 run 时版本计算，不是立法溯及。
 
