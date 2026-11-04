@@ -47,6 +47,10 @@ class ExportBusyError(RuntimeError):
     """同一 run 已有导出在运行；明确拒绝，不并发写同一 zip。"""
 
 
+class AuditEpochClosed(RuntimeError):
+    """规则包纪元已封闭，拒绝把新事件接入旧段（业务拒绝，不是程序错误）。"""
+
+
 @contextmanager
 def _export_run_lock(conn: Connection, cfg: Config, run_id: str):
     key = f"wca.export:{run_id}"
@@ -258,7 +262,8 @@ def _audit_context(conn: Connection, cfg: Config | None) -> tuple[str, int, str 
     package = cfg.rule_pack_id
     if package in (RULE_PACK_V5, RULE_PACK_V6):
         if package == RULE_PACK_V5 and audit_epoch(conn, RULE_PACK_V6):
-            raise RuntimeError("v5 审计段已封闭（库已进入 v6 纪元），拒绝把新 v5 事件接在旧段上")
+            raise AuditEpochClosed(
+                "v5 审计段已封闭（库已进入 v6 纪元），拒绝把新 v5 事件接在旧段上")
         epoch = ensure_audit_epoch(conn, cfg)
         if epoch:
             last = conn.execute(
@@ -275,7 +280,8 @@ def _audit_context(conn: Connection, cfg: Config | None) -> tuple[str, int, str 
 
     if package == RULE_PACK_V4:
         if audit_epoch(conn, RULE_PACK_V5) or audit_epoch(conn, RULE_PACK_V6):
-            raise RuntimeError("v4 审计段已封闭（库已进入新规则包纪元），拒绝把新 v4 事件接在旧段上")
+            raise AuditEpochClosed(
+                "v4 审计段已封闭（库已进入新规则包纪元），拒绝把新 v4 事件接在旧段上")
         last = conn.execute("SELECT entry_hash, seq FROM audit_event ORDER BY seq DESC LIMIT 1"
                             ).fetchone()
         if last is None:
@@ -325,12 +331,14 @@ def set_genesis(conn: Connection, cfg: Config) -> None:
     """确保当前规则包有可用的审计上下文；v5/v6 首次写旧库会显式建立纪元。"""
     if cfg.rule_pack_id in (RULE_PACK_V5, RULE_PACK_V6):
         if cfg.rule_pack_id == RULE_PACK_V5 and audit_epoch(conn, RULE_PACK_V6):
-            raise RuntimeError("v5 审计段已封闭（库已进入 v6 纪元），拒绝新的 v5 运行")
+            raise AuditEpochClosed(
+                "v5 审计段已封闭（库已进入 v6 纪元），拒绝新的 v5 运行")
         ensure_audit_epoch(conn, cfg)
         if audit_epoch(conn, cfg.rule_pack_id):
             return
     elif audit_epoch(conn, RULE_PACK_V5) or audit_epoch(conn, RULE_PACK_V6):
-        raise RuntimeError("v4 审计段已封闭（库已进入新规则包纪元），拒绝新的 v4 运行")
+        raise AuditEpochClosed(
+            "v4 审计段已封闭（库已进入新规则包纪元），拒绝新的 v4 运行")
     genesis_of(conn, cfg)
 
 

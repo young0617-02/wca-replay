@@ -175,3 +175,23 @@ def test_v5_epoch_package_with_approval_replays(conn, cfg):
     assert res["ok"], res["reason"]
     assert any(i["kind"] == "approval" for i in res["imports"])
     assert res["actual_triple"] == res["expected_triple"]
+
+
+def test_v5_after_v6_is_clean_cli_refusal_not_traceback(conn, cfg, monkeypatch, capsys):
+    """P3-8：库已进入 v6 纪元后再跑 v5，必须是中文错误 + 规范退出码，不得 traceback。"""
+    from src import cli
+
+    cfg6 = replace(cfg, rule_pack_id=RULE_PACK_V6)
+    run_check(conn, cfg6, start=DAY, end=DAY, notes="v6 first")
+    monkeypatch.setenv("WCA_DB_BACKEND", "sqlite")
+    monkeypatch.setenv("WCA_DB_PATH", str(cfg.db_path))
+    monkeypatch.setenv("WCA_RULE_PACK", RULE_PACK_V5)
+    monkeypatch.setenv("WCA_DATA_DIR", str(cfg.data_dir))
+    rc = cli.main(["check", "--start", DAY.isoformat(), "--end", DAY.isoformat(),
+                   "--notes", "v5 after v6"])
+    captured = capsys.readouterr()
+    text = captured.out + captured.err
+    assert rc == 2
+    assert "拒绝执行" in text
+    assert "审计段已封闭" in text
+    assert "Traceback" not in text
