@@ -295,7 +295,8 @@ def cmd_replay(args) -> int:
         try:
             record = load_anchor_record(args.anchor_file)
         except ValueError as exc:
-            print(f"ANCHOR FILE FAIL —— {exc}", file=sys.stderr)
+            # 与 wca-verify 的 ValueError 路径保持同一标签与退出码（P2-1/P3-4）。
+            print(f"RESULT FAIL —— {exc}", file=sys.stderr)
             return 1
     # 显式参数优先；环境变量次之；anchor 文件兜底。
     anchor = getattr(args, "expect_anchor", None) or os.environ.get("WCA_EXPECT_ANCHOR") \
