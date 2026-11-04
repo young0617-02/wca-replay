@@ -42,6 +42,14 @@ python verify.py --public-key <固定公钥文件> --expect-anchor "<四/五段>
 - `wca replay` 期望：`工件逐文件：OK`、`发现摘要：一致`、`EVIDENCE DIGEST OK`、三元组逐项 `=`、`发现（未签认）` 条数一致、`RESULT OK`；裁剪包会显示 `≠ input_fingerprint`，这是预期。
 - **证据定位摘要（0.4.3 起，0.4.4 延续）**：`evidence_digest` 覆盖全部 finding 的 `evidence`（tables/window/rules/aggregation，固定字段序、空值 `null`、路径 `/`），不进入 `conclusion_digest`；`wca-verify`/`replay` 从 `findings.csv.evidence_json` 重算。新版本包缺字段或重算不一致 → `EVIDENCE DIGEST FAIL`；无 `producer` 或 `producer.version < 0.4.3` 的旧包输出 `EVIDENCE DIGEST NOT CHECKED`，**即使其余四项外部门禁齐全也不得给 `RESULT OK`**，这是历史兼容分档，不是“检查通过”。签名者作恶或私钥失窃时，必须用包外 `--expect-evidence-digest` 或单包 anchor 文件的 `evidence_digest` 锚定。
 - **两层输入摘要**：`input_fingerprint` 是内容与范围指纹（输入文件内容/引用范围/规则参数）；`inputs_digest` 是包内 `inputs/` 实际文件字节（含 `inputs/manifest.json`，已不含 `run_id` 与 DB `file_id`；文件名由 `rel_path` 推导）。同一批输入跨 run/跨库导包，`inputs_digest` 应完全一致；跨库实测见 `tests/test_evidence_digest.py::test_inputs_manifest_cross_database_stable`。0.4.4 起 `QUAL-01/02` 的 `line_refs` 与 `OFF-01` 的 `conflicts.sources` 只写 `rel_path+line_no`，`conclusion_digest` 不再因 DB `file_id` 变化；换新库重导与反向导入顺序实测四包均为 `b9cc6fd0…`。旧 0.4.3 的 `01bd4403…` 含 `file_id`，仅属历史包。
+- **输入完整性对账（0.4.6 起）**：`wca-verify` 在 `INPUTS DIGEST` 之前执行
+  `INPUTS COMPLETENESS`：把 `input_files.csv`（本 run 引用输入，受 `input_fingerprint` 覆盖）
+  与 `inputs/manifest.json` 双向对账，并逐个检查包内实际文件存在且 sha256 一致。
+  期望/声明少一项、多一项或字节不符 → `INPUTS COMPLETENESS FAIL`，输出
+  `输入清单列了 N 个，包内 inputs 缺少 M 个：...`；这是“静默残缺”门禁，不能靠摘要命中掩盖。
+- **结论摘要边界（0.4.6 起写入口径）**：`conclusion_digest` 只覆盖 findings 的九字段，
+  **不覆盖“已确认结论”**；`conclusions_final.csv` 由 `artifact_sha256`、`artifacts_digest`
+  与包签名绑定。改确认结论应报 `ARTIFACT FAIL`，不要误以为 `FINDINGS DIGEST OK` 已覆盖它。
 - **没有 `--expect-anchor`**：两个工具都输出 `ANCHOR NOT CHECKED` 与 `RESULT PARTIAL`（exit 2），不能当作验收通过；只传 `--expect-triple` 也只是 legacy 外部比对，仍不给 `RESULT OK`。
 - **五项门禁（0.4.3 起，0.4.5 延续）**：`RESULT OK` 必须同时满足签名 `pinned`、外部锚点、外部
   `--expect-package-sha256`、外部 `--expect-artifacts-digest`、外部 `--expect-evidence-digest`；
