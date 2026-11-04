@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from datetime import date
 
 from ..config import Config
-from ..quality_batch import batch_id_from_sources, date_from_raw_value
+from ..quality_batch import batch_id_from_sources, date_from_raw_value, repeat_sources
 from ..util import round_half_up
 from . import citations as C
 from .approvals import evaluate_approval_evidence
@@ -599,16 +599,22 @@ def rule_quality(emp: EmpScope, cfg: Config) -> list[Finding]:
         sources: list[dict] = []
         seen_refs: set[tuple[str, int]] = set()
         for issue in issues:
-            ref = _source_ref(issue)
-            if ref is None:
-                continue
-            key = (ref["rel_path"], ref["line_no"])
-            if key in seen_refs:
-                continue
-            seen_refs.add(key)
-            sources.append(ref)
+            # 跨文件重复在库里只存“首次出现行”，detail 里才有全部物理来源；
+            # 取 detail 中除首个来源以外的重复行，避免把首次出现行误算进批次，
+            # 也避免只留下首条（0.4.8 修复）。
+            refs = repeat_sources(issue.get("rel_path"), issue.get("line_no"),
+                                  issue.get("detail"))
+            if not refs:
+                ref = _source_ref(issue)
+                refs = [ref] if ref else []
+            for ref in refs:
+                key = (ref["rel_path"], ref["line_no"])
+                if key in seen_refs:
+                    continue
+                seen_refs.add(key)
+                sources.append(ref)
         sources.sort(key=lambda r: (r["rel_path"].encode("utf-8"), r["line_no"]))
-        batch_size = len(issues)
+        batch_size = len(sources)
         batch_id = batch_id_from_sources(sources)
         out.append(_finding(
             emp, "QUAL-01", SEV_DEFENSIBLE,
@@ -660,7 +666,8 @@ def rule_quality(emp: EmpScope, cfg: Config) -> list[Finding]:
                 "issue_rule_ids": rule_ids,
                 "issue_count": len(issues),
                 "sample_raw_values": [str(i.get("raw_value", ""))[:64] for i in issues[:3]],
-                "line_refs": [_source_ref(i) for i in issues[:5] if _source_ref(i)],
+                # 非重复类质量问题也列出全部行级来源（0.4.8 起不再截断前 5 条）。
+                "line_refs": [ref for ref in (_source_ref(i) for i in issues) if ref],
             },
             work_date=day_key,
             period_key=day_key,

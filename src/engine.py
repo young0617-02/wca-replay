@@ -160,6 +160,7 @@ def build_scope(conn: Connection, cfg: Config, calendar: HolidayCalendar, emp: R
                             "rel_path": file_paths.get(int(file_id)) if file_id is not None else None,
                             "file_id": file_id, "line_no": line_no,
                             "related_file_ids": payload.get("related_file_ids") or [],
+                            "detail": r["detail"],
                         })
                 continue
         scope.quality_issues.append({
@@ -167,6 +168,8 @@ def build_scope(conn: Connection, cfg: Config, calendar: HolidayCalendar, emp: R
             "raw_value": r["raw_value"], "rel_path": file_paths.get(int(r["file_id"])),
             "file_id": r["file_id"], "line_no": r["line_no"],
             "related_file_ids": _issue_related_file_ids(r["detail"]),
+            # 跨文件重复的全部物理来源只在 detail 里；rule_quality 据此剔除首次出现行。
+            "detail": r["detail"],
         })
 
     return scope

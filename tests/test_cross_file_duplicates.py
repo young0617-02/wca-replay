@@ -120,10 +120,13 @@ def test_cross_file_duplicate_import_order_stable(tmp_path):
         assert len(batches_a) == len(batches_b) == 1
         assert batches_a[0].work_date == batches_a[0].period_key == "2025-09-02"
         assert batches_a[0].metric["batch_size"] == 1
-        assert batches_a[0].metric["sources"] == [{"rel_path": "punch-a.csv", "line_no": 2}]
+        # 批次只装“重复行”：punch-a.csv:2 是首次出现行（事实表保留的那条），
+        # 进批次的是后导入的 punch-b.csv:2；反向导入也得到同一集合。
+        assert batches_a[0].metric["sources"] == [{"rel_path": "punch-b.csv", "line_no": 2}]
+        assert batches_b[0].metric["sources"] == [{"rel_path": "punch-b.csv", "line_no": 2}]
         assert batches_a[0].metric["batch_id"] == batches_b[0].metric["batch_id"]
         assert _quality_refs(a["out"]) == _quality_refs(b["out"]) == [
-            [{"rel_path": "punch-a.csv", "line_no": 2}]]
+            [{"rel_path": "punch-b.csv", "line_no": 2}]]
         # 不能残留空日期汇总条。
         assert all(f.work_date and f.period_key
                    for f in a["out"].findings if f.rule_id == "QUAL-01")
@@ -163,7 +166,22 @@ def test_cross_file_duplicate_aggregate_import_order_stable(tmp_path):
         refs_b = _quality_refs(b["out"])
         assert refs_a == refs_b
         assert len(refs_a[0]) == 26
-        assert refs_a[0][0] == {"rel_path": "punch-a.csv", "line_no": 2}
+        # 26 条重复行全部来自后导入的 punch-b.csv（2..27），首次出现行是 punch-a.csv:2。
+        assert refs_a[0][0] == {"rel_path": "punch-b.csv", "line_no": 2}
+        assert refs_a[0][-1] == {"rel_path": "punch-b.csv", "line_no": 27}
+        # quality_issues.csv 的批次号与 findings 的 batch_id 同源，可逐字核对。
+        import csv
+        import io
+        import zipfile
+        with zipfile.ZipFile(a["manifest"]["package_zip"]) as zf:
+            rows = list(csv.DictReader(io.StringIO(
+                zf.read("quality_issues.csv").decode("utf-8-sig"), newline="")))
+        dup_rows = [r for r in rows if r["rule_id"] == "QUAL-DUP"]
+        assert len(dup_rows) == 1
+        assert f"batch_id={batch_a.metric['batch_id']}" in dup_rows[0]["detail"]
+        assert "batch_size=26" in dup_rows[0]["detail"]
+        assert "重复行来源：" in dup_rows[0]["detail"]
+        assert "首次出现行（不重复计）：punch-a.csv:2" in dup_rows[0]["detail"]
     finally:
         a["conn"].close()
         b["conn"].close()

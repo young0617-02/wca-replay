@@ -14,7 +14,6 @@ import csv
 import json
 import logging
 import os
-import re
 import shutil
 import threading
 import zipfile
@@ -29,7 +28,8 @@ from .db import (DB_BACKEND_POSTGRES, Connection, column_exists, get_meta, set_m
                  table_exists, transaction_if_needed)
 from .evidence_digest import evidence_digest as compute_evidence_digest
 from .package_inputs import input_arcnames, redact_issue_detail
-from .quality_batch import batch_id_from_sources, date_from_raw_value
+from .quality_batch import (batch_id_from_sources, date_from_raw_value,
+                            detail_physical_sources, repeat_sources)
 from .rules.approvals import export_approval_csv, export_coverage_csv
 from .rules.rulepack import RULE_PACK_V4, RULE_PACK_V5, RULE_PACK_V6
 from .util import (CN_TZ, CSV_FORMULA_ESCAPE, EVIDENCE_PACKAGE_SCHEMA,
@@ -934,52 +934,37 @@ def _select_issues(conn: Connection, ids: set[int]) -> list:
     return rows
 
 
-_DETAIL_SOURCE_RE = re.compile(r"来源:\s*(.*?)(?:（|$)")
-
-
-def _detail_sources(detail: str) -> list[tuple[str, int]]:
-    """从跨文件重复行的 detail 里取出“首次出现 + 重复行”两处来源。"""
-    match = _DETAIL_SOURCE_RE.search(str(detail or ""))
-    if not match:
-        return []
-    out: list[tuple[str, int]] = []
-    for part in match.group(1).split(","):
-        rel_path, _, line_no = part.strip().rpartition(":")
-        if rel_path and line_no.isdigit():
-            out.append((rel_path, int(line_no)))
-    return out
-
-
 def _aggregate_export_issues(issues: list, file_paths: dict[int, str]) -> list[dict]:
     """QUAL-DUP 按 (员工, 实际发生日) 聚成 1 行/批；detail 内列全部来源。
 
-    非重复类质量问题原样保留。批次号与结论里的 batch_id 使用同一算法，
-    因此 quality_issues.csv 与 findings.csv 可以互相核对。
+    批次只包含“重复行”（首次出现行仍是事实表中的那一条，不进批次），
+    与 findings.csv 的 batch_size / batch_id / sources 完全同源：
+    batch_id 由重复行集合内容派生，quality_issues.csv 与结论可逐字节互相核对。
     """
     plain: list[dict] = []
     groups: dict[tuple[str, str], dict] = {}
 
-    def add_source(group: dict, rel_path: object, line_no: object) -> None:
+    def add_source(group: dict, bucket: str, rel_path: object, line_no: object) -> None:
         rel = str(rel_path or "")
         if not rel or line_no is None:
             return
-        group["sources"].add((rel, int(line_no)))
+        group[bucket].add((rel, int(line_no)))
 
     def add_group(emp_id: str, day: str, severity: str, raw_value: str,
                   sources: list[tuple[object, object]],
-                  related: list[tuple[str, int]] | None = None) -> None:
+                  first: list[tuple[object, object]] | None = None) -> None:
         key = (str(emp_id or ""), str(day or ""))
         group = groups.get(key)
         if group is None:
             group = {"emp_id": key[0], "day": key[1], "severity": severity,
                      "raw_value": str(raw_value or ""), "sources": set(),
-                     "related": set()}
+                     "first": set()}
             groups[key] = group
         for rel_path, line_no in sources:
-            add_source(group, rel_path, line_no)
-        for rel_path, line_no in (related or []):
+            add_source(group, "sources", rel_path, line_no)
+        for rel_path, line_no in (first or []):
             if rel_path:
-                group["related"].add((rel_path, int(line_no)))
+                add_source(group, "first", rel_path, line_no)
 
     for issue in issues:
         if str(issue["rule_id"]) != "QUAL-DUP":
@@ -1000,15 +985,21 @@ def _aggregate_export_issues(issues: list, file_paths: dict[int, str]) -> list[d
                         (list(meta.get("samples") or []) or [""])[0])
                 refs = [(file_paths.get(int(file_id), ""), line_no)
                         for file_id, line_no in (meta.get("line_refs") or [])]
+                first = [(file_paths.get(int(file_id), ""), line_no)
+                         for file_id, line_no in (meta.get("first_refs") or [])]
+                # 汇总 payload 的 line_refs 全是重复行，first_refs 只用于反查。
                 add_group(str(issue["emp_id"]), day_text, str(issue["severity"]),
-                          str(issue["raw_value"] or ""), refs)
+                          str(issue["raw_value"] or ""), refs, first)
         else:
             day_text = str(issue["work_date"] or "") or date_from_raw_value(
                 issue["raw_value"])
+            physical = detail_physical_sources(issue["detail"])
+            repeats = repeat_sources(issue["rel_path"], issue["line_no"],
+                                     issue["detail"])
             add_group(str(issue["emp_id"]), day_text, str(issue["severity"]),
                       str(issue["raw_value"] or ""),
-                      [(issue["rel_path"], issue["line_no"])],
-                      _detail_sources(str(issue["detail"] or "")))
+                      [(ref["rel_path"], ref["line_no"]) for ref in repeats],
+                      physical[:1])
 
     out: list[dict] = list(plain)
     for (_emp, day), group in sorted(groups.items()):
@@ -1016,13 +1007,12 @@ def _aggregate_export_issues(issues: list, file_paths: dict[int, str]) -> list[d
         refs = [{"rel_path": rel_path, "line_no": line_no} for rel_path, line_no in sources]
         batch_id = batch_id_from_sources(refs)
         source_text = "; ".join(f"{rel_path}:{line_no}" for rel_path, line_no in sources)
-        related = sorted(group["related"] - set(sources),
-                         key=lambda x: (x[0].encode("utf-8"), x[1]))
-        related_text = "; ".join(f"{rel_path}:{line_no}" for rel_path, line_no in related)
+        first = sorted(group["first"], key=lambda x: (x[0].encode("utf-8"), x[1]))
+        first_text = "; ".join(f"{rel_path}:{line_no}" for rel_path, line_no in first)
         detail = (f"重复批次：batch_size={len(sources)}；batch_id={batch_id}；"
-                  f"全部来源：{source_text}")
-        if related_text:
-            detail += f"；相关来源（首次出现行）：{related_text}"
+                  f"重复行来源：{source_text}")
+        if first_text:
+            detail += f"；首次出现行（不重复计）：{first_text}"
         out.append({
             "rel_path": sources[0][0] if sources else "",
             "line_no": sources[0][1] if sources else 0,

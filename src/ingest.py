@@ -25,6 +25,7 @@ from .config import Config
 from .db import DB_BACKEND_POSTGRES, Connection, transaction
 from .evidence import append_audit
 from .package_inputs import validate_input_rel_path
+from .quality_batch import detail_physical_sources, repeat_sources
 from .rules.dayfacts import _anchor_day
 from .util import CN_TZ, parse_date, parse_timestamp, sha256_hex, iso_minute
 
@@ -430,15 +431,27 @@ class _DupGroup:
         self.related_file_ids.update(issue.related_file_ids)
         self.related_file_ids.add(target_file_id)
         self.canonical_file_ids.add(target_file_id)
-        rel_path = rel_paths.get(target_file_id, "")
+        canonical_rel = rel_paths.get(target_file_id, "")
+        # 只记“重复行”：跨文件重复的 detail 里首个来源是首次出现行，不进批次；
+        # 文件内重复没有 detail 来源，本行自身就是重复行。
+        repeats = repeat_sources(canonical_rel, line_no, issue.detail)
+        if not repeats:
+            repeats = [{"rel_path": canonical_rel, "line_no": line_no}]
+        reverse_paths = {rel: fid for fid, rel in rel_paths.items()}
         meta = self.days.get(day)
         if meta is None:
-            meta = [0, [], []]
+            meta = [0, [], [], []]
             self.days[day] = meta
-        meta[0] += 1
-        if len(meta[1]) < 3:
-            meta[1].append(str(issue.raw_value or ""))
-        meta[2].append((rel_path, line_no, target_file_id))
+        for ref in repeats:
+            ref_file_id = reverse_paths.get(ref["rel_path"], target_file_id)
+            self.related_file_ids.add(ref_file_id)
+            meta[0] += 1
+            if len(meta[1]) < 3:
+                meta[1].append(str(issue.raw_value or ""))
+            meta[2].append((ref["rel_path"], int(ref["line_no"]), ref_file_id))
+        # 首次出现行只用于举证包反查，不重复计入 batch_size。
+        for rel, line in detail_physical_sources(issue.detail)[:1]:
+            meta[3].append((rel, line, reverse_paths.get(rel, target_file_id)))
 
     @property
     def file_ids(self) -> set[int]:
@@ -448,10 +461,13 @@ class _DupGroup:
         days = {}
         for day, meta in self.days.items():
             refs = sorted(meta[2], key=lambda x: (x[0], x[1], x[2]))
+            firsts = sorted(meta[3], key=lambda x: (x[0], x[1], x[2])) if len(meta) > 3 else []
             days[day] = {
                 "count": meta[0], "samples": meta[1],
                 # 行引用按包内相对路径排序；同一文件时与旧行为一致，跨文件时与导入顺序无关。
                 "line_refs": [[ref[2], ref[1]] for ref in refs],
+                # 首次出现行：只用于 quality_issues.csv 反查，不参与 batch_size/batch_id。
+                "first_refs": [[ref[2], ref[1]] for ref in firsts],
             }
         detail = json.dumps({
             "qual_dup_summary": True,

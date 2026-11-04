@@ -18,6 +18,42 @@ import re
 from typing import Iterable
 
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+# 跨文件重复行的 detail 固定写成「…；来源: rel:line, rel:line（按 rel_path 字典序…）」。
+_DETAIL_SOURCE_RE = re.compile(r"来源:\s*(.*?)(?:（|$)")
+
+
+def _detail_sources(detail: str) -> list[tuple[str, int]]:
+    """解析跨文件重复 detail 里的物理来源（首次出现行 + 重复行）。"""
+    match = _DETAIL_SOURCE_RE.search(str(detail or ""))
+    if not match:
+        return []
+    out: list[tuple[str, int]] = []
+    for part in match.group(1).split(","):
+        rel_path, _, line_no = part.strip().rpartition(":")
+        if rel_path and line_no.isdigit():
+            out.append((rel_path, int(line_no)))
+    return out
+
+
+def repeat_sources(rel_path: object, line_no: object, detail: object) -> list[dict]:
+    """取该问题行代表的“重复行”物理来源。
+
+    * 文件内重复：库内每行就是一条重复行，直接用自身 rel_path/line_no；
+    * 跨文件/重传重复：库里存的是按 rel_path 字典序的首个来源，detail 列出全部物理
+      来源；首个来源即首次出现行（不进批次），其余才是重复行（进批次与 batch_id）。
+    """
+    physical = _detail_sources(str(detail or ""))
+    if physical:
+        return [{"rel_path": rel, "line_no": num} for rel, num in physical[1:]]
+    rel = str(rel_path or "")
+    if rel and line_no is not None:
+        return [{"rel_path": rel, "line_no": int(line_no)}]
+    return []
+
+
+def detail_physical_sources(detail: object) -> list[tuple[str, int]]:
+    """供导出层列出“首次出现行”；没有跨文件明细时返回空。"""
+    return _detail_sources(str(detail or ""))
 
 
 def source_text(source: dict) -> str:
