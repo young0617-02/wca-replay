@@ -120,6 +120,14 @@ def _readme(version: str, commit: str, wheel: str, build_time: str) -> str:
   包内缺 M 个”及缺失 `rel_path`。
 - **导入边界**：`rel_path` 含 `..`、绝对路径、盘符路径在导入期即拒绝（中文错误）；
   导出时缺输入直接失败关闭（非零退出）且不留下半成品包。
+- **包内不带 DB 主键**：0.4.7 起包内所有 CSV 的**数据值**不含 `file_id`/
+  `related_file_ids`/`run_id`/`segment_id`；跨文件多来源只写
+  `来源: rel_path:line_no`。这些列仅保留在数据库中用于输入选择，不进入任何导出工件。
+- **导出包唯一命名**：0.4.7 起导出文件名为 `<run_id>-<时间戳>-<短随机>.zip`；
+  目标已存在时拒绝覆盖，不静默改写旧包。
+- **审批台账规范化披露**：0.4.7 起包内审批台账是数据库重导出（UTF-8 无 BOM、LF），
+  不是上传原始字节；顶层 manifest 的 `inputs.approval_export` 记录该事实与原始字节
+  是否保留，读者不应把包内字节当作原始上传件。
 - **证据定位摘要**：`evidence_digest` 单独覆盖全部 finding 的 `evidence` 块
   （`tables/window/rules/aggregation`，固定字段序、空值 `null`、路径 `/`），**不进入**
   `conclusion_digest`。0.4.3 起（0.4.4 延续）新包必须有该字段；旧包缺失按 `NOT CHECKED` 分档，
@@ -133,6 +141,9 @@ def _readme(version: str, commit: str, wheel: str, build_time: str) -> str:
 - **policies/ 用途**：包内 `policies/` 提供规则包定义（rule_id/版本/条文号/阈值/生效日期）、
   条文稳定引用、口径声明、13 项存疑逐条与 `CONFIDENCE.md`，供外部做“规则→条文→阈值→事实”
   的实质审查；它是**对外精简版，不是全文法条库**，也不替代律师判断。
+- **默认流程可从 wheel 复现**：0.4.7 起 wheel 内含 `data/generator/make_synthetic.py`；
+  `wca gen` 在当前目录写出 `data/raw/*.csv`，随后不指定数据目录即可依次跑
+  `ingest → check → export → verify → replay`，交付方已用干净 venv 实测。
 
 ## 前置条件（缺一不可）
 
