@@ -43,7 +43,7 @@ python verify.py --public-key <固定公钥文件> --expect-anchor "<四/五段>
 - **证据定位摘要（0.4.3 起，0.4.4 延续）**：`evidence_digest` 覆盖全部 finding 的 `evidence`（tables/window/rules/aggregation，固定字段序、空值 `null`、路径 `/`），不进入 `conclusion_digest`；`wca-verify`/`replay` 从 `findings.csv.evidence_json` 重算。新版本包缺字段或重算不一致 → `EVIDENCE DIGEST FAIL`；无 `producer` 或 `producer.version < 0.4.3` 的旧包输出 `EVIDENCE DIGEST NOT CHECKED`，**即使其余四项外部门禁齐全也不得给 `RESULT OK`**，这是历史兼容分档，不是“检查通过”。签名者作恶或私钥失窃时，必须用包外 `--expect-evidence-digest` 或单包 anchor 文件的 `evidence_digest` 锚定。
 - **两层输入摘要**：`input_fingerprint` 是内容与范围指纹（输入文件内容/引用范围/规则参数）；`inputs_digest` 是包内 `inputs/` 实际文件字节（含 `inputs/manifest.json`，已不含 `run_id` 与 DB `file_id`；文件名由 `rel_path` 推导）。同一批输入跨 run/跨库导包，`inputs_digest` 应完全一致；跨库实测见 `tests/test_evidence_digest.py::test_inputs_manifest_cross_database_stable`。0.4.4 起 `QUAL-01/02` 的 `line_refs` 与 `OFF-01` 的 `conflicts.sources` 只写 `rel_path+line_no`，`conclusion_digest` 不再因 DB `file_id` 变化；换新库重导与反向导入顺序实测四包均为 `b9cc6fd0…`。旧 0.4.3 的 `01bd4403…` 含 `file_id`，仅属历史包。
 - **没有 `--expect-anchor`**：两个工具都输出 `ANCHOR NOT CHECKED` 与 `RESULT PARTIAL`（exit 2），不能当作验收通过；只传 `--expect-triple` 也只是 legacy 外部比对，仍不给 `RESULT OK`。
-- **五项门禁（0.4.3 起，0.4.4 延续）**：`RESULT OK` 必须同时满足签名 `pinned`、外部锚点、外部
+- **五项门禁（0.4.3 起，0.4.5 延续）**：`RESULT OK` 必须同时满足签名 `pinned`、外部锚点、外部
   `--expect-package-sha256`、外部 `--expect-artifacts-digest`、外部 `--expect-evidence-digest`；
   缺一项即 `RESULT PARTIAL`（exit 2），任一项不匹配即 `RESULT FAIL`（exit 1）。
   `--anchor-file <单包 anchor.json>` 可一次提供 `anchor`/`package_sha256`/`artifacts_digest`/
@@ -626,6 +626,18 @@ metric `line_refs` 仍含 DB `file_id`（4→3）；**这不是 inputs 不稳定
 | cross-db | 72,975 | `1664f96d…` | 116 / 0 | `b9cc6fd0…` | `01cb5aeb…` | `aad527d1…` | `8b3b54a0…` |
 | reverse-order | 72,929 | `1ecd9724…` | 116 / 0 | `b9cc6fd0…` | `01cb5aeb…` | `aad527d1…` | `8b3b54a0…` |
 
+**验收判据（稳定性不变量）**：不以 `01bd4403…` 或任何历史摘要值作为验收目标。
+必须同时满足：
+1. 同一批 CSV、同一规则包、同范围，**换新库重导** → 四包四联值相同；
+2. **punch 与 schedule 反向导入顺序** → 四包四联值相同；
+3. **跨库重导** → 四包四联值相同；
+4. 反向包 `reverse-order` 必须是**实物交付**，不能只用 summary 字段口头描述。
+
+对照矩阵：engine-only / confirmed / cross-db / reverse-order 四包的
+`conclusion_digest`、`evidence_digest`、`inputs_digest`、`input_fingerprint`
+必须逐列相同；包 SHA、`artifacts_digest` 可因包角色不同而不同。
+单 `punch.csv` 场景的四联值保持 `b9cc6fd0… / 01cb5aeb… / aad527d1… / 8b3b54a0…`。
+
 **注意**：旧 0.4.3 的 `01bd4403…` 含 `QUAL line_refs.file_id=4`；移除 DB ID 后
 不可能再复现 `01bd4403…`，只能得到新的稳定值 `b9cc6fd0ef4e60126e33afe36878f33c30291bf4fd87965b26525b98a68f4328`。
 这是算术必然，不是口径解释。旧包不回改。
@@ -643,4 +655,45 @@ metric `line_refs` 仍含 DB `file_id`（4→3）；**这不是 inputs 不稳定
 **仍未闭合**：多文件 punch 内容重叠时，`QUAL-DUP` 归属文件仍随导入顺序变化（代码路径
 推断，本轮交付输入只有一个 punch.csv，未触发）；`source_refs` 仍含 DB `file_id`（非 canonical）；
 旧包摘要不回改；公钥来源、第三方时间戳、法律实体性、可复现构建仍未闭合。
+
+## 14. 0.4.5 第七轮整改：多文件重复行按 rel_path 确定性归属（2026-11-04）
+
+发行物：`dist/wca-replay-0.4.5/`，7 文件 **361,131 字节**；commit
+`8ca8a0e44ec597865b92745842c71f3a2565bdc4`；wheel 314,618 字节，sha256
+`17bd42c438b1b5263ace7e5968d012a58bd3b6a64a17406f80187aab257c79c2`。干净 venv
+（`%TEMP%\wca-handoff-045\venv`）实测 `SHA256SUMS SIGNATURE OK` 与 5/5 文件哈希。
+
+**实测复现（修前）**：两个 punch CSV 含逐字节相同的行，并各补一个唯一 out 卡让当天
+打卡闭合；a→b 的 `conclusion_digest=c08b25ea…`、QUAL-01 `line_refs=punch-b.csv:2`；
+b→a 的 `conclusion_digest=53769e3e…`、`line_refs=punch-a.csv:2`；两包
+`evidence_digest`/`inputs_digest`/`input_fingerprint` 相同。只放重复行、没有 out 卡时
+**未复现**：同日 `rule_scope` 的 QUAL-01 先占位，`rule_quality` 同规则同 severity 被去重，
+metric 没有 `line_refs`。这个条件已写进报告。
+
+**修法**：同一重复内容按 `(rel_path,line_no)` 字典序确定 canonical 引用，全部来源写入
+`detail`，`related_file_ids` 纳入包内输入；聚合路径按 canonical file ids 删除逐行 issue。
+修后两顺序四联值全部相同：`53769e3e… / a1ac2359… / d9ce53ae… / 1a408f43…`，
+QUAL-01 `line_refs` 均为 `punch-a.csv:2`。
+
+**单文件回归**：0.4.4 的 `b9cc6fd0… / 01cb5aeb… / aad527d1… / 8b3b54a0…` 不变；
+0.4.5 四包实测相同，测试同时断言这四个值。**注意**：这四条是单 `punch.csv` 场景值，
+不是所有场景的唯一历史目标；验收仍按 §13 的稳定性不变量与四包对照矩阵。
+
+**交接包**：`handoff/20261104-第七轮整改/`，22 个文件 / **695,411 字节**
+（`交付清单.txt` 覆盖 21 个非自身文件 / 693,258 字节）。四包在仓库外干净 venv 用
+0.4.5 wheel 的 `wca-verify`/`wca replay` 均 `RESULT OK`，五项外部门禁齐全才完整通过。
+第六轮交接包 `handoff/20261104-第六轮整改/` 未改动。
+
+**测试**：离线 **547 passed / 8 skipped / 1 deselected**；带 PG **570 passed /
+1 skipped / 1 deselected**（相对第六轮 545/568 各 +2）。新增
+`tests/test_cross_file_duplicates.py` 2 项（单重复行、25 行触发汇总），修前红、修后绿。
+
+**`source_refs` 评估（本轮未改）**：实测 0.4.4/0.4.5 `findings.csv` **不含**
+`source_refs`，只有 `source_rel_path/source_line_no`；DB/API/Web 模板仍显示 `file_id`。
+若只需接收方可见处去 ID，优先改展示层；彻底改 DB `source_refs` 涉及
+dayfacts/engine/rulepack/anomaly/evidence/Web/测试，且同 rel_path 不同 sha 时行级反查
+唯一性会变弱，推荐另开变更。详见 `reports/0.4.5-多文件重复行实测.md` §5。
+
+**仍未闭合**：`source_refs` 的 DB `file_id` 与 Web 展示未改；旧包不回改；公钥来源、
+第三方时间戳、法律实体性、可复现构建仍未闭合。
 
