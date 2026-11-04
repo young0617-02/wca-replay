@@ -583,8 +583,8 @@ VIOLATION；`config/region_profile.json` 引用已清掉，城市改为内联标
 `evidence_digest` 仍相同，但 `conclusion_digest` 变为 `db86083b…`，原因是 `QUAL-01/02`
 metric `line_refs` 仍含 DB `file_id`（4→3）；**这不是 inputs 不稳定**。
 
-**交接包**：`handoff/20261104-第五轮整改/`，20 个文件 / **610,268 字节**（`交付清单.txt`
-覆盖 19 个非自身文件 / 608,340 字节）。三包：
+**交接包**：`handoff/20261104-第五轮整改/`，20 个文件 / **610,265 字节**（`交付清单.txt`
+覆盖 19 个非自身文件 / 608,337 字节）。三包：
 
 | 包 | 字节 | SHA-256 | 发现/已确认 | `conclusion_digest` | `evidence_digest` | `inputs_digest` | `input_fingerprint` |
 |---|---|---|---|---|---|---|---|
