@@ -22,7 +22,7 @@ uv run python -m src.cli status                          # 用 `uv run` 就不�
 # 需求文档已同步修订到 v2.1：US-EV-01 / NFR-07 的验收命令就是上面这条（裁决 D-07）。
 # 下面所有命令都等价于先 `source .venv/bin/activate` 再 `python -m …`。
 uv run python -m src.cli all                             # 生成→导入→建库→校验→报表→举证包
-uv run python -m pytest tests/ -q -m "not llm"           # 585 passed / 10 skipped，无网络、无云凭证
+uv run python -m pytest tests/ -q -m "not llm"           # 585 passed / 9 skipped / 1 deselected，无网络、无云凭证
 $env:WCA_TEST_POSTGRES_URL="postgresql://root:<本地口令>@127.0.0.1:5927/postgres"
 uv run python -m pytest tests/ -q                          # 609 passed / 2 skipped（含 PostgreSQL 18 集成）
 uv run python evals/judge.py --write-report              # 70 条评测集打分
