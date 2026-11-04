@@ -83,11 +83,20 @@ class Issue:
     detail: str
     emp_id: str = ""          # O-2：导入期尽力归属；归属不了的留空，由引擎出「未归属」结论
     work_date: str = ""
+    # 跨文件重复行的行级引用按包内 rel_path 字典序确定；写入 DB 时覆盖当前导入文件。
+    file_id_override: int | None = None
+    # 同一重复内容的全部来源文件；仅用于把输入文件都带进包，不进入 canonical。
+    related_file_ids: list[int] = field(default_factory=list)
 
     def as_row(self, file_id: int, created_at: str) -> tuple:
-        return (file_id, self.line_no if self.line_no is not None else 0, self.rule_id,
+        target_file_id = self.file_id_override if self.file_id_override is not None else file_id
+        detail = self.detail
+        if self.related_file_ids:
+            ids = ",".join(str(x) for x in sorted(set(self.related_file_ids)))
+            detail = f"{detail}; related_file_ids={ids}"
+        return (target_file_id, self.line_no if self.line_no is not None else 0, self.rule_id,
                 self.emp_id, self.work_date, self.severity, self.field_name, self.raw_value,
-                self.detail, created_at)
+                detail, created_at)
 
 
 @dataclass
@@ -367,10 +376,12 @@ class _DupGroup:
     line_max: int | None = None
     summary_key: tuple[str, int] | None = None
     summary_raw: str = ""
-    # day -> [count, samples[:3], line_numbers[:5]]；紧凑存储，避免每天 3 个键的 dict。
+    # day -> [count, samples[:3], refs[:5]]；refs = (rel_path, line_no, file_id)
     days: dict[str, list] = field(default_factory=dict)
+    related_file_ids: set[int] = field(default_factory=set)
+    canonical_file_ids: set[int] = field(default_factory=set)
 
-    def add(self, issue: Issue) -> None:
+    def add(self, issue: Issue, file_id: int, rel_paths: dict[int, str]) -> None:
         line_no = int(issue.line_no or 0)
         day = str(issue.work_date or "")
         key = (day, line_no)
@@ -382,6 +393,12 @@ class _DupGroup:
             self.line_min = line_no
         if self.line_max is None or line_no > self.line_max:
             self.line_max = line_no
+        target_file_id = (issue.file_id_override
+                          if issue.file_id_override is not None else file_id)
+        self.related_file_ids.update(issue.related_file_ids)
+        self.related_file_ids.add(target_file_id)
+        self.canonical_file_ids.add(target_file_id)
+        rel_path = rel_paths.get(target_file_id, "")
         meta = self.days.get(day)
         if meta is None:
             meta = [0, [], []]
@@ -390,22 +407,35 @@ class _DupGroup:
         if len(meta[1]) < 3:
             meta[1].append(str(issue.raw_value or ""))
         if len(meta[2]) < 5:
-            meta[2].append(line_no)
+            meta[2].append((rel_path, line_no, target_file_id))
+
+    @property
+    def file_ids(self) -> set[int]:
+        return set(self.canonical_file_ids)
 
     def summary(self, file_id: int) -> Issue:
+        days = {}
+        for day, meta in self.days.items():
+            refs = sorted(meta[2], key=lambda x: (x[0], x[1], x[2]))
+            days[day] = {
+                "count": meta[0], "samples": meta[1],
+                # 行引用按包内相对路径排序；同一文件时与旧行为一致，跨文件时与导入顺序无关。
+                "line_refs": [[ref[2], ref[1]] for ref in refs],
+            }
         detail = json.dumps({
             "qual_dup_summary": True,
             "count": self.count,
             "line_min": int(self.line_min or 0),
             "line_max": int(self.line_max or 0),
-            "days": {
-                day: {"count": meta[0], "samples": meta[1],
-                      "line_refs": [[file_id, line] for line in meta[2]]}
-                for day, meta in self.days.items()
-            },
+            "days": days,
+            "related_file_ids": sorted(self.related_file_ids),
         }, ensure_ascii=False, sort_keys=True)
-        issue = Issue("QUAL-DUP", SEV_DEFENSIBLE, int(self.line_min or 0), "(db-unique)",
-                      self.summary_raw, detail)
+        first_refs = sorted(
+            [ref for meta in self.days.values() for ref in meta[2]],
+            key=lambda x: (x[0], x[1], x[2]))
+        first = first_refs[0] if first_refs else ("", int(self.line_min or 0), file_id)
+        issue = Issue("QUAL-DUP", SEV_DEFENSIBLE, int(first[1]), "(db-unique)",
+                      self.summary_raw, detail, file_id_override=int(first[2]))
         issue.emp_id = self.emp_id
         return issue
 
@@ -423,17 +453,21 @@ def _param_chunks(values: list[str], size: int = 100) -> Iterable[list[str]]:
         yield values[start:start + size]
 
 
-def _load_db_duplicate_issues(conn: Connection, file_id: int,
+def _load_db_duplicate_issues(conn: Connection, file_ids: set[int],
                               emp_ids: list[str]) -> dict[str, list[Issue]]:
     """按员工取回未汇总的逐行 QUAL-DUP；只在需要返回明细的组上查。"""
     grouped: dict[str, list[Issue]] = {}
+    if not file_ids:
+        return grouped
+    ordered = sorted(int(x) for x in file_ids)
+    file_marks = ",".join("?" * len(ordered))
     for chunk in _param_chunks(emp_ids):
         marks = ",".join("?" * len(chunk))
         rows = conn.execute(
             "SELECT line_no, rule_id, severity, field_name, raw_value, detail, emp_id, work_date "
-            "FROM ingest_issue WHERE file_id = ? AND rule_id = 'QUAL-DUP' "
+            f"FROM ingest_issue WHERE file_id IN ({file_marks}) AND rule_id = 'QUAL-DUP' "
             f"AND field_name = '(db-unique)' AND emp_id IN ({marks}) ORDER BY line_no",
-            (file_id, *chunk),
+            (*ordered, *chunk),
         ).fetchall()
         for r in rows:
             issue = Issue(str(r["rule_id"]), str(r["severity"]), int(r["line_no"]),
@@ -443,13 +477,18 @@ def _load_db_duplicate_issues(conn: Connection, file_id: int,
     return grouped
 
 
-def _delete_db_duplicate_issues(conn: Connection, file_id: int, emp_ids: list[str]) -> None:
+def _delete_db_duplicate_issues(conn: Connection, file_ids: set[int],
+                                emp_ids: list[str]) -> None:
+    if not file_ids:
+        return
+    ordered = sorted(int(x) for x in file_ids)
+    file_marks = ",".join("?" * len(ordered))
     for chunk in _param_chunks(emp_ids):
         marks = ",".join("?" * len(chunk))
         conn.execute(
-            "DELETE FROM ingest_issue WHERE file_id = ? AND rule_id = 'QUAL-DUP' "
+            f"DELETE FROM ingest_issue WHERE file_id IN ({file_marks}) AND rule_id = 'QUAL-DUP' "
             f"AND field_name = '(db-unique)' AND emp_id IN ({marks})",
-            (file_id, *chunk),
+            (*ordered, *chunk),
         )
 
 
@@ -495,6 +534,8 @@ def _ingest_rows(conn: Connection, cfg: Config, *, file_id: int, kind: str,
 
     tx = transaction(conn) if manage_transaction else nullcontext()
     with tx:
+        rel_paths = {int(r["file_id"]): str(r["rel_path"]) for r in conn.execute(
+            "SELECT file_id, rel_path FROM raw_file").fetchall()}
         if bulk_punch:
             conn.execute(f"CREATE TEMP TABLE {_PUNCH_STAGE} "
                          f"({_PUNCH_STAGE_DDL}) ON COMMIT DROP")
@@ -587,13 +628,15 @@ def _ingest_rows(conn: Connection, cfg: Config, *, file_id: int, kind: str,
                         cur = conn.execute(payload[0], payload[1])
                         # O-3：内容已存在（ON CONFLICT DO NOTHING 未插入）-> 记重复，不静默丢弃
                         if cur.rowcount == 0:
-                            chunk_dups.append(_duplicate_punch_issue(line_no, owner, payload[1]))
+                            chunk_dups.append(_duplicate_punch_issue(
+                                conn, rel_paths, line_no, owner, payload[1]))
 
             if bulk_punch:
                 inserted_lines = _write_punch_bulk(conn, mode, chunk_rows, bulk_params)
                 for line_no, owner, params in bulk_meta:
                     if line_no not in inserted_lines:
-                        chunk_dups.append(_duplicate_punch_issue(line_no, owner, params))
+                        chunk_dups.append(_duplicate_punch_issue(
+                            conn, rel_paths, line_no, owner, params))
                 _clear_temp_table(conn, _PUNCH_STAGE)
             if chunk_issues:
                 _record_issues(conn, file_id, chunk_issues, created_at)
@@ -604,7 +647,7 @@ def _ingest_rows(conn: Connection, cfg: Config, *, file_id: int, kind: str,
                     if group is None:
                         group = _DupGroup(issue.emp_id)
                         dup_groups[issue.emp_id] = group
-                    group.add(issue)
+                    group.add(issue, file_id, rel_paths)
             offset += len(chunk)
         if kind == "punch":
             conn.execute(f"DROP TABLE IF EXISTS {_PUNCH_SEEN_STAGE}")
@@ -617,10 +660,14 @@ def _ingest_rows(conn: Connection, cfg: Config, *, file_id: int, kind: str,
                 if limit > 0 and group.count > limit and emp not in blocked)
             aggregate_set = set(aggregate_emps)
             keep_emps = [emp for emp in sorted(dup_groups) if emp not in aggregate_set]
-            loaded = _load_db_duplicate_issues(conn, file_id, keep_emps) if keep_emps else {}
-            summary_by_emp = {emp: dup_groups[emp].summary(file_id) for emp in aggregate_emps}
-            if aggregate_emps:
-                _delete_db_duplicate_issues(conn, file_id, aggregate_emps)
+            loaded: dict[str, list[Issue]] = {}
+            for emp in keep_emps:
+                loaded.update(_load_db_duplicate_issues(
+                    conn, dup_groups[emp].file_ids, [emp]))
+            summary_by_emp = {emp: dup_groups[emp].summary(file_id)
+                              for emp in aggregate_emps}
+            for emp in aggregate_emps:
+                _delete_db_duplicate_issues(conn, dup_groups[emp].file_ids, [emp])
             final_dup: list[Issue] = []
             for emp in sorted(dup_groups):
                 if emp in aggregate_set:
@@ -718,11 +765,36 @@ def _mark_seen_lines(conn: Connection, mode: str, candidates: list[tuple],
     return {int(r["source_line_no"]) for r in rows}
 
 
-def _duplicate_punch_issue(line_no: int, owner: str, params: tuple) -> Issue:
-    dup = Issue("QUAL-DUP", SEV_DEFENSIBLE, line_no, "(db-unique)",
-                f"{owner}|{params[1]}|{params[5]}",
-                "与已有打卡事实内容完全相同（跨文件/跨重传），"
-                "按内容唯一索引未二次入账")
+def _duplicate_punch_issue(conn: Connection, rel_paths: dict[int, str],
+                           line_no: int, owner: str, params: tuple) -> Issue:
+    """跨文件/重传重复行：行级引用按 `rel_path` 字典序确定，不跟随导入顺序。
+
+    同一内容可能在两个文件各有一行；只留“幸存”行会让 QUAL 摘要随谁先导入而翻转。
+    这里把两处来源都取出，按 `(rel_path,line_no)` 排序后取第一个作为 canonical 引用，
+    其余来源写入 detail，便于人工反查；不改变 issue_count，也不改变重复行事实。
+    """
+    key = (params[0], params[1], params[5], params[4] or "")
+    existing = conn.execute(
+        "SELECT source_file_id, source_line_no FROM punch "
+        "WHERE emp_id = ? AND event_ts = ? AND punch_type = ? "
+        "AND COALESCE(device_id, '') = ? ORDER BY punch_id LIMIT 1", key
+    ).fetchone()
+    refs: list[tuple[str, int, int]] = []
+    if existing is not None and existing["source_file_id"] is not None:
+        fid = int(existing["source_file_id"])
+        refs.append((str(rel_paths.get(fid, "")), int(existing["source_line_no"] or 0), fid))
+    if params[7] is not None:
+        fid = int(params[7])
+        refs.append((str(rel_paths.get(fid, "")), int(line_no), fid))
+    refs = sorted(set(refs), key=lambda x: (x[0], x[1], x[2]))
+    canonical = refs[0] if refs else ("", line_no, None)
+    sources = ", ".join(f"{rel}:{line}" for rel, line, _fid in refs)
+    detail = ("与已有打卡事实内容完全相同（跨文件/跨重传），按内容唯一索引未二次入账；"
+              f"来源: {sources}（按 rel_path 字典序取首个为行级引用）")
+    dup = Issue("QUAL-DUP", SEV_DEFENSIBLE, int(canonical[1]), "(db-unique)",
+                f"{owner}|{params[1]}|{params[5]}", detail,
+                file_id_override=canonical[2],
+                related_file_ids=sorted({fid for _rel, _line, fid in refs}))
     dup.emp_id = owner
     dup.work_date = params[3]
     return dup

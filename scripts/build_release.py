@@ -104,6 +104,10 @@ def _readme(version: str, commit: str, wheel: str, build_time: str) -> str:
   不再记数据库 `file_id`；`source_refs` 仍可保留 `file_id` 供行级反查，但它不参与
   `conclusion_digest`。同一批 CSV 换新库重导、或 punch/schedule 反向导入顺序，
   `inputs_digest` 与 `conclusion_digest` 都必须相同。
+- **跨文件重复行归属**：0.4.5 起同一条打卡内容出现在多个 punch CSV 时，`QUAL-DUP`
+  的行级引用按 `rel_path` 字典序确定唯一 canonical 引用，全部来源写入 detail 并纳入
+  包内输入；两种导入顺序的 `conclusion_digest`/`evidence_digest`/`inputs_digest`/
+  `input_fingerprint` 必须相同。单 `punch.csv` 场景的四联值保持 0.4.4 不变。
 - **证据定位摘要**：`evidence_digest` 单独覆盖全部 finding 的 `evidence` 块
   （`tables/window/rules/aggregation`，固定字段序、空值 `null`、路径 `/`），**不进入**
   `conclusion_digest`。0.4.3 起（0.4.4 延续）新包必须有该字段；旧包缺失按 `NOT CHECKED` 分档，

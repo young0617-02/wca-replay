@@ -6,6 +6,7 @@ run 记录「规则版本 + 输入指纹 + 结论摘要」三元组；同一三�
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -66,6 +67,20 @@ def load_employees(conn: Connection) -> list[Row]:
         "contract_approved_flex, pay_base_cents, pay_base_hourly_cents, normal_hourly_cents, "
         "is_manager, acl_scope FROM employee ORDER BY emp_id"
     ).fetchall()
+
+
+def _issue_related_file_ids(detail: str) -> list[int]:
+    """从 QUAL-DUP 的 detail 取全部来源文件；只用于输入打包，不进 canonical。"""
+    text = str(detail or "")
+    if text.startswith("{"):
+        try:
+            payload = json.loads(text)
+        except (TypeError, ValueError):
+            return []
+        values = payload.get("related_file_ids") if isinstance(payload, dict) else None
+        return sorted({int(x) for x in (values or []) if str(x).isdigit()})
+    match = re.search(r"related_file_ids=([0-9,]+)", text)
+    return sorted({int(x) for x in match.group(1).split(",") if x}) if match else []
 
 
 def build_scope(conn: Connection, cfg: Config, calendar: HolidayCalendar, emp: Row,
@@ -138,12 +153,14 @@ def build_scope(conn: Connection, cfg: Config, calendar: HolidayCalendar, emp: R
                                           else str(r["raw_value"] or "")),
                             "rel_path": file_paths.get(int(file_id)) if file_id is not None else None,
                             "file_id": file_id, "line_no": line_no,
+                            "related_file_ids": payload.get("related_file_ids") or [],
                         })
                 continue
         scope.quality_issues.append({
             "rule_id": r["rule_id"], "severity": r["severity"], "work_date": r["work_date"],
             "raw_value": r["raw_value"], "rel_path": file_paths.get(int(r["file_id"])),
             "file_id": r["file_id"], "line_no": r["line_no"],
+            "related_file_ids": _issue_related_file_ids(r["detail"]),
         })
 
     return scope
@@ -282,6 +299,8 @@ def run_check(conn: Connection, cfg: Config, *, start: date, end: date,
             for issue in es.quality_issues:
                 if issue.get("file_id") is not None:
                     referenced_files.add(int(issue["file_id"]))
+                for fid in issue.get("related_file_ids") or []:
+                    referenced_files.add(int(fid))
         with timer("engine.rules"):
             for rule_fn in rules:
                 findings.extend(rule_fn(es, cfg))

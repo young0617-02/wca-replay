@@ -139,7 +139,10 @@ def test_full_v5_conclusion_digest_is_stable_after_file_id_removal(full_v5):
     # 0.4.1 的 01bd 含 QUAL line_refs 的 DB file_id；0.4.4 移除后必须变成新稳定值。
     assert out.conclusion_digest == KNOWN_DIGEST, out.conclusion_digest
     assert manifest["triple"]["conclusion_digest"] == KNOWN_DIGEST
-    assert manifest["evidence_digest"]
+    # 0.4.5 的跨文件重复行修复不得改变单 punch.csv 场景的四联值。
+    assert manifest["evidence_digest"] == KNOWN_EVIDENCE_DIGEST
+    assert manifest["inputs_digest"] == KNOWN_INPUTS_DIGEST
+    assert manifest["triple"]["input_fingerprint"] == KNOWN_INPUT_FINGERPRINT
 
     evidence_rows = [finding for finding in out.findings if finding.evidence]
     assert len(evidence_rows) == 24
