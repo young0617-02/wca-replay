@@ -1,0 +1,388 @@
+0.4.8 第十轮技术核验（仓库外干净 venv，仅安装 0.4.8 wheel + 锁定依赖）
+clean_venv=D:\project\wca-clean-048\venv
+public_key=D:\project\worktime-compliance-agent\var\handoff-keys\ed25519.pub
+
+===== engine-only :: engine-only-run-20261104T224705-21fa5dd4.zip =====
+rule_pack=rp-2026.11.gd-pilot-standard.v5
+$ wca-verify.exe verify engine-only-run-20261104T224705-21fa5dd4.zip (exit 0)
+MANIFEST SCHEMA v3
+PRODUCER 0.4.8 6c7ea16178e422af14de44ed3e02d192209d5d59 python=3.12.8 rule_pack=rp-2026.11.gd-pilot-standard.v5
+MANIFEST CHECKSUM OK
+ARTIFACTS OK checked=14
+VERIFY SCRIPT OK sha256=3b7c7bd3c51d34f97234b13558cf14fb28377546c5c9ce9ae050d904c4fa7c26
+ARTIFACTS DIGEST manifest-internal OK / external OK
+EXTRA FILE OK
+FINDINGS DIGEST OK 5dc46558152089f1c0be7522c7b1c175b387309d1c316eb8445dd81ada1d5b7d (9 fields; source_* not covered by digest)
+EVIDENCE DIGEST OK 4654a3c760078d3203d572db1af8eb23434777f6ffe2732713caf14d9badd0c9 / external=OK
+COUNTS 发现（未签认） 115 条 / 已确认结论 0 条
+RULE VERSIONS {"rp-2026.10.gd-pilot-standard.v4": 99, "rp-2026.11.gd-pilot-standard.v5": 16}
+CHAIN OK events=8
+INPUTS COMPLETENESS OK INPUTS COMPLETENESS OK 输入清单 8 个与包内 inputs/ 一致
+INPUTS DIGEST OK aad527d187dad848924af8be868698a8da5e745ad31af4c3ff83d2d2e1d930a7
+SIGNATURE OK / pinned (key matches supplied pin; independent key_id verification not done) / key_id=ed25519:b07741b2e0bbcb9a3a37dd09a7348c717497145f7cbbdd580b18e7e80e7a9555
+SIGNATURE PINNED OK
+PACKAGE SHA256 computed=297691ea6e4e36e27dcc41c30d8f49c02463f20e30b3b7d023a4baeef07a9c19 / external=OK
+ANCHOR CHECK OK
+RESULT OK
+
+$ wca.exe replay engine-only-run-20261104T224705-21fa5dd4.zip (exit 0)
+重放举证包 D:\project\worktime-compliance-agent\var\handoff-packages\packages\engine-only-run-20261104T224705-21fa5dd4.zip（run run-20261104T224705-21fa5dd4）
+  审计链：完整，8 条
+  导出代码：version=0.4.8 commit=6c7ea16178e422af14de44ed3e02d192209d5d59 python=3.12.8 rule_pack=rp-2026.11.gd-pilot-standard.v5
+  包内输入 8 个
+  输入摘要：与 manifest/签名一致（aad527d187dad848…）
+  钉回口径参数 {"cross_day_cut_hour": 7, "daily_std_minutes": 480, "ot_cap_scope": "weekday_only", "pay_base_source": "contract_normal_wage", "weekly_std_minutes": 2400}
+  包内 scope 未记录的判据参数沿用代码默认值（不读本机 .env）
+  签名：有效 / pinned (key matches supplied pin; independent key_id verification not done) / key_id=ed25519:b07741b2e0bbcb9a3a37dd09a7348c717497145f7cbbdd580b18e7e80e7a9555
+  工件逐文件：OK checked=14
+  VERIFY SCRIPT：OK
+  ARTIFACTS DIGEST manifest-internal OK / external=OK
+  EXTRA FILE：OK
+  发现摘要：一致（findings.csv 115 行，反算 5dc46558152089f1…）
+  EVIDENCE DIGEST OK 4654a3c760078d3203d572db1af8eb23434777f6ffe2732713caf14d9badd0c9 / external=OK
+  PACKAGE SHA256 computed=297691ea6e4e36e27dcc41c30d8f49c02463f20e30b3b7d023a4baeef07a9c19 / external=OK
+  ANCHOR CHECK OK
+  = rule_pack_version: 期望 rp-2026.11.gd-pilot-… 实得 rp-2026.11.gd-pilot-…
+  = input_fingerprint: 期望 8b3b54a09aa8ede51697… 实得 8b3b54a09aa8ede51697…
+  = conclusion_digest: 期望 5dc46558152089f1c0be… 实得 5dc46558152089f1c0be…
+  发现（未签认） 期望 115 / 实得 115 分级 {'DEFENSIBLE': 23, 'REVIEW': 85, 'VIOLATION': 7}
+  已确认结论（包内）期望 0 / 实际 0 条（replay 不重建人工确认，只核对包内结论集行数）
+  重放结果：一致 —— 三元组、证据定位摘要与发现（未签认）条数逐项一致
+  RESULT OK
+
+===== confirmed :: run-20261104T224705-21fa5dd4-20261104T224705-9efc4c.zip =====
+rule_pack=rp-2026.11.gd-pilot-standard.v5
+$ wca-verify.exe verify run-20261104T224705-21fa5dd4-20261104T224705-9efc4c.zip (exit 0)
+MANIFEST SCHEMA v3
+PRODUCER 0.4.8 6c7ea16178e422af14de44ed3e02d192209d5d59 python=3.12.8 rule_pack=rp-2026.11.gd-pilot-standard.v5
+MANIFEST CHECKSUM OK
+ARTIFACTS OK checked=14
+VERIFY SCRIPT OK sha256=3b7c7bd3c51d34f97234b13558cf14fb28377546c5c9ce9ae050d904c4fa7c26
+ARTIFACTS DIGEST manifest-internal OK / external OK
+EXTRA FILE OK
+FINDINGS DIGEST OK 5dc46558152089f1c0be7522c7b1c175b387309d1c316eb8445dd81ada1d5b7d (9 fields; source_* not covered by digest)
+EVIDENCE DIGEST OK 4654a3c760078d3203d572db1af8eb23434777f6ffe2732713caf14d9badd0c9 / external=OK
+COUNTS 发现（未签认） 115 条 / 已确认结论 2 条
+RULE VERSIONS {"rp-2026.10.gd-pilot-standard.v4": 99, "rp-2026.11.gd-pilot-standard.v5": 16}
+CHAIN OK events=12
+INPUTS COMPLETENESS OK INPUTS COMPLETENESS OK 输入清单 8 个与包内 inputs/ 一致
+INPUTS DIGEST OK aad527d187dad848924af8be868698a8da5e745ad31af4c3ff83d2d2e1d930a7
+SIGNATURE OK / pinned (key matches supplied pin; independent key_id verification not done) / key_id=ed25519:b07741b2e0bbcb9a3a37dd09a7348c717497145f7cbbdd580b18e7e80e7a9555
+SIGNATURE PINNED OK
+PACKAGE SHA256 computed=b933915a83df111cb0d214531739d63e88e01e702d50a6961d18ee57e32400fd / external=OK
+ANCHOR CHECK OK
+RESULT OK
+
+$ wca.exe replay run-20261104T224705-21fa5dd4-20261104T224705-9efc4c.zip (exit 0)
+重放举证包 D:\project\worktime-compliance-agent\var\handoff-packages\packages\run-20261104T224705-21fa5dd4-20261104T224705-9efc4c.zip（run run-20261104T224705-21fa5dd4）
+  审计链：完整，12 条
+  导出代码：version=0.4.8 commit=6c7ea16178e422af14de44ed3e02d192209d5d59 python=3.12.8 rule_pack=rp-2026.11.gd-pilot-standard.v5
+  包内输入 8 个
+  输入摘要：与 manifest/签名一致（aad527d187dad848…）
+  钉回口径参数 {"cross_day_cut_hour": 7, "daily_std_minutes": 480, "ot_cap_scope": "weekday_only", "pay_base_source": "contract_normal_wage", "weekly_std_minutes": 2400}
+  包内 scope 未记录的判据参数沿用代码默认值（不读本机 .env）
+  签名：有效 / pinned (key matches supplied pin; independent key_id verification not done) / key_id=ed25519:b07741b2e0bbcb9a3a37dd09a7348c717497145f7cbbdd580b18e7e80e7a9555
+  工件逐文件：OK checked=14
+  VERIFY SCRIPT：OK
+  ARTIFACTS DIGEST manifest-internal OK / external=OK
+  EXTRA FILE：OK
+  发现摘要：一致（findings.csv 115 行，反算 5dc46558152089f1…）
+  EVIDENCE DIGEST OK 4654a3c760078d3203d572db1af8eb23434777f6ffe2732713caf14d9badd0c9 / external=OK
+  PACKAGE SHA256 computed=b933915a83df111cb0d214531739d63e88e01e702d50a6961d18ee57e32400fd / external=OK
+  ANCHOR CHECK OK
+  = rule_pack_version: 期望 rp-2026.11.gd-pilot-… 实得 rp-2026.11.gd-pilot-…
+  = input_fingerprint: 期望 8b3b54a09aa8ede51697… 实得 8b3b54a09aa8ede51697…
+  = conclusion_digest: 期望 5dc46558152089f1c0be… 实得 5dc46558152089f1c0be…
+  发现（未签认） 期望 115 / 实得 115 分级 {'DEFENSIBLE': 23, 'REVIEW': 85, 'VIOLATION': 7}
+  已确认结论（包内）期望 2 / 实际 2 条（replay 不重建人工确认，只核对包内结论集行数）
+  重放结果：一致 —— 三元组、证据定位摘要与发现（未签认）条数逐项一致
+  RESULT OK
+
+===== cross-db :: run-20261104T224706-5e52b61e-20261104T224706-1fe74a.zip =====
+rule_pack=rp-2026.11.gd-pilot-standard.v5
+$ wca-verify.exe verify run-20261104T224706-5e52b61e-20261104T224706-1fe74a.zip (exit 0)
+MANIFEST SCHEMA v3
+PRODUCER 0.4.8 6c7ea16178e422af14de44ed3e02d192209d5d59 python=3.12.8 rule_pack=rp-2026.11.gd-pilot-standard.v5
+MANIFEST CHECKSUM OK
+ARTIFACTS OK checked=14
+VERIFY SCRIPT OK sha256=3b7c7bd3c51d34f97234b13558cf14fb28377546c5c9ce9ae050d904c4fa7c26
+ARTIFACTS DIGEST manifest-internal OK / external OK
+EXTRA FILE OK
+FINDINGS DIGEST OK 5dc46558152089f1c0be7522c7b1c175b387309d1c316eb8445dd81ada1d5b7d (9 fields; source_* not covered by digest)
+EVIDENCE DIGEST OK 4654a3c760078d3203d572db1af8eb23434777f6ffe2732713caf14d9badd0c9 / external=OK
+COUNTS 发现（未签认） 115 条 / 已确认结论 0 条
+RULE VERSIONS {"rp-2026.10.gd-pilot-standard.v4": 99, "rp-2026.11.gd-pilot-standard.v5": 16}
+CHAIN OK events=8
+INPUTS COMPLETENESS OK INPUTS COMPLETENESS OK 输入清单 8 个与包内 inputs/ 一致
+INPUTS DIGEST OK aad527d187dad848924af8be868698a8da5e745ad31af4c3ff83d2d2e1d930a7
+SIGNATURE OK / pinned (key matches supplied pin; independent key_id verification not done) / key_id=ed25519:b07741b2e0bbcb9a3a37dd09a7348c717497145f7cbbdd580b18e7e80e7a9555
+SIGNATURE PINNED OK
+PACKAGE SHA256 computed=5ca531816468279b91946f428b9ed386a07c1bb612253c0e37289b7040d251eb / external=OK
+ANCHOR CHECK OK
+RESULT OK
+
+$ wca.exe replay run-20261104T224706-5e52b61e-20261104T224706-1fe74a.zip (exit 0)
+重放举证包 D:\project\worktime-compliance-agent\var\handoff-packages\cross-db\packages\run-20261104T224706-5e52b61e-20261104T224706-1fe74a.zip（run run-20261104T224706-5e52b61e）
+  审计链：完整，8 条
+  导出代码：version=0.4.8 commit=6c7ea16178e422af14de44ed3e02d192209d5d59 python=3.12.8 rule_pack=rp-2026.11.gd-pilot-standard.v5
+  包内输入 8 个
+  输入摘要：与 manifest/签名一致（aad527d187dad848…）
+  钉回口径参数 {"cross_day_cut_hour": 7, "daily_std_minutes": 480, "ot_cap_scope": "weekday_only", "pay_base_source": "contract_normal_wage", "weekly_std_minutes": 2400}
+  包内 scope 未记录的判据参数沿用代码默认值（不读本机 .env）
+  签名：有效 / pinned (key matches supplied pin; independent key_id verification not done) / key_id=ed25519:b07741b2e0bbcb9a3a37dd09a7348c717497145f7cbbdd580b18e7e80e7a9555
+  工件逐文件：OK checked=14
+  VERIFY SCRIPT：OK
+  ARTIFACTS DIGEST manifest-internal OK / external=OK
+  EXTRA FILE：OK
+  发现摘要：一致（findings.csv 115 行，反算 5dc46558152089f1…）
+  EVIDENCE DIGEST OK 4654a3c760078d3203d572db1af8eb23434777f6ffe2732713caf14d9badd0c9 / external=OK
+  PACKAGE SHA256 computed=5ca531816468279b91946f428b9ed386a07c1bb612253c0e37289b7040d251eb / external=OK
+  ANCHOR CHECK OK
+  = rule_pack_version: 期望 rp-2026.11.gd-pilot-… 实得 rp-2026.11.gd-pilot-…
+  = input_fingerprint: 期望 8b3b54a09aa8ede51697… 实得 8b3b54a09aa8ede51697…
+  = conclusion_digest: 期望 5dc46558152089f1c0be… 实得 5dc46558152089f1c0be…
+  发现（未签认） 期望 115 / 实得 115 分级 {'DEFENSIBLE': 23, 'REVIEW': 85, 'VIOLATION': 7}
+  已确认结论（包内）期望 0 / 实际 0 条（replay 不重建人工确认，只核对包内结论集行数）
+  重放结果：一致 —— 三元组、证据定位摘要与发现（未签认）条数逐项一致
+  RESULT OK
+
+===== reverse-order :: run-20261104T224706-8df6d4b4-20261104T224706-3c865b.zip =====
+rule_pack=rp-2026.11.gd-pilot-standard.v5
+$ wca-verify.exe verify run-20261104T224706-8df6d4b4-20261104T224706-3c865b.zip (exit 0)
+MANIFEST SCHEMA v3
+PRODUCER 0.4.8 6c7ea16178e422af14de44ed3e02d192209d5d59 python=3.12.8 rule_pack=rp-2026.11.gd-pilot-standard.v5
+MANIFEST CHECKSUM OK
+ARTIFACTS OK checked=14
+VERIFY SCRIPT OK sha256=3b7c7bd3c51d34f97234b13558cf14fb28377546c5c9ce9ae050d904c4fa7c26
+ARTIFACTS DIGEST manifest-internal OK / external OK
+EXTRA FILE OK
+FINDINGS DIGEST OK 5dc46558152089f1c0be7522c7b1c175b387309d1c316eb8445dd81ada1d5b7d (9 fields; source_* not covered by digest)
+EVIDENCE DIGEST OK 4654a3c760078d3203d572db1af8eb23434777f6ffe2732713caf14d9badd0c9 / external=OK
+COUNTS 发现（未签认） 115 条 / 已确认结论 0 条
+RULE VERSIONS {"rp-2026.10.gd-pilot-standard.v4": 99, "rp-2026.11.gd-pilot-standard.v5": 16}
+CHAIN OK events=8
+INPUTS COMPLETENESS OK INPUTS COMPLETENESS OK 输入清单 8 个与包内 inputs/ 一致
+INPUTS DIGEST OK aad527d187dad848924af8be868698a8da5e745ad31af4c3ff83d2d2e1d930a7
+SIGNATURE OK / pinned (key matches supplied pin; independent key_id verification not done) / key_id=ed25519:b07741b2e0bbcb9a3a37dd09a7348c717497145f7cbbdd580b18e7e80e7a9555
+SIGNATURE PINNED OK
+PACKAGE SHA256 computed=c607c4171990f8154aa2e58989b11dcb2bb3464864fc08c19c20b8a59cf1f21d / external=OK
+ANCHOR CHECK OK
+RESULT OK
+
+$ wca.exe replay run-20261104T224706-8df6d4b4-20261104T224706-3c865b.zip (exit 0)
+重放举证包 D:\project\worktime-compliance-agent\var\handoff-packages\cross-db-reverse\packages\run-20261104T224706-8df6d4b4-20261104T224706-3c865b.zip（run run-20261104T224706-8df6d4b4）
+  审计链：完整，8 条
+  导出代码：version=0.4.8 commit=6c7ea16178e422af14de44ed3e02d192209d5d59 python=3.12.8 rule_pack=rp-2026.11.gd-pilot-standard.v5
+  包内输入 8 个
+  输入摘要：与 manifest/签名一致（aad527d187dad848…）
+  钉回口径参数 {"cross_day_cut_hour": 7, "daily_std_minutes": 480, "ot_cap_scope": "weekday_only", "pay_base_source": "contract_normal_wage", "weekly_std_minutes": 2400}
+  包内 scope 未记录的判据参数沿用代码默认值（不读本机 .env）
+  签名：有效 / pinned (key matches supplied pin; independent key_id verification not done) / key_id=ed25519:b07741b2e0bbcb9a3a37dd09a7348c717497145f7cbbdd580b18e7e80e7a9555
+  工件逐文件：OK checked=14
+  VERIFY SCRIPT：OK
+  ARTIFACTS DIGEST manifest-internal OK / external=OK
+  EXTRA FILE：OK
+  发现摘要：一致（findings.csv 115 行，反算 5dc46558152089f1…）
+  EVIDENCE DIGEST OK 4654a3c760078d3203d572db1af8eb23434777f6ffe2732713caf14d9badd0c9 / external=OK
+  PACKAGE SHA256 computed=c607c4171990f8154aa2e58989b11dcb2bb3464864fc08c19c20b8a59cf1f21d / external=OK
+  ANCHOR CHECK OK
+  = rule_pack_version: 期望 rp-2026.11.gd-pilot-… 实得 rp-2026.11.gd-pilot-…
+  = input_fingerprint: 期望 8b3b54a09aa8ede51697… 实得 8b3b54a09aa8ede51697…
+  = conclusion_digest: 期望 5dc46558152089f1c0be… 实得 5dc46558152089f1c0be…
+  发现（未签认） 期望 115 / 实得 115 分级 {'DEFENSIBLE': 23, 'REVIEW': 85, 'VIOLATION': 7}
+  已确认结论（包内）期望 0 / 实际 0 条（replay 不重建人工确认，只核对包内结论集行数）
+  重放结果：一致 —— 三元组、证据定位摘要与发现（未签认）条数逐项一致
+  RESULT OK
+
+===== default-flow :: run-20261104T224707-5e1f468e-20261104T224707-d34817.zip =====
+rule_pack=rp-2026.11.gd-pilot-standard.v5
+$ wca-verify.exe verify run-20261104T224707-5e1f468e-20261104T224707-d34817.zip (exit 0)
+MANIFEST SCHEMA v3
+PRODUCER 0.4.8 6c7ea16178e422af14de44ed3e02d192209d5d59 python=3.12.8 rule_pack=rp-2026.11.gd-pilot-standard.v5
+MANIFEST CHECKSUM OK
+ARTIFACTS OK checked=14
+VERIFY SCRIPT OK sha256=3b7c7bd3c51d34f97234b13558cf14fb28377546c5c9ce9ae050d904c4fa7c26
+ARTIFACTS DIGEST manifest-internal OK / external OK
+EXTRA FILE OK
+FINDINGS DIGEST OK 0ae2cfe90f6ae8dc0d8deb8e420c01c23b7d7f73e2c9743a7637d724d63b8f0e (9 fields; source_* not covered by digest)
+EVIDENCE DIGEST OK 4654a3c760078d3203d572db1af8eb23434777f6ffe2732713caf14d9badd0c9 / external=OK
+COUNTS 发现（未签认） 115 条 / 已确认结论 0 条
+RULE VERSIONS {"rp-2026.10.gd-pilot-standard.v4": 99, "rp-2026.11.gd-pilot-standard.v5": 16}
+CHAIN OK events=8
+INPUTS COMPLETENESS OK INPUTS COMPLETENESS OK 输入清单 8 个与包内 inputs/ 一致
+INPUTS DIGEST OK 2e40b1196d5bd2c4c5d667082b6ed5493c0110005761d99daf805ec689e36c2e
+SIGNATURE OK / pinned (key matches supplied pin; independent key_id verification not done) / key_id=ed25519:b07741b2e0bbcb9a3a37dd09a7348c717497145f7cbbdd580b18e7e80e7a9555
+SIGNATURE PINNED OK
+PACKAGE SHA256 computed=aa9545e6a5f8c7b9aaf7406b1a8e02f59637e7a1b6264be62614d7854861d702 / external=OK
+ANCHOR CHECK OK
+RESULT OK
+
+$ wca.exe replay run-20261104T224707-5e1f468e-20261104T224707-d34817.zip (exit 0)
+重放举证包 D:\project\worktime-compliance-agent\var\handoff-packages\default-flow\packages\run-20261104T224707-5e1f468e-20261104T224707-d34817.zip（run run-20261104T224707-5e1f468e）
+  审计链：完整，8 条
+  导出代码：version=0.4.8 commit=6c7ea16178e422af14de44ed3e02d192209d5d59 python=3.12.8 rule_pack=rp-2026.11.gd-pilot-standard.v5
+  包内输入 8 个
+  输入摘要：与 manifest/签名一致（2e40b1196d5bd2c4…）
+  钉回口径参数 {"cross_day_cut_hour": 7, "daily_std_minutes": 480, "ot_cap_scope": "weekday_only", "pay_base_source": "contract_normal_wage", "weekly_std_minutes": 2400}
+  包内 scope 未记录的判据参数沿用代码默认值（不读本机 .env）
+  签名：有效 / pinned (key matches supplied pin; independent key_id verification not done) / key_id=ed25519:b07741b2e0bbcb9a3a37dd09a7348c717497145f7cbbdd580b18e7e80e7a9555
+  工件逐文件：OK checked=14
+  VERIFY SCRIPT：OK
+  ARTIFACTS DIGEST manifest-internal OK / external=OK
+  EXTRA FILE：OK
+  发现摘要：一致（findings.csv 115 行，反算 0ae2cfe90f6ae8dc…）
+  EVIDENCE DIGEST OK 4654a3c760078d3203d572db1af8eb23434777f6ffe2732713caf14d9badd0c9 / external=OK
+  PACKAGE SHA256 computed=aa9545e6a5f8c7b9aaf7406b1a8e02f59637e7a1b6264be62614d7854861d702 / external=OK
+  ANCHOR CHECK OK
+  = rule_pack_version: 期望 rp-2026.11.gd-pilot-… 实得 rp-2026.11.gd-pilot-…
+  = input_fingerprint: 期望 b884c337ed7eab358e4a… 实得 b884c337ed7eab358e4a…
+  = conclusion_digest: 期望 0ae2cfe90f6ae8dc0d8d… 实得 0ae2cfe90f6ae8dc0d8d…
+  发现（未签认） 期望 115 / 实得 115 分级 {'DEFENSIBLE': 23, 'REVIEW': 85, 'VIOLATION': 7}
+  已确认结论（包内）期望 0 / 实际 0 条（replay 不重建人工确认，只核对包内结论集行数）
+  重放结果：一致 —— 三元组、证据定位摘要与发现（未签认）条数逐项一致
+  RESULT OK
+
+===== dup-subdir-a-then-b :: run-20261104T224707-6bcaa1f6-20261104T224707-45bd82.zip =====
+rule_pack=rp-2026.11.gd-pilot-standard.v5
+$ wca-verify.exe verify run-20261104T224707-6bcaa1f6-20261104T224707-45bd82.zip (exit 0)
+MANIFEST SCHEMA v3
+PRODUCER 0.4.8 6c7ea16178e422af14de44ed3e02d192209d5d59 python=3.12.8 rule_pack=rp-2026.11.gd-pilot-standard.v5
+MANIFEST CHECKSUM OK
+ARTIFACTS OK checked=14
+VERIFY SCRIPT OK sha256=3b7c7bd3c51d34f97234b13558cf14fb28377546c5c9ce9ae050d904c4fa7c26
+ARTIFACTS DIGEST manifest-internal OK / external OK
+EXTRA FILE OK
+FINDINGS DIGEST OK 924c5e018509b8f7795fe29c89c056f56013535f2133575ee4562736c4b0d6eb (9 fields; source_* not covered by digest)
+EVIDENCE DIGEST OK 29071dd0c747054668244d5f177d6a850627722e50ba95003629d5cdfe182d98 / external=OK
+COUNTS 发现（未签认） 1 条 / 已确认结论 0 条
+RULE VERSIONS {"rp-2026.10.gd-pilot-standard.v4": 1}
+CHAIN OK events=6
+INPUTS COMPLETENESS OK INPUTS COMPLETENESS OK 输入清单 6 个与包内 inputs/ 一致
+INPUTS DIGEST OK 0ec9562d96938f56178a1e9dcb61c80065cad4068ad4c57a78dec70eb673c84f
+SIGNATURE OK / pinned (key matches supplied pin; independent key_id verification not done) / key_id=ed25519:b07741b2e0bbcb9a3a37dd09a7348c717497145f7cbbdd580b18e7e80e7a9555
+SIGNATURE PINNED OK
+PACKAGE SHA256 computed=e83987dedd36de925ee6c1cc69a2213f5ce838473d80cf48c24efec87032fc7c / external=OK
+ANCHOR CHECK OK
+RESULT OK
+
+$ wca.exe replay run-20261104T224707-6bcaa1f6-20261104T224707-45bd82.zip (exit 0)
+重放举证包 D:\project\worktime-compliance-agent\var\handoff-packages\dup-subdir\a-then-b\packages\run-20261104T224707-6bcaa1f6-20261104T224707-45bd82.zip（run run-20261104T224707-6bcaa1f6）
+  审计链：完整，6 条
+  导出代码：version=0.4.8 commit=6c7ea16178e422af14de44ed3e02d192209d5d59 python=3.12.8 rule_pack=rp-2026.11.gd-pilot-standard.v5
+  包内输入 6 个
+  输入摘要：与 manifest/签名一致（0ec9562d96938f56…）
+  钉回口径参数 {"cross_day_cut_hour": 7, "daily_std_minutes": 480, "ot_cap_scope": "weekday_only", "pay_base_source": "contract_normal_wage", "weekly_std_minutes": 2400}
+  包内 scope 未记录的判据参数沿用代码默认值（不读本机 .env）
+  签名：有效 / pinned (key matches supplied pin; independent key_id verification not done) / key_id=ed25519:b07741b2e0bbcb9a3a37dd09a7348c717497145f7cbbdd580b18e7e80e7a9555
+  工件逐文件：OK checked=14
+  VERIFY SCRIPT：OK
+  ARTIFACTS DIGEST manifest-internal OK / external=OK
+  EXTRA FILE：OK
+  发现摘要：一致（findings.csv 1 行，反算 924c5e018509b8f7…）
+  EVIDENCE DIGEST OK 29071dd0c747054668244d5f177d6a850627722e50ba95003629d5cdfe182d98 / external=OK
+  PACKAGE SHA256 computed=e83987dedd36de925ee6c1cc69a2213f5ce838473d80cf48c24efec87032fc7c / external=OK
+  ANCHOR CHECK OK
+  = rule_pack_version: 期望 rp-2026.11.gd-pilot-… 实得 rp-2026.11.gd-pilot-…
+  = input_fingerprint: 期望 a8422f590784c5dcdc65… 实得 a8422f590784c5dcdc65…
+  = conclusion_digest: 期望 924c5e018509b8f7795f… 实得 924c5e018509b8f7795f…
+  发现（未签认） 期望 1 / 实得 1 分级 {'DEFENSIBLE': 1, 'REVIEW': 0, 'VIOLATION': 0}
+  已确认结论（包内）期望 0 / 实际 0 条（replay 不重建人工确认，只核对包内结论集行数）
+  重放结果：一致 —— 三元组、证据定位摘要与发现（未签认）条数逐项一致
+  RESULT OK
+
+===== dup-subdir-b-then-a :: run-20261104T224707-8baed3af-20261104T224707-b05d4d.zip =====
+rule_pack=rp-2026.11.gd-pilot-standard.v5
+$ wca-verify.exe verify run-20261104T224707-8baed3af-20261104T224707-b05d4d.zip (exit 0)
+MANIFEST SCHEMA v3
+PRODUCER 0.4.8 6c7ea16178e422af14de44ed3e02d192209d5d59 python=3.12.8 rule_pack=rp-2026.11.gd-pilot-standard.v5
+MANIFEST CHECKSUM OK
+ARTIFACTS OK checked=14
+VERIFY SCRIPT OK sha256=3b7c7bd3c51d34f97234b13558cf14fb28377546c5c9ce9ae050d904c4fa7c26
+ARTIFACTS DIGEST manifest-internal OK / external OK
+EXTRA FILE OK
+FINDINGS DIGEST OK 924c5e018509b8f7795fe29c89c056f56013535f2133575ee4562736c4b0d6eb (9 fields; source_* not covered by digest)
+EVIDENCE DIGEST OK 29071dd0c747054668244d5f177d6a850627722e50ba95003629d5cdfe182d98 / external=OK
+COUNTS 发现（未签认） 1 条 / 已确认结论 0 条
+RULE VERSIONS {"rp-2026.10.gd-pilot-standard.v4": 1}
+CHAIN OK events=6
+INPUTS COMPLETENESS OK INPUTS COMPLETENESS OK 输入清单 6 个与包内 inputs/ 一致
+INPUTS DIGEST OK 0ec9562d96938f56178a1e9dcb61c80065cad4068ad4c57a78dec70eb673c84f
+SIGNATURE OK / pinned (key matches supplied pin; independent key_id verification not done) / key_id=ed25519:b07741b2e0bbcb9a3a37dd09a7348c717497145f7cbbdd580b18e7e80e7a9555
+SIGNATURE PINNED OK
+PACKAGE SHA256 computed=2923d2fb09b5745b38093411c0857db2bc583c0ab5cddc1a748d562c181f1a18 / external=OK
+ANCHOR CHECK OK
+RESULT OK
+
+$ wca.exe replay run-20261104T224707-8baed3af-20261104T224707-b05d4d.zip (exit 0)
+重放举证包 D:\project\worktime-compliance-agent\var\handoff-packages\dup-subdir\b-then-a\packages\run-20261104T224707-8baed3af-20261104T224707-b05d4d.zip（run run-20261104T224707-8baed3af）
+  审计链：完整，6 条
+  导出代码：version=0.4.8 commit=6c7ea16178e422af14de44ed3e02d192209d5d59 python=3.12.8 rule_pack=rp-2026.11.gd-pilot-standard.v5
+  包内输入 6 个
+  输入摘要：与 manifest/签名一致（0ec9562d96938f56…）
+  钉回口径参数 {"cross_day_cut_hour": 7, "daily_std_minutes": 480, "ot_cap_scope": "weekday_only", "pay_base_source": "contract_normal_wage", "weekly_std_minutes": 2400}
+  包内 scope 未记录的判据参数沿用代码默认值（不读本机 .env）
+  签名：有效 / pinned (key matches supplied pin; independent key_id verification not done) / key_id=ed25519:b07741b2e0bbcb9a3a37dd09a7348c717497145f7cbbdd580b18e7e80e7a9555
+  工件逐文件：OK checked=14
+  VERIFY SCRIPT：OK
+  ARTIFACTS DIGEST manifest-internal OK / external=OK
+  EXTRA FILE：OK
+  发现摘要：一致（findings.csv 1 行，反算 924c5e018509b8f7…）
+  EVIDENCE DIGEST OK 29071dd0c747054668244d5f177d6a850627722e50ba95003629d5cdfe182d98 / external=OK
+  PACKAGE SHA256 computed=2923d2fb09b5745b38093411c0857db2bc583c0ab5cddc1a748d562c181f1a18 / external=OK
+  ANCHOR CHECK OK
+  = rule_pack_version: 期望 rp-2026.11.gd-pilot-… 实得 rp-2026.11.gd-pilot-…
+  = input_fingerprint: 期望 a8422f590784c5dcdc65… 实得 a8422f590784c5dcdc65…
+  = conclusion_digest: 期望 924c5e018509b8f7795f… 实得 924c5e018509b8f7795f…
+  发现（未签认） 期望 1 / 实得 1 分级 {'DEFENSIBLE': 1, 'REVIEW': 0, 'VIOLATION': 0}
+  已确认结论（包内）期望 0 / 实际 0 条（replay 不重建人工确认，只核对包内结论集行数）
+  重放结果：一致 —— 三元组、证据定位摘要与发现（未签认）条数逐项一致
+  RESULT OK
+
+===== clean-wheel-default-flow :: clean-wheel-default-flow.zip =====
+rule_pack=rp-2026.11.gd-pilot-standard.v6
+$ wca-verify.exe verify clean-wheel-default-flow.zip (exit 0)
+MANIFEST SCHEMA v3
+PRODUCER 0.4.8 6c7ea16178e422af14de44ed3e02d192209d5d59 python=3.12.8 rule_pack=rp-2026.11.gd-pilot-standard.v6
+MANIFEST CHECKSUM OK
+ARTIFACTS OK checked=14
+VERIFY SCRIPT OK sha256=3b7c7bd3c51d34f97234b13558cf14fb28377546c5c9ce9ae050d904c4fa7c26
+ARTIFACTS DIGEST manifest-internal OK / external OK
+EXTRA FILE OK
+FINDINGS DIGEST OK a4e31ef313faefde4533d8b8ae9373c8d11b89eba8620b531a4c71eb13603190 (9 fields; source_* not covered by digest)
+EVIDENCE DIGEST OK 21ac80f3c8510c29f7702fbd6ce2ed3c7896bb8207e3321cf94edd6ef5101bb1 / external=OK
+COUNTS 发现（未签认） 115 条 / 已确认结论 0 条
+RULE VERSIONS {"rp-2026.11.gd-pilot-standard.v6": 115}
+CHAIN OK events=8
+INPUTS COMPLETENESS OK INPUTS COMPLETENESS OK 输入清单 8 个与包内 inputs/ 一致
+INPUTS DIGEST OK 00ab0a3ccf0e7d02a8a714bca9137e3fdca81a1bdfebd50c6a70e660ca98c004
+SIGNATURE OK / pinned (key matches supplied pin; independent key_id verification not done) / key_id=ed25519:b07741b2e0bbcb9a3a37dd09a7348c717497145f7cbbdd580b18e7e80e7a9555
+SIGNATURE PINNED OK
+PACKAGE SHA256 computed=085de13bf4cef38488613f6a65226456771788bd4909ba92f495f1b243d8fbdb / external=OK
+ANCHOR CHECK OK
+RESULT OK
+
+$ wca.exe replay clean-wheel-default-flow.zip (exit 0)
+重放举证包 D:\project\worktime-compliance-agent\var\handoff-packages\clean-wheel\clean-wheel-default-flow.zip（run run-20261104T224738-385ae624）
+  审计链：完整，8 条
+  导出代码：version=0.4.8 commit=6c7ea16178e422af14de44ed3e02d192209d5d59 python=3.12.8 rule_pack=rp-2026.11.gd-pilot-standard.v6
+  包内输入 8 个
+  输入摘要：与 manifest/签名一致（00ab0a3ccf0e7d02…）
+  钉回口径参数 {"cross_day_cut_hour": 7, "daily_std_minutes": 480, "ot_cap_scope": "weekday_only", "pay_base_source": "contract_normal_wage", "weekly_std_minutes": 2400}
+  包内 scope 未记录的判据参数沿用代码默认值（不读本机 .env）
+  签名：有效 / pinned (key matches supplied pin; independent key_id verification not done) / key_id=ed25519:b07741b2e0bbcb9a3a37dd09a7348c717497145f7cbbdd580b18e7e80e7a9555
+  工件逐文件：OK checked=14
+  VERIFY SCRIPT：OK
+  ARTIFACTS DIGEST manifest-internal OK / external=OK
+  EXTRA FILE：OK
+  发现摘要：一致（findings.csv 115 行，反算 a4e31ef313faefde…）
+  EVIDENCE DIGEST OK 21ac80f3c8510c29f7702fbd6ce2ed3c7896bb8207e3321cf94edd6ef5101bb1 / external=OK
+  PACKAGE SHA256 computed=085de13bf4cef38488613f6a65226456771788bd4909ba92f495f1b243d8fbdb / external=OK
+  ANCHOR CHECK OK
+  = rule_pack_version: 期望 rp-2026.11.gd-pilot-… 实得 rp-2026.11.gd-pilot-…
+  = input_fingerprint: 期望 3680c4d5c0ed7ef2e4b3… 实得 3680c4d5c0ed7ef2e4b3…
+  = conclusion_digest: 期望 a4e31ef313faefde4533… 实得 a4e31ef313faefde4533…
+  发现（未签认） 期望 115 / 实得 115 分级 {'DEFENSIBLE': 23, 'REVIEW': 85, 'VIOLATION': 7}
+  已确认结论（包内）期望 0 / 实际 0 条（replay 不重建人工确认，只核对包内结论集行数）
+  重放结果：一致 —— 三元组、证据定位摘要与发现（未签认）条数逐项一致
+  RESULT OK
+

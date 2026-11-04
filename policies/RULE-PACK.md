@@ -67,8 +67,9 @@
   `work_date = period_key =` 该日，不再出现空日期的“期间汇总”条。
 - `metric.batch_id` 由来源行集合内容派生：每条来源取 `rel_path:line_no`，按 UTF-8 字节序排序、
   用 `\n` 连接后取 SHA-256；不含 DB 自增、`file_id`、`run_id`、计数器或时间戳。
-- `metric.batch_size` 是该批重复问题条数；`metric.sources` 列出该批**全部**来源行，
-  不截断为前 3/5 条。`quality_issues.csv` 同一批只输出 1 行，`detail` 内列全部来源。
+- `metric.batch_size` 是该批**重复行**条数；`metric.sources` 列出该批全部重复行，不截断为
+  前 3/5 条。首次出现行仍是事实表保留的那一条，**不进批次**；`quality_issues.csv` 同一批只输出
+  1 行，`detail` 同时列“重复行来源”与“首次出现行（不重复计）”，两处均给 `rel_path:line_no`。
 - 被拒收的无日期输入行仍由 `QUAL-02` 单独呈现；这是**有意保留**的事实缺口提示，
   不属于重复批次汇总，也不会被并入 `QUAL-01` 的批次 finding。
 

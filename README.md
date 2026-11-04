@@ -23,6 +23,8 @@ uv run python -m src.cli status                          # 用 `uv run` 就不�
 # 下面所有命令都等价于先 `source .venv/bin/activate` 再 `python -m …`。
 uv run python -m src.cli all                             # 生成→导入→建库→校验→报表→举证包
 uv run python -m pytest tests/ -q -m "not llm"           # 585 passed / 10 skipped，无网络、无云凭证
+$env:WCA_TEST_POSTGRES_URL="postgresql://root:<本地口令>@127.0.0.1:5927/postgres"
+uv run python -m pytest tests/ -q                          # 609 passed / 2 skipped（含 PostgreSQL 18 集成）
 uv run python evals/judge.py --write-report              # 70 条评测集打分
 uv run python tools/mutation_test.py                     # 注入 31 个缺陷，看测试抓不抓得住
 uv run python tools/perf_probe.py --pg-url "$WCA_TEST_POSTGRES_URL" --employees 1000 --dense \
