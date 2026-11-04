@@ -470,6 +470,11 @@ def test_anchor_file_fallback_and_explicit_priority(conn, cfg, tmp_path, capsys)
         "package_sha256": sha256_hex(zip_path.read_bytes()),
         "artifacts_digest": manifest["artifacts_digest"],
         "evidence_digest": manifest["evidence_digest"],
+        # 0.4.10 起单包锚点文件必须声明可比范围；缺字段按 INCOMPARABLE(3) 处理。
+        "comparability_scope": {
+            "rule_pack_version": manifest["triple"]["rule_pack_version"],
+            "schema": manifest["schema"],
+        },
     }
     anchor_file = tmp_path / "anchor-single.json"
     anchor_file.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")

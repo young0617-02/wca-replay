@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from conftest import EMPLOYEES, ORGS, punch, schedule
-from src import cli
+from src import cli, verify_pkg
 from src.engine import run_check
 from src.evidence import export_package
 from src.ingest import import_csv_file
@@ -446,3 +446,110 @@ def test_anchor_format_error_is_explicit(packed, tmp_path):
     res = replay(zip_path, expect_anchor="2,only-two")
     assert not res["ok"]
     assert "四元组" in res["reason"]
+
+
+def _anchor_file(tmp_path: Path, zip_path: Path, *, scope="absent",
+                 rule_pack: str | None = None, fingerprint: str | None = None):
+    """写一份单包 anchor JSON；scope=absent 表示不带 comparability_scope。"""
+    manifest = _zip_manifest(zip_path)
+    triple = manifest["triple"]
+    doc = {
+        "anchor": _anchor_arg(3, triple),
+        "package_sha256": hashlib.sha256(zip_path.read_bytes()).hexdigest(),
+        "artifacts_digest": manifest["artifacts_digest"],
+        "evidence_digest": manifest["evidence_digest"],
+        "version": "0.4.10",
+    }
+    if fingerprint is not None:
+        doc["input_fingerprint"] = fingerprint
+    if scope is not None:
+        doc["comparability_scope"] = {
+            "rule_pack_version": rule_pack or triple["rule_pack_version"],
+            "schema": manifest["schema"],
+        }
+    path = tmp_path / "anchor-under-test.json"
+    path.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def _verify_main(zip_path: Path, anchor_file: Path, anchor: str) -> int:
+    return verify_pkg.main([str(zip_path), "--expect-anchor", anchor,
+                            "--anchor-file", str(anchor_file)])
+
+
+@pytest.fixture
+def signed_zip(packed, conn, cfg):
+    """带 inputs_digest 的 v3 签名包，便于走到锚点检查而不是提前 INPUTS FAIL。"""
+    from src import signing
+    out, _, _ = packed
+    manifest = export_package(conn, cfg, out.run_id,
+                              signing_key=signing.generate_keypair())
+    return Path(manifest["package_zip"])
+
+
+def test_anchor_file_redundant_field_mismatch_fails_closed(signed_zip, tmp_path, capsys):
+    """P2-1：anchor 串之外的冗余摘要字段必须与串解出值一致，否则失败关闭。"""
+    zip_path = signed_zip
+    bad = _anchor_file(tmp_path, zip_path, fingerprint="f" * 64)
+    with pytest.raises(ValueError, match="ANCHOR SELF-CONFLICT"):
+        from src.package_verify import load_anchor_record
+        load_anchor_record(bad)
+    anchor = _anchor_arg(3, _zip_manifest(zip_path)["triple"])
+    rc = _verify_main(zip_path, bad, anchor)
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "ANCHOR SELF-CONFLICT" in captured.out + captured.err
+    assert "RESULT FAIL" in captured.out + captured.err
+
+
+def test_verify_and_replay_agree_on_scope_anchor_conflict(signed_zip, tmp_path, capsys):
+    """P3-4：scope 与 anchor 串冲突时，verify 与 replay 同标签、同退出码。"""
+    zip_path = signed_zip
+    triple = _zip_manifest(zip_path)["triple"]
+    anchor = _anchor_arg(3, triple)
+    doc = _anchor_file(tmp_path, zip_path, rule_pack=triple["rule_pack_version"] + "-x")
+    vrc = _verify_main(zip_path, doc, anchor)
+    vout = capsys.readouterr()
+    rrc = cli.main(["replay", str(zip_path), "--expect-anchor", anchor,
+                    "--anchor-file", str(doc)])
+    rout = capsys.readouterr()
+    assert vrc == rrc == 1
+    assert "ANCHOR FAIL" in vout.out + vout.err
+    assert "ANCHOR FAIL" in rout.out + rout.err
+    assert "RESULT FAIL" in vout.out + vout.err
+    assert "RESULT FAIL" in rout.out + rout.err
+
+
+def test_verify_and_replay_agree_when_scope_missing(signed_zip, tmp_path, capsys):
+    """P3-5：anchor 文件缺 comparability_scope 时，不得静默按可比处理。"""
+    zip_path = signed_zip
+    triple = _zip_manifest(zip_path)["triple"]
+    anchor = _anchor_arg(3, triple)
+    doc = _anchor_file(tmp_path, zip_path, scope=None)
+    vrc = _verify_main(zip_path, doc, anchor)
+    vout = capsys.readouterr()
+    rrc = cli.main(["replay", str(zip_path), "--expect-anchor", anchor,
+                    "--anchor-file", str(doc)])
+    rout = capsys.readouterr()
+    assert vrc == rrc == 3
+    assert "RESULT INCOMPARABLE" in vout.out + vout.err
+    assert "RESULT INCOMPARABLE" in rout.out + rout.err
+    assert "comparability_scope" in vout.out + vout.err
+    assert "comparability_scope" in rout.out + rout.err
+
+
+def test_verify_and_replay_agree_on_cross_version(signed_zip, tmp_path, capsys):
+    """P3-4：跨版本锚点与 scope 一致时，verify 与 replay 同为 INCOMPARABLE。"""
+    zip_path = signed_zip
+    triple = _zip_manifest(zip_path)["triple"]
+    other = triple["rule_pack_version"] + "-x"
+    anchor = _anchor_arg(3, dict(triple, rule_pack_version=other))
+    doc = _anchor_file(tmp_path, zip_path, rule_pack=other)
+    vrc = _verify_main(zip_path, doc, anchor)
+    vout = capsys.readouterr()
+    rrc = cli.main(["replay", str(zip_path), "--expect-anchor", anchor,
+                    "--anchor-file", str(doc)])
+    rout = capsys.readouterr()
+    assert vrc == rrc == 3
+    assert "RESULT INCOMPARABLE" in vout.out + vout.err
+    assert "RESULT INCOMPARABLE" in rout.out + rout.err

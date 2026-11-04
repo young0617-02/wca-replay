@@ -18,7 +18,8 @@ from .anomaly import review_backlog, rule_hit_counts, severity_rollup, write_ano
 from .config import Config
 from .db import (DatabaseIdentityMismatch, DatabaseUnavailable, connect, count, get_meta,
                  init_db, set_meta)
-from .evidence import export_package, input_fingerprint, verify_chain
+from .evidence import (AuditEpochClosed, export_package, input_fingerprint,
+                       verify_chain)
 from .ingest import _reject_unreconstructable_path, import_csv_file
 from .kb import build_kb, citation_ids_missing
 from .rules.citations import ALL_CITATIONS
@@ -312,7 +313,10 @@ def cmd_replay(args) -> int:
                  require_signature=bool(getattr(args, "require_signature", False)),
                  expect_package_sha256=package_sha,
                  expect_artifacts_digest=artifacts_digest,
-                 expect_evidence_digest=evidence_digest)
+                 expect_evidence_digest=evidence_digest,
+                 expect_comparability=record.get("comparability_scope"),
+                 comparability_required=bool(getattr(args, "anchor_file", None)
+                                             and record.get("anchor")))
     if args.json:
         print(json.dumps(res, ensure_ascii=False, indent=2, sort_keys=True))
         if res.get("partial"):
@@ -982,6 +986,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return args.fn(args)
     except DatabaseIdentityMismatch as exc:
+        print(f"拒绝执行：{exc}", file=sys.stderr)
+        return 2
+    except AuditEpochClosed as exc:
+        # P3-8：业务拒绝用清晰中文与规范退出码呈现，不打印 traceback。
         print(f"拒绝执行：{exc}", file=sys.stderr)
         return 2
 

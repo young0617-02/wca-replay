@@ -220,6 +220,8 @@ def main(argv: list[str] | None = None) -> int:
             expect_artifacts_digest=artifacts_digest,
             expect_evidence_digest=evidence_digest,
             expect_comparability=record.get("comparability_scope"),
+            comparability_required=bool(getattr(args, "anchor_file", None)
+                                        and record.get("anchor")),
             require_signature=require_signature)
     except ValueError as exc:
         print(f"RESULT FAIL —— {exc}", file=sys.stderr)

@@ -485,7 +485,7 @@ def load_anchor_record(path: Path | str) -> dict:
     segments = doc.get("anchor_segments") or doc.get("expected_anchor")
     if not anchor and isinstance(segments, list):
         anchor = ",".join(str(x).strip() for x in segments)
-    return {
+    record = {
         "anchor": str(anchor).strip() if anchor else None,
         "package_sha256": str(doc.get("package_sha256")
                               or doc.get("expect_package_sha256") or "").strip() or None,
@@ -496,6 +496,39 @@ def load_anchor_record(path: Path | str) -> dict:
         "comparability_scope": doc.get("comparability_scope")
         if isinstance(doc.get("comparability_scope"), dict) else None,
     }
+    # P2-1：anchor 串以外的冗余摘要字段不是装饰。凡是能从串解出的值（schema /
+    # rule_pack_version / input_fingerprint / conclusion_digest），文件里若也写了，
+    # 必须逐项一致；不一致按失败关闭，避免给人一个假的核对位。
+    _validate_anchor_record(record, doc)
+    return record
+
+
+def _validate_anchor_record(record: dict, doc: dict) -> None:
+    parsed = _parse_expected_anchor(record.get("anchor"))
+    if parsed is None:
+        return
+    pairs: list[tuple[str, object]] = [
+        ("schema", doc.get("schema")),
+        ("rule_pack_version", doc.get("rule_pack_version")),
+        ("input_fingerprint", doc.get("input_fingerprint")),
+        ("conclusion_digest", doc.get("conclusion_digest")),
+    ]
+    bad = []
+    for key, value in pairs:
+        if value in (None, ""):
+            continue
+        expected = {"schema": parsed["schema_version"],
+                    "rule_pack_version": parsed["rule_pack_version"],
+                    "input_fingerprint": parsed["input_fingerprint"],
+                    "conclusion_digest": parsed["conclusion_digest"]}[key]
+        actual = value
+        if key == "schema":
+            actual = anchor_schema_version(str(value))
+        if actual != expected:
+            bad.append(f"{key}={value!r}（anchor 串为 {expected!r}）")
+    if bad:
+        raise ValueError("ANCHOR SELF-CONFLICT 锚点文件冗余摘要字段与 anchor 串不一致："
+                         + "；".join(bad))
 
 
 def _parse_expected_triple(value: object) -> dict | None:
@@ -544,6 +577,75 @@ def _anchor_check(manifest: dict, schema_ver: int, expected_anchor: dict | None,
     return True, "ANCHOR NOT CHECKED", []
 
 
+def evaluate_external_anchor(manifest: dict, schema_ver: int,
+                             expected_anchor: dict | None,
+                             expected_triple: dict | None,
+                             expect_comparability: dict | None = None,
+                             comparability_required: bool = False
+                             ) -> tuple[bool, bool, str, list[str]]:
+    """P3-4/P3-5：可比性判定的**唯一实现**，verify 与 replay 都必须调用这里。
+
+    优先级写死（两端不得各写一份）：
+      1. anchor 文件缺 `comparability_scope`（且确实传了外部锚点）→ INCOMPARABLE；
+      2. scope 结构不合法，或 scope 与 anchor 串/三元组互相矛盾 → FAIL（自相矛盾）；
+      3. scope 与包内 rule_pack_version/schema 不同 → INCOMPARABLE；
+      4. 再按外部锚点/三元组与包比对：版本/schema 不同 → INCOMPARABLE，其余 → FAIL。
+    返回 (ok, incomparable, reason, mismatched)。
+    """
+    triple = manifest.get("triple") if isinstance(manifest.get("triple"), dict) else {}
+    scope = expect_comparability
+    has_anchor = bool(expected_anchor or expected_triple)
+    if comparability_required and has_anchor and not isinstance(scope, dict):
+        return (False, True,
+                "ANCHOR INCOMPARABLE 锚点文件缺少 comparability_scope，"
+                "无法声明可比范围；不得静默按可比处理", ["comparability_scope"])
+    if scope is not None:
+        if not isinstance(scope, dict):
+            return (False, False,
+                    "ANCHOR FAIL comparability_scope 必须是 JSON 对象",
+                    ["comparability_scope"])
+        scope_rule = scope.get("rule_pack_version")
+        scope_schema_raw = scope.get("schema")
+        scope_schema = (anchor_schema_version(scope_schema_raw)
+                        if isinstance(scope_schema_raw, str) else None)
+        if not isinstance(scope_rule, str) or not scope_rule.strip() or scope_schema is None:
+            return (False, False,
+                    "ANCHOR FAIL comparability_scope 缺有效的 rule_pack_version/schema",
+                    ["comparability_scope"])
+        # 先判 scope 与外部锚点是否自相矛盾：这是锚点文件本身的问题，按失败关闭。
+        if expected_anchor:
+            bad = []
+            if scope_rule != expected_anchor["rule_pack_version"]:
+                bad.append("rule_pack_version")
+            if scope_schema != expected_anchor["schema_version"]:
+                bad.append("schema")
+            if bad:
+                return (False, False,
+                        "ANCHOR FAIL 锚点文件自相矛盾（comparability_scope 与 anchor 串"
+                        "不一致）：" + ",".join(bad), bad)
+        elif expected_triple:
+            if scope_rule != expected_triple["rule_pack_version"]:
+                return (False, False,
+                        "ANCHOR FAIL 锚点文件自相矛盾（comparability_scope 与三元组"
+                        "不一致）：rule_pack_version", ["rule_pack_version"])
+        # scope 与包内版本/schema 不同 → 不可比，而不是篡改。
+        bad = []
+        if scope_rule != triple.get("rule_pack_version"):
+            bad.append("rule_pack_version")
+        if scope_schema != schema_ver:
+            bad.append("schema")
+        if bad:
+            return (False, True,
+                    "ANCHOR INCOMPARABLE 锚点可比性范围与包不同：" + ",".join(bad), bad)
+    ok, reason, mismatched = _anchor_check(
+        manifest, schema_ver, expected_anchor, expected_triple)
+    incomparable = (not ok) and any(
+        key in ("schema_version", "rule_pack_version") for key in mismatched)
+    if not ok and reason.startswith("ANCHOR INCOMPARABLE"):
+        incomparable = True
+    return ok, incomparable, reason, mismatched
+
+
 def verify_package(package: Path | str, *, public_keys: list[str] | tuple[str, ...] | None = None,
                    expect_anchor: str | tuple[str, ...] | None = None,
                    expect_triple: str | tuple[str, ...] | None = None,
@@ -551,6 +653,7 @@ def verify_package(package: Path | str, *, public_keys: list[str] | tuple[str, .
                    expect_artifacts_digest: str | None = None,
                    expect_evidence_digest: str | None = None,
                    expect_comparability: dict | None = None,
+                   comparability_required: bool = False,
                    require_signature: bool = False) -> dict:
     """独立验算入口；返回 ok/partial/reason 与各检查状态。不执行包内代码。
 
@@ -775,27 +878,12 @@ def verify_package(package: Path | str, *, public_keys: list[str] | tuple[str, .
                 checks["anchor"] = "FAIL"
                 result["reason"] = str(exc)
                 return result
-            anchor_ok, anchor_reason, mismatched = _anchor_check(
-                manifest, schema_ver, expected_anchor_parsed, expected_triple_parsed)
-            # 0.4.9：可比性优先于“不一致”。跨 schema 或跨 rule_pack_version 时，
-            # 摘要本来就不在同一坐标系，输出 INCOMPARABLE（exit 3），不是 FAIL。
-            if anchor_ok and isinstance(expect_comparability, dict):
-                scope = expect_comparability
-                scope_bad = []
-                if scope.get("rule_pack_version") != (
-                        manifest.get("triple") or {}).get("rule_pack_version"):
-                    scope_bad.append("rule_pack_version")
-                if scope.get("schema") != manifest.get("schema"):
-                    scope_bad.append("schema")
-                if scope_bad:
-                    anchor_ok = False
-                    mismatched = scope_bad
-                    anchor_reason = ("ANCHOR INCOMPARABLE 锚点可比性范围与包不同："
-                                     + ",".join(scope_bad))
-            result["incomparable"] = bool(
-                not anchor_ok and mismatched and
-                ("schema_version" in mismatched or "schema" in mismatched
-                 or "rule_pack_version" in mismatched))
+            # 0.4.10：可比性判定只有一处实现（evaluate_external_anchor），
+            # replay 也调用它，避免 scope 与 anchor 串冲突时两端给出不同结论。
+            anchor_ok, incomparable, anchor_reason, mismatched = evaluate_external_anchor(
+                manifest, schema_ver, expected_anchor_parsed, expected_triple_parsed,
+                expect_comparability, comparability_required)
+            result["incomparable"] = incomparable
             result["anchor_checked"] = expected_anchor_parsed is not None
             result["anchor_reason"] = anchor_reason
             checks["anchor"] = ("OK" if anchor_ok and result["anchor_checked"]

@@ -440,7 +440,9 @@ def replay(package: Path | str, *, limits: ZipLimits | None = None,
            require_signature: bool = False,
            expect_package_sha256: str | None = None,
            expect_artifacts_digest: str | None = None,
-           expect_evidence_digest: str | None = None) -> dict:
+           expect_evidence_digest: str | None = None,
+           expect_comparability: dict | None = None,
+           comparability_required: bool = False) -> dict:
     """重放一个举证包，返回可比对的字典（不抛异常即代表流程跑通，结论看 ok 字段）。
 
     `expect_anchor`（或 `WCA_EXPECT_ANCHOR`）是包外记录的四元组锚点，优先使用；
@@ -586,55 +588,37 @@ def replay(package: Path | str, *, limits: ZipLimits | None = None,
                        "engine_expected": manifest.get("engine_version", ""),
                        "pinned_params": {k: scope[k] for k in PINNED_SCOPE_PARAMS
                                          if k in scope}})
-        if expected_anchor:
-            result["anchor_checked"] = True
-            mismatched = []
-            if expected_anchor["schema_version"] != schema_ver:
-                mismatched.append("schema_version")
-            for key in TRIPLE_KEYS:
-                if expected_anchor[key] != triple.get(key):
-                    mismatched.append(key)
-            expected_projection = expected_anchor.get("projection_fingerprint")
-            package_projection = manifest.get("projection_fingerprint")
-            if expected_projection is not None:
-                if not isinstance(package_projection, str) or not package_projection \
-                        or package_projection != expected_projection:
-                    mismatched.append("projection_fingerprint")
-            result["expected_external_anchor"] = expected_anchor
+        if expected_anchor or expected:
+            result["anchor_checked"] = bool(expected_anchor)
+            if expected_anchor:
+                result["expected_external_anchor"] = expected_anchor
+            else:
+                result["expected_external_triple"] = expected
+            # 0.4.10：与 wca-verify 共用同一判定函数，优先级与标签完全一致。
+            anchor_ok, incomparable, reason, mismatched = \
+                package_verify.evaluate_external_anchor(
+                    manifest, schema_ver, expected_anchor, expected,
+                    expect_comparability, comparability_required)
             result["external_mismatched_fields"] = mismatched
-            if mismatched:
-                def _actual(key: str) -> str:
-                    if key == "schema_version":
-                        return str(schema_ver)
-                    if key == "projection_fingerprint":
-                        return str(package_projection or "（包内无）")
-                    return str(triple.get(key))
+            result["incomparable"] = incomparable
+            result["anchor_ok"] = anchor_ok
+            if not anchor_ok:
+                if expected_anchor and mismatched:
+                    def _actual(key: str) -> str:
+                        if key == "schema_version":
+                            return str(schema_ver)
+                        if key == "comparability_scope":
+                            return "（scope 与锚点/包不一致）"
+                        if key == "projection_fingerprint":
+                            return str(manifest.get("projection_fingerprint") or "（包内无）")
+                        return str(triple.get(key))
 
-                # 0.4.9：跨 schema / 跨 rule_pack_version 是“不可比”，不是“失败”。
-                if "schema_version" in mismatched or "rule_pack_version" in mismatched:
-                    result["incomparable"] = True
-                    result["anchor_ok"] = False
-                    result["reason"] = ("ANCHOR INCOMPARABLE 外部锚点与包不可比（schema/"
-                                        "rule_pack_version 不同）：" + ",".join(mismatched))
-                    return result
-                result["anchor_ok"] = False
-                result["reason"] = ("ANCHOR FAIL 外部锚点与包内不一致：" + ",".join(
-                    f"{k}（期望 {expected_anchor.get(k)} / 包内 {_actual(k)}）"
-                    for k in mismatched))
-                return result
-            result["anchor_ok"] = True
-        elif expected:
-            mismatched = [k for k in TRIPLE_KEYS if expected[k] != triple.get(k)]
-            result["expected_external_triple"] = expected
-            result["external_mismatched_fields"] = mismatched
-            if mismatched:
-                if "rule_pack_version" in mismatched:
-                    result["incomparable"] = True
-                    result["reason"] = ("ANCHOR INCOMPARABLE 外部三元组与包不可比"
-                                        "（rule_pack_version 不同）：" + ",".join(mismatched))
-                    return result
-                result["reason"] = ("外部三元组不一致：" + ",".join(
-                    f"{k}（期望 {expected[k]} / 包内 {triple.get(k)}）" for k in mismatched))
+                    if not reason.startswith("ANCHOR INCOMPARABLE"):
+                        reason += "：" + ",".join(
+                            f"{k}（期望 {expected_anchor.get(k)} / 包内 {_actual(k)}）"
+                            for k in mismatched if k in TRIPLE_KEYS
+                        ) if any(k in TRIPLE_KEYS for k in mismatched) else ""
+                result["reason"] = reason
                 return result
         if not chain["ok"]:
             result["reason"] = f"审计链断裂：seq={chain['broken_at_seq']} {chain['reason']}"
