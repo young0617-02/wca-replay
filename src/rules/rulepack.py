@@ -20,7 +20,8 @@ from dataclasses import dataclass, field
 from datetime import date
 
 from ..config import Config
-from ..quality_batch import batch_id_from_sources, date_from_raw_value, repeat_sources
+from ..quality_batch import (batch_id_from_sources, date_from_raw_value,
+                             detail_physical_sources, repeat_sources)
 from ..util import round_half_up
 from . import citations as C
 from .approvals import evaluate_approval_evidence
@@ -616,6 +617,31 @@ def rule_quality(emp: EmpScope, cfg: Config) -> list[Finding]:
         sources.sort(key=lambda r: (r["rel_path"].encode("utf-8"), r["line_no"]))
         batch_size = len(sources)
         batch_id = batch_id_from_sources(sources)
+        # 0.4.9：批次“保留行”的物理位置。只写非 canonical 的 evidence 块，
+        # 让读者能定位到被保留的那一条；不参与 conclusion_digest。
+        kept: dict[tuple[str, int], dict] = {}
+        for issue in issues:
+            first = list(issue.get("first_refs") or [])
+            if not first:
+                first = [{"rel_path": rel, "line_no": num}
+                         for rel, num in detail_physical_sources(issue.get("detail"))[:1]]
+            if not first:
+                # 同文件重复没有 detail 来源：被保留的是该重复键的首行（最小行号）。
+                refs = repeat_sources(issue.get("rel_path"), issue.get("line_no"),
+                                      issue.get("detail"))
+                if refs:
+                    first = [min(refs, key=lambda r: (
+                        str(r.get("rel_path") or "").encode("utf-8"),
+                        int(r.get("line_no") or 0)))]
+            for ref in first:
+                rel = str(ref.get("rel_path") or "")
+                if rel:
+                    kept[(rel, int(ref.get("line_no") or 0))] = {
+                        "rel_path": rel, "line_no": int(ref.get("line_no") or 0)}
+        kept_refs = [f"{ref['rel_path']}:{ref['line_no']}" for ref in
+                     sorted(kept.values(), key=lambda r: (
+                         r["rel_path"].encode("utf-8"), r["line_no"]))]
+        retained = {"retained_refs": kept_refs} if kept_refs else {}
         out.append(_finding(
             emp, "QUAL-01", SEV_DEFENSIBLE,
             f"{day_key} 存在 {batch_size} 条重复打卡行（批次 {batch_id[:12]}…），"
@@ -631,6 +657,7 @@ def rule_quality(emp: EmpScope, cfg: Config) -> list[Finding]:
                 # 兼容旧消费方：line_refs 与 sources 同步，全量不截断。
                 "line_refs": list(sources),
             },
+            evidence=retained,
             work_date=day_key,
             period_key=day_key,
         ))

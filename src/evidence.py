@@ -700,10 +700,11 @@ def _write_package_confidence(path, *, findings_count: int, final_count: int,
 
 
 def _aggregate_findings(findings) -> list[dict]:
-    """带 evidence 定位元数据的结论（第四轮实测 24 条：6 VIOLATION + 17 REVIEW + 1 DEFENSIBLE）。
+    """带周期聚合定位元数据的结论（第四轮实测 24 条：6 VIOLATION + 17 REVIEW + 1 DEFENSIBLE）。
 
-    筛选依据是 evidence 块非空，而不是严重级别或“有没有行号”；这样 QUAL/REG/SCOPE
-    这类同样没有单行来源、但事实来自台账/主数据的结论不会被误算进周期聚合清单。
+    筛选依据是 evidence 里有周期窗口/表定位，而不是“evidence 非空”：
+    0.4.9 起 QUAL-01 批次 finding 的 evidence 只带 retained_refs（保留行物理位置），
+    属于单行可定位信息，不能混进“周期聚合无法定位到单行”的清单。
     """
     out: list[dict] = []
     for f in findings:
@@ -711,6 +712,9 @@ def _aggregate_findings(findings) -> list[dict]:
         if not evidence:
             continue
         window = evidence.get("window") if isinstance(evidence.get("window"), dict) else {}
+        if not (evidence.get("tables") or window.get("kind") or window.get("start")
+                or window.get("end")):
+            continue
         out.append({
             "severity": str(f["severity"]),
             "rule_id": str(f["rule_id"]),

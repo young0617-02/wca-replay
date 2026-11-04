@@ -89,6 +89,9 @@ class Issue:
     file_id_override: int | None = None
     # 同一重复内容的全部来源文件；仅用于把输入文件都带进包，不进入 canonical。
     related_file_ids: list[int] = field(default_factory=list)
+    # 0.4.9：被保留的首次出现行（文件内为最小行号），只用于 evidence 定位。
+    first_line: int | None = None
+    first_file_id: int | None = None
 
     def as_row(self, file_id: int, created_at: str) -> tuple:
         target_file_id = self.file_id_override if self.file_id_override is not None else file_id
@@ -450,8 +453,12 @@ class _DupGroup:
                 meta[1].append(str(issue.raw_value or ""))
             meta[2].append((ref["rel_path"], int(ref["line_no"]), ref_file_id))
         # 首次出现行只用于举证包反查，不重复计入 batch_size。
-        for rel, line in detail_physical_sources(issue.detail)[:1]:
-            meta[3].append((rel, line, reverse_paths.get(rel, target_file_id)))
+        if issue.first_line is not None:
+            fid = issue.first_file_id if issue.first_file_id is not None else target_file_id
+            meta[3].append((rel_paths.get(fid, canonical_rel), int(issue.first_line), fid))
+        else:
+            for rel, line in detail_physical_sources(issue.detail)[:1]:
+                meta[3].append((rel, line, reverse_paths.get(rel, target_file_id)))
 
     @property
     def file_ids(self) -> set[int]:
@@ -461,7 +468,7 @@ class _DupGroup:
         days = {}
         for day, meta in self.days.items():
             refs = sorted(meta[2], key=lambda x: (x[0], x[1], x[2]))
-            firsts = sorted(meta[3], key=lambda x: (x[0], x[1], x[2])) if len(meta) > 3 else []
+            firsts = sorted(set(meta[3]), key=lambda x: (x[0], x[1], x[2])) if len(meta) > 3 else []
             days[day] = {
                 "count": meta[0], "samples": meta[1],
                 # 行引用按包内相对路径排序；同一文件时与旧行为一致，跨文件时与导入顺序无关。
@@ -653,11 +660,16 @@ def _ingest_rows(conn: Connection, cfg: Config, *, file_id: int, kind: str,
                     conn, mode, punch_candidates, start_line + offset,
                     start_line + offset + len(chunk) - 1)
                 for line_no, owner, payload, issues in punch_candidates:
-                    if line_no not in new_lines:
-                        params = payload[1]
-                        issues.append(_seen_duplicate_issue(
-                            line_no, (params[0], params[1], params[5], params[4] or ""),
-                            params[3]))
+                    params = payload[1]
+                    key = (params[0], params[1], params[5], params[4] or "")
+                    first_line = new_lines.get(key)
+                    if first_line != line_no:
+                        issue = _seen_duplicate_issue(conn, line_no, key, params[3])
+                        # 块内首行尚未写入 punch，用块级唯一表里的最小行号补全定位。
+                        if issue.first_line is None and first_line is not None:
+                            issue.first_line = int(first_line)
+                            issue.first_file_id = file_id
+                        issues.append(issue)
                         result.rows_rejected += 1
                         for iss in issues:
                             iss.emp_id = iss.emp_id or owner
@@ -767,23 +779,33 @@ def _row_org(conn, cfg: Config, raw: Mapping[str, Any], line_no: int, seen: set[
     return (sql, (org_id, org_name or org_id, parent or None)), issues
 
 
-def _seen_duplicate_issue(line_no: int, key: tuple, work_date: str = "") -> Issue:
+def _seen_duplicate_issue(conn: Connection, line_no: int, key: tuple,
+                          work_date: str = "") -> Issue:
     """文件内完全重复行（key = emp_id, ts, ptype, device）。
 
     必须带上该行实际发生日：0.4.8 起 QUAL-01 的重复批次按“实际发生日”聚合，
     不能再落进空日期汇总条。日期来自打卡时间锚点，不依赖数据库状态。
+    0.4.9：同时记录被保留的首次出现行（文件内为最小行号），供 evidence 定位。
     """
     issue = Issue("QUAL-DUP", SEV_DEFENSIBLE, line_no, "*",
                   f"{key[0]}|{key[1]}|{key[2]}|{key[3]}",
                   "完全重复的打卡行：只保留首次出现，重复行不进入事实表"
                   "（可申辩：终端重复上传或补录）")
     issue.work_date = work_date or None
+    row = conn.execute(
+        "SELECT source_file_id, source_line_no FROM punch "
+        "WHERE emp_id = ? AND event_ts = ? AND punch_type = ? "
+        "AND COALESCE(device_id, '') = ? ORDER BY punch_id LIMIT 1",
+        (key[0], key[1], key[2], key[3])).fetchone()
+    if row is not None and row["source_line_no"] is not None:
+        issue.first_line = int(row["source_line_no"])
+        issue.first_file_id = int(row["source_file_id"]) if row["source_file_id"] else None
     return issue
 
 
 def _mark_seen_lines(conn: Connection, mode: str, candidates: list[tuple],
-                     line_lo: int, line_hi: int) -> set[int]:
-    """把本块候选打卡的键写入临时唯一表，返回“首次出现”的行号集合。
+                     line_lo: int, line_hi: int) -> dict[tuple, int]:
+    """把本块候选打卡的键写入临时唯一表，返回“首次出现”的 key→行号映射。
 
     `ON CONFLICT DO NOTHING` 让同一键的后续行不落库；再按本块行号区间回查，
     首次出现的行号会被返回，重复行不会。这样无需在 Python 里保存全文件 key。
@@ -791,7 +813,7 @@ def _mark_seen_lines(conn: Connection, mode: str, candidates: list[tuple],
     keys = [(p[1][0], p[1][1], p[1][5], p[1][4] or "", line_no)
             for line_no, _owner, p, _issues in candidates]
     if not keys:
-        return set()
+        return {}
     cols = ", ".join(_PUNCH_SEEN_COLUMNS)
     if mode == "copy":
         cursor = conn.raw.cursor()
@@ -814,9 +836,11 @@ def _mark_seen_lines(conn: Connection, mode: str, candidates: list[tuple],
         "ON CONFLICT DO NOTHING")
     _clear_temp_table(conn, _PUNCH_SEEN_STAGE)
     rows = conn.execute(
-        f"SELECT source_line_no FROM {_PUNCH_SEEN} "
+        f"SELECT emp_id, event_ts, punch_type, device_id, source_line_no "
+        f"FROM {_PUNCH_SEEN} "
         "WHERE source_line_no BETWEEN ? AND ?", (line_lo, line_hi)).fetchall()
-    return {int(r["source_line_no"]) for r in rows}
+    return {(str(r["emp_id"]), str(r["event_ts"]), str(r["punch_type"]),
+             str(r["device_id"] or "")): int(r["source_line_no"]) for r in rows}
 
 
 def _duplicate_punch_issue(conn: Connection, rel_paths: dict[int, str],
@@ -923,7 +947,7 @@ def _row_punch(conn, cfg: Config, raw: Mapping[str, Any], line_no: int, seen: se
     key = (emp_id, ts, ptype, device)
     if check_seen:
         if key in seen:
-            issues.append(_seen_duplicate_issue(line_no, key, anchor))
+            issues.append(_seen_duplicate_issue(conn, line_no, key, anchor))
             return None, issues
         seen.add(key)
 

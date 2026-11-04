@@ -108,6 +108,11 @@ def test_single_batch_finding_shape_with_49_sources(tmp_path):
         assert metric["sources"][0] == {"rel_path": "punch.csv", "line_no": 3}
         assert metric["sources"][-1] == {"rel_path": "punch.csv", "line_no": 51}
         assert metric["batch_id"] == _expected_batch_id(metric["sources"])
+        # 0.4.9：被保留的首行（punch.csv 第 2 行）只进 evidence，可定位；
+        # 不得进入 canonical 九字段。
+        assert finding.evidence == {"retained_refs": ["punch.csv:2"]}
+        assert "retained_refs" not in finding.canonical()
+        assert "retained_refs" not in finding.canonical()["metric"]
         # 没有任何空 work_date / period_key 的汇总条。
         assert all(f.work_date and f.period_key for f in out.findings)
     finally:

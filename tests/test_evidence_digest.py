@@ -39,7 +39,9 @@ ROOT = Path(__file__).resolve().parent.parent
 KNOWN_DIGEST = "5dc46558152089f1c0be7522c7b1c175b387309d1c316eb8445dd81ada1d5b7d"
 KNOWN_INPUTS_DIGEST = "aad527d187dad848924af8be868698a8da5e745ad31af4c3ff83d2d2e1d930a7"
 KNOWN_INPUT_FINGERPRINT = "8b3b54a09aa8ede51697b899ddf2d2e738262d6a612b9bee4e34037a6aa8456e"
-KNOWN_EVIDENCE_DIGEST = "4654a3c760078d3203d572db1af8eb23434777f6ffe2732713caf14d9badd0c9"
+# 0.4.9：批次 finding 增加非 canonical 的 retained_refs（保留行物理位置）；
+# conclusion_digest / inputs_digest / input_fingerprint 逐字节不变，仅 evidence 变。
+KNOWN_EVIDENCE_DIGEST = "ed3b3f1b3c1961a22683979750bc12e44a048c9926617ef1a645fdfaa9cddfeb"
 
 # 与第三/四/五/九轮 handoff 相同的输入与扫描范围；0.4.8 起 QUAL-01 单批形状的
 # 稳定结论摘要为 5dc46558…，输入侧两个值仍为 aad527d1… / 8b3b54a0…。
@@ -150,7 +152,9 @@ def test_full_v5_conclusion_digest_is_stable_after_file_id_removal(full_v5):
     assert counts["findings_batched"] == 1
     assert counts["issues_total"] == 115
 
-    evidence_rows = [finding for finding in out.findings if finding.evidence]
+    evidence_rows = [finding for finding in out.findings if finding.evidence
+                     and (finding.evidence.get("tables")
+                          or (finding.evidence.get("window") or {}).get("kind"))]
     assert len(evidence_rows) == 24
     assert {finding.severity for finding in evidence_rows} == {
         "VIOLATION", "REVIEW", "DEFENSIBLE"}
@@ -268,7 +272,9 @@ def test_not_covered_lists_all_24_evidence_findings(full_v5):
     bullets = re.findall(r"^- `(?:VIOLATION|REVIEW|DEFENSIBLE) / ", text, flags=re.M)
     assert len(bullets) == 24
     for finding in full_v5["out"].findings:
-        if not finding.evidence:
+        window = finding.evidence.get("window") or {}
+        if not (finding.evidence.get("tables") or window.get("kind") or window.get("start")
+                or window.get("end")):
             continue
         assert finding.rule_id in text
         assert finding.emp_id in text

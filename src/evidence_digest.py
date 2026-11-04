@@ -2,10 +2,11 @@
 
 边界（第四轮整改阻断项）：
   * `metric` 只保留数值与计量口径（天数、分钟数、counting_scope 等）；
-  * `evidence` 只保留定位元数据（tables/window/rules/aggregation），不进入
-    `Finding.canonical()`，因此不污染 `conclusion_digest`；
+  * `evidence` 只保留定位元数据（tables/window/rules/aggregation，可选
+    retained_refs），不进入 `Finding.canonical()`，因此不污染 `conclusion_digest`；
   * `evidence_digest` 对全部 finding 的 evidence 块做规范化后计算 SHA-256：
-      - 固定字段序 `tables/window/rules/aggregation`；
+      - 固定字段序 `tables/window/rules/aggregation`；可选 `retained_refs`
+        仅在原块出现时写入（0.4.9），保证旧包重算结果不变；
       - 缺失的标量写成 `null`，缺失的列表写成 `[]`；
       - 表路径统一为 `/`，拒绝空路径与 `..`；
       - 按 `(emp_id, work_date, period_key, rule_id, rule_version)` 排序；
@@ -17,7 +18,7 @@ from collections.abc import Iterable, Mapping
 
 from .util import digest_of
 
-EVIDENCE_FIELDS = ("tables", "window", "rules", "aggregation")
+EVIDENCE_FIELDS = ("tables", "window", "rules", "aggregation", "retained_refs")
 WINDOW_FIELDS = ("kind", "key", "start", "end")
 
 
@@ -76,12 +77,19 @@ def canonical_evidence(block: Mapping[str, object] | None) -> dict:
     aggregation = block.get("aggregation")
     if aggregation is not None and not isinstance(aggregation, str):
         raise ValueError("evidence.aggregation 必须是字符串或 null")
-    return {
+    out = {
         "tables": tables,
         "window": window,
         "rules": rules,
         "aggregation": aggregation,
     }
+    # 0.4.9：批次 finding 的“保留行”物理位置。字段可选，缺席时**不写入**
+    # canonical 形式，从而旧包重算 evidence_digest 不受影响。
+    if "retained_refs" in block:
+        out["retained_refs"] = sorted(
+            _string_list(block.get("retained_refs"), "retained_refs"),
+            key=lambda item: item.encode("utf-8"))
+    return out
 
 
 def evidence_binding(record: Mapping[str, object]) -> dict:

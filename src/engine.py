@@ -124,6 +124,31 @@ def build_scope(conn: Connection, cfg: Config, calendar: HolidayCalendar, emp: R
     # 结论 metric 只用包内相对路径 + 行号；file_id 只留在 DB/内部引用。
     file_paths = {int(row["file_id"]): str(row["rel_path"])
                   for row in conn.execute("SELECT file_id, rel_path FROM raw_file").fetchall()}
+    kept_cache: dict[tuple, dict | None] = {}
+
+    def kept_ref(raw_value: object) -> dict | None:
+        """QUAL-DUP 被保留行的物理位置：按 key 查事实表里的首条 punch。
+
+        0.4.9 起只写进 finding.evidence（非 canonical），用于回答
+        “同文件重复时到底保留了哪一行”。
+        """
+        parts = str(raw_value or "").split("|")
+        if len(parts) < 3:
+            return None
+        key = (parts[0], parts[1], parts[2], parts[3] if len(parts) > 3 else "")
+        if key in kept_cache:
+            return kept_cache[key]
+        row = conn.execute(
+            "SELECT source_file_id, source_line_no FROM punch "
+            "WHERE emp_id = ? AND event_ts = ? AND punch_type = ? "
+            "AND COALESCE(device_id, '') = ? ORDER BY punch_id LIMIT 1", key).fetchone()
+        ref = None
+        if row is not None and row["source_line_no"] is not None:
+            rel = file_paths.get(int(row["source_file_id"])) if row["source_file_id"] else None
+            if rel:
+                ref = {"rel_path": rel, "line_no": int(row["source_line_no"])}
+        kept_cache[key] = ref
+        return ref
     issues = conn.execute(
         "SELECT i.rule_id, i.severity, i.field_name, i.raw_value, i.detail, "
         "i.file_id, i.line_no, i.work_date "
@@ -144,11 +169,21 @@ def build_scope(conn: Connection, cfg: Config, calendar: HolidayCalendar, emp: R
                     count = int(meta.get("count", 0))
                     samples = list(meta.get("samples") or [])
                     refs = list(meta.get("line_refs") or [])
+                    # 0.4.9：保留行（首次出现行）的物理位置只进 finding.evidence，
+                    # 不进 canonical；这里先把 file_id 还原成包内 rel_path。
+                    first_refs = [
+                        {"rel_path": file_paths.get(int(fid)), "line_no": int(line)}
+                        for fid, line in (meta.get("first_refs") or [])
+                        if file_paths.get(int(fid))
+                    ]
                     if not day:
                         # 历史库可能没有日期：从原值里的时间戳补；仍取不到则交给
                         # rule_quality 明确报错，绝不静默生成空日期汇总。
                         day = date_from_raw_value(
                             samples[0] if samples else str(r["raw_value"] or ""))
+                    if not first_refs:
+                        fallback = kept_ref(str(r["raw_value"] or ""))
+                        first_refs = [fallback] if fallback else []
                     for idx in range(count):
                         file_id, line_no = (refs[idx] if idx < len(refs)
                                             else (r["file_id"], r["line_no"]))
@@ -161,8 +196,10 @@ def build_scope(conn: Connection, cfg: Config, calendar: HolidayCalendar, emp: R
                             "file_id": file_id, "line_no": line_no,
                             "related_file_ids": payload.get("related_file_ids") or [],
                             "detail": r["detail"],
+                            "first_refs": first_refs,
                         })
                 continue
+        kept = kept_ref(str(r["raw_value"] or "")) if str(r["rule_id"]) == "QUAL-DUP" else None
         scope.quality_issues.append({
             "rule_id": r["rule_id"], "severity": r["severity"], "work_date": r["work_date"],
             "raw_value": r["raw_value"], "rel_path": file_paths.get(int(r["file_id"])),
@@ -170,6 +207,7 @@ def build_scope(conn: Connection, cfg: Config, calendar: HolidayCalendar, emp: R
             "related_file_ids": _issue_related_file_ids(r["detail"]),
             # 跨文件重复的全部物理来源只在 detail 里；rule_quality 据此剔除首次出现行。
             "detail": r["detail"],
+            "first_refs": [kept] if kept else [],
         })
 
     return scope
