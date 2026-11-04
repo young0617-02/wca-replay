@@ -57,18 +57,18 @@
 ## T6 回归与四包不变量
 
 - [x] T6.1 全量 pytest（566 passed / 9 skipped）。
-- [ ] T6.2 重建四个平铺包，逐项核对
+- [x] T6.2 重建四个平铺包，逐项核对
       `b9cc6fd0… / 01cb5aeb… / aad527d1… / 8b3b54a0…`。
-- [ ] T6.3 若有变化，逐 finding/字段归因并停止交付。
+- [x] T6.3 若有变化，逐 finding/字段归因并停止交付（实测未变化）。
 
 ## T7 发行与交接
 
 - [x] T7.1 版本号升到 0.4.6（`src/__init__.py`、`pyproject.toml`、`uv.lock`）。
-- [ ] T7.2 `scripts/build_release.py` 干净树构建 wheel/sdist。
-- [ ] T7.3 生成默认流程包与双 punch 子目录包，放入交接目录。
-- [ ] T7.4 交接目录补 `docs/签名方案.md`、报告、旧 wheel 说明。
-- [ ] T7.5 `SHA256SUMS` + Ed25519 签名。
-- [ ] T7.6 干净 venv 复验四包 + 新增两包（verify/replay）。
-- [ ] T7.7 确认第六/七轮 handoff 哈希未变。
-- [ ] T7.8 代码提交与文档提交分开；不 push。
-- [ ] T7.9 `reports/0.4.6-嵌套路径导出与展示层.md`：结论先行、实测/推断分离、四包值未变独立一节。
+- [x] T7.2 `scripts/build_release.py` 干净树构建 wheel/sdist。
+- [x] T7.3 生成默认流程包与双 punch 子目录包，放入交接目录。
+- [x] T7.4 交接目录补 `docs/签名方案.md`、报告、旧 wheel 说明。
+- [x] T7.5 `SHA256SUMS` + Ed25519 签名。
+- [x] T7.6 干净 venv 复验四包 + 新增三包（共七个包，verify/replay）。
+- [x] T7.7 确认第六/七轮 handoff 哈希未变。
+- [x] T7.8 代码提交与文档提交分开；不 push。
+- [x] T7.9 `reports/0.4.6-嵌套路径导出与展示层.md`：结论先行、实测/推断分离、四包值未变独立一节。
