@@ -278,6 +278,15 @@ UTF-8 字节序排序，用换行符连接，取 SHA-256 十六进制小写摘�
    环境变量 `WCA_EXPECT_ANCHOR` / `WCA_EXPECT_EVIDENCE_DIGEST` 等价。**不传 `--expect-anchor` 只给 `RESULT PARTIAL`（exit 2）**，
    不再静默放行；`--expect-triple` / `WCA_EXPECT_TRIPLE` 仍保留，但它**不约束 schema**，
    交付验收请用四元组，否则“伪装成 v1 旧包”的降级不会被发现。
+   **跨版本可比性（0.4.9）**：摘要只在**同 `rule_pack_version` + 同 evidence schema** 下可比。
+   锚点文件应带 `comparability_scope`（写明 `rule_pack_version` 与 `schema`）；跨版本或跨 schema
+   比对输出 `RESULT INCOMPARABLE`（**exit 3**），不是 `FAIL`。同版本同 schema 摘要不符仍是
+   `FAIL`（exit 1）；缺字段/缺签名仍按原规则失败关闭，**不因 INCOMPARABLE 放宽任何真失败**。
+   旧锚点按版本命名（`anchor-<version>-<role>.json`），新版本不覆盖旧文件。
+   **退出码**：0 = OK；1 = FAIL（内容/摘要/签名/工件真实不符）；2 = PARTIAL（外部门禁缺失）；
+   3 = INCOMPARABLE（锚点与包跨版本或跨 schema，不可比）。
+   **`PRODUCER FAIL` ≠ 篡改**：用新版 wheel 验旧包会先报 `PRODUCER FAIL`，签名检查早退为
+   `SIGNATURE NOT CHECKED`；这是 wheel/包版本配对问题，应改用对应版本旧 wheel，不能据此认定包被改。
    **交付验收必须两条一起跑**：`wca-verify` 校验包体完整性、工件绑定、审计链、输入逐文件哈希、
    输入摘要、findings 反算摘要与签名，并与外部四元组/包 SHA/工件摘要比对；`wca replay` 独立重算
    得到实算三元组与**发现（未签认）**条数。只跑一条都不足以证明。按 `manifest.schema` 分档：

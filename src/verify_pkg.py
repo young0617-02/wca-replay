@@ -152,6 +152,8 @@ def _print_result(result: dict) -> None:
     anchor_status = st("anchor")
     if anchor_status == "OK":
         print("ANCHOR CHECK OK")
+    elif anchor_status == "INCOMPARABLE":
+        print(f"ANCHOR INCOMPARABLE —— {result.get('anchor_reason') or result.get('reason')}")
     elif anchor_status == "FAIL":
         print(f"ANCHOR FAIL —— {result.get('anchor_reason') or result.get('reason')}")
     elif result.get("anchor_expected") and early:
@@ -160,7 +162,9 @@ def _print_result(result: dict) -> None:
     else:
         print("ANCHOR NOT CHECKED" + _note(
             "anchor", anchor_status, result, checks, early))
-    if result.get("ok"):
+    if result.get("incomparable"):
+        print(f"RESULT INCOMPARABLE —— {result.get('reason')}")
+    elif result.get("ok"):
         print("RESULT OK")
     elif result.get("partial"):
         print(f"RESULT PARTIAL —— {result.get('reason')}")
@@ -215,6 +219,7 @@ def main(argv: list[str] | None = None) -> int:
             expect_package_sha256=package_sha,
             expect_artifacts_digest=artifacts_digest,
             expect_evidence_digest=evidence_digest,
+            expect_comparability=record.get("comparability_scope"),
             require_signature=require_signature)
     except ValueError as exc:
         print(f"RESULT FAIL —— {exc}", file=sys.stderr)
@@ -225,4 +230,6 @@ def main(argv: list[str] | None = None) -> int:
         _print_result(result)
     if result.get("ok"):
         return 0
+    if result.get("incomparable"):
+        return 3
     return 2 if result.get("partial") else 1

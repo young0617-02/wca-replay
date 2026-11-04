@@ -493,6 +493,8 @@ def load_anchor_record(path: Path | str) -> dict:
                                 or doc.get("expect_artifacts_digest") or "").strip() or None,
         "evidence_digest": str(doc.get("evidence_digest")
                                or doc.get("expect_evidence_digest") or "").strip() or None,
+        "comparability_scope": doc.get("comparability_scope")
+        if isinstance(doc.get("comparability_scope"), dict) else None,
     }
 
 
@@ -526,11 +528,17 @@ def _anchor_check(manifest: dict, schema_ver: int, expected_anchor: dict | None,
             if not isinstance(package_projection, str) or package_projection != expected_projection:
                 mismatched.append("projection_fingerprint")
         if mismatched:
+            if "schema_version" in mismatched or "rule_pack_version" in mismatched:
+                return False, ("ANCHOR INCOMPARABLE 外部锚点与包不可比（schema/"
+                               "rule_pack_version 不同）：" + ",".join(mismatched)), mismatched
             return False, "ANCHOR FAIL 外部锚点与包内不一致：" + ",".join(mismatched), mismatched
         return True, "ANCHOR CHECK OK", []
     if expected_triple:
         mismatched = [k for k in TRIPLE_KEYS if expected_triple[k] != triple.get(k)]
         if mismatched:
+            if "rule_pack_version" in mismatched:
+                return False, ("ANCHOR INCOMPARABLE 外部三元组与包不可比（rule_pack_version "
+                               "不同）：" + ",".join(mismatched)), mismatched
             return False, "TRIPLE FAIL 外部三元组与包内不一致：" + ",".join(mismatched), mismatched
         return True, "EXTERNAL TRIPLE CHECK OK（legacy；未约束 schema）", []
     return True, "ANCHOR NOT CHECKED", []
@@ -542,6 +550,7 @@ def verify_package(package: Path | str, *, public_keys: list[str] | tuple[str, .
                    expect_package_sha256: str | None = None,
                    expect_artifacts_digest: str | None = None,
                    expect_evidence_digest: str | None = None,
+                   expect_comparability: dict | None = None,
                    require_signature: bool = False) -> dict:
     """独立验算入口；返回 ok/partial/reason 与各检查状态。不执行包内代码。
 
@@ -565,7 +574,7 @@ def verify_package(package: Path | str, *, public_keys: list[str] | tuple[str, .
         "signature_key_id": "", "signature_reason": "", "signature_checked": False,
         "anchor_checked": False, "anchor_expected": bool(
             expect_anchor or os.environ.get("WCA_EXPECT_ANCHOR")),
-        "anchor_reason": "ANCHOR NOT CHECKED",
+        "anchor_reason": "ANCHOR NOT CHECKED", "incomparable": False,
         "package_sha256": "", "package_sha256_checked": False, "package_sha256_ok": None,
         "package_sha256_expected": "",
         "artifacts_digest": "", "artifacts_digest_checked": False, "artifacts_digest_ok": None,
@@ -768,10 +777,30 @@ def verify_package(package: Path | str, *, public_keys: list[str] | tuple[str, .
                 return result
             anchor_ok, anchor_reason, mismatched = _anchor_check(
                 manifest, schema_ver, expected_anchor_parsed, expected_triple_parsed)
+            # 0.4.9：可比性优先于“不一致”。跨 schema 或跨 rule_pack_version 时，
+            # 摘要本来就不在同一坐标系，输出 INCOMPARABLE（exit 3），不是 FAIL。
+            if anchor_ok and isinstance(expect_comparability, dict):
+                scope = expect_comparability
+                scope_bad = []
+                if scope.get("rule_pack_version") != (
+                        manifest.get("triple") or {}).get("rule_pack_version"):
+                    scope_bad.append("rule_pack_version")
+                if scope.get("schema") != manifest.get("schema"):
+                    scope_bad.append("schema")
+                if scope_bad:
+                    anchor_ok = False
+                    mismatched = scope_bad
+                    anchor_reason = ("ANCHOR INCOMPARABLE 锚点可比性范围与包不同："
+                                     + ",".join(scope_bad))
+            result["incomparable"] = bool(
+                not anchor_ok and mismatched and
+                ("schema_version" in mismatched or "schema" in mismatched
+                 or "rule_pack_version" in mismatched))
             result["anchor_checked"] = expected_anchor_parsed is not None
             result["anchor_reason"] = anchor_reason
             checks["anchor"] = ("OK" if anchor_ok and result["anchor_checked"]
-                                else ("FAIL" if not anchor_ok else "NOT CHECKED"))
+                                else ("INCOMPARABLE" if result["incomparable"]
+                                      else ("FAIL" if not anchor_ok else "NOT CHECKED")))
             if not anchor_ok:
                 result["reason"] = anchor_reason
                 return result

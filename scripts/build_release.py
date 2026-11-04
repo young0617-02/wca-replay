@@ -220,6 +220,13 @@ py -3.12 -m venv .venv-clean
 `anchor`/`package_sha256`/`artifacts_digest`/`evidence_digest`，**显式参数优先 > 环境变量 >
 文件兜底**；证据摘要环境变量为 `WCA_EXPECT_EVIDENCE_DIGEST`。
 
+**跨版本可比性（0.4.9）**：摘要只在同 `rule_pack_version` + 同 evidence schema 下可比。
+跨版本/跨 schema 的锚点输出 `RESULT INCOMPARABLE`（**exit 3**），不是 `FAIL`；同版本同 schema
+摘要不符仍 `FAIL`（exit 1），缺字段/缺签名仍失败关闭。锚点文件带 `comparability_scope`
+（`rule_pack_version` + `schema`），旧锚点按版本命名（`anchor-<version>-<role>.json`）、不覆盖。
+退出码：0 OK / 1 FAIL / 2 PARTIAL / 3 INCOMPARABLE。**`PRODUCER FAIL` ≠ 篡改**：新版 wheel
+验旧包会先报 `PRODUCER FAIL` 并早退签名检查，应改用对应版本旧 wheel。
+
 **`NOT CHECKED` / `SKIPPED` 含义**：`NOT CHECKED` 只表示早退时尚未走到该检查，
 **不等于“缺失/不符”**；已传入锚点但前序失败时输出 `ANCHOR SKIPPED (early exit)`，与
 “未提供锚点”的 `ANCHOR NOT CHECKED（未传外部锚点）` 彻底分开。`ARTIFACTS FAIL` 行会带具体

@@ -420,6 +420,8 @@ def cmd_replay(args) -> int:
           + ("（未传外部期望值）" if sha_status == "NOT CHECKED" else ""))
     if res.get("anchor_ok") is True:
         print("  ANCHOR CHECK OK")
+    elif res.get("incomparable"):
+        print(f"  ANCHOR INCOMPARABLE —— {res.get('reason')}")
     elif res.get("anchor_checked"):
         print(f"  ANCHOR FAIL —— {res.get('reason')}")
     elif res.get("anchor_expected"):
@@ -427,6 +429,9 @@ def cmd_replay(args) -> int:
     else:
         print("  ANCHOR NOT CHECKED（未传外部锚点；不能算完整验收）")
     if "actual_triple" not in res:
+        if res.get("incomparable"):
+            print(f"  RESULT INCOMPARABLE —— {res['reason']}")
+            return 3
         print(f"  RESULT {'PARTIAL' if res.get('partial') else 'FAIL'}"
               f" —— {res['reason']}")
         return 2 if res.get("partial") else 1
@@ -439,6 +444,9 @@ def cmd_replay(args) -> int:
     print(f"  已确认结论（包内）期望 {res.get('final_conclusions_expected', 0)} / "
           f"实际 {res.get('final_conclusions_packaged', 0)} 条"
           "（replay 不重建人工确认，只核对包内结论集行数）")
+    if res.get("incomparable"):
+        print(f"  RESULT INCOMPARABLE —— {res['reason']}")
+        return 3
     if res.get("partial"):
         print(f"  RESULT PARTIAL —— {res['reason']}")
         return 2

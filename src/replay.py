@@ -420,6 +420,7 @@ def _base_result(package: Path | str, manifest: dict, *,
         "evidence_binding": {}, "evidence_legacy": False,
         "evidence_digest": "", "evidence_actual_digest": "", "evidence_replay_ok": None,
         "anchor_expected": anchor_expected, "anchor_checked": False, "anchor_ok": None,
+        "incomparable": False,
         "partial": False,
         "package_sha256": "", "package_sha256_checked": False, "package_sha256_ok": None,
         "artifacts_digest": "", "artifacts_digest_checked": False, "artifacts_digest_ok": None,
@@ -609,6 +610,13 @@ def replay(package: Path | str, *, limits: ZipLimits | None = None,
                         return str(package_projection or "（包内无）")
                     return str(triple.get(key))
 
+                # 0.4.9：跨 schema / 跨 rule_pack_version 是“不可比”，不是“失败”。
+                if "schema_version" in mismatched or "rule_pack_version" in mismatched:
+                    result["incomparable"] = True
+                    result["anchor_ok"] = False
+                    result["reason"] = ("ANCHOR INCOMPARABLE 外部锚点与包不可比（schema/"
+                                        "rule_pack_version 不同）：" + ",".join(mismatched))
+                    return result
                 result["anchor_ok"] = False
                 result["reason"] = ("ANCHOR FAIL 外部锚点与包内不一致：" + ",".join(
                     f"{k}（期望 {expected_anchor.get(k)} / 包内 {_actual(k)}）"
@@ -620,6 +628,11 @@ def replay(package: Path | str, *, limits: ZipLimits | None = None,
             result["expected_external_triple"] = expected
             result["external_mismatched_fields"] = mismatched
             if mismatched:
+                if "rule_pack_version" in mismatched:
+                    result["incomparable"] = True
+                    result["reason"] = ("ANCHOR INCOMPARABLE 外部三元组与包不可比"
+                                        "（rule_pack_version 不同）：" + ",".join(mismatched))
+                    return result
                 result["reason"] = ("外部三元组不一致：" + ",".join(
                     f"{k}（期望 {expected[k]} / 包内 {triple.get(k)}）" for k in mismatched))
                 return result

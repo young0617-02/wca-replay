@@ -381,25 +381,26 @@ def test_disguised_v1_triple_passes_but_anchor_fails(packed, tmp_path):
     assert "RESULT OK" in triple_only.stdout
 
     anchor = _run_verify(pkg, "--expect-anchor", _anchor_arg(2, original))
-    assert anchor.returncode != 0
-    assert "ANCHOR FAIL" in anchor.stdout
+    assert anchor.returncode == 3
+    assert "ANCHOR INCOMPARABLE" in anchor.stdout
     assert "schema_version" in anchor.stdout
-    assert "RESULT FAIL" in anchor.stdout
+    assert "RESULT INCOMPARABLE" in anchor.stdout
 
     env_anchor = _run_verify(pkg, env_extra={
         "WCA_EXPECT_ANCHOR": _anchor_arg(2, original)})
-    assert env_anchor.returncode != 0
-    assert "ANCHOR FAIL" in env_anchor.stdout
+    assert env_anchor.returncode == 3
+    assert "ANCHOR INCOMPARABLE" in env_anchor.stdout
 
     triple_res = replay(disguised, expect_triple=_triple_arg(original))
     assert triple_res["ok"], "仅三元组时伪装 v1 仍按旧包兼容路径通过"
     anchor_res = replay(disguised, expect_anchor=_anchor_arg(2, original))
     assert not anchor_res["ok"]
+    assert anchor_res["incomparable"]
     assert "schema_version" in anchor_res["external_mismatched_fields"]
     assert anchor_res["expected_external_anchor"]["schema_version"] == 2
 
     assert cli.main(["replay", str(disguised), "--expect-anchor",
-                     _anchor_arg(2, original)]) == 1
+                     _anchor_arg(2, original)]) == 3
 
 
 def test_normal_v2_package_with_matching_anchor_passes(packed, tmp_path):

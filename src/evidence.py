@@ -2142,6 +2142,7 @@ def main():
 
     triple_ok = True
     anchor_ok = True
+    incomparable = False
     if expected_anchor:
         mismatched = []
         if expected_anchor["schema_version"] != schema_ver:
@@ -2159,7 +2160,12 @@ def main():
                 mismatched.append("projection_fingerprint")
         if mismatched:
             anchor_ok = False
-            print("ANCHOR FAIL 外部锚点与包内不一致：", ",".join(mismatched))
+            if "schema_version" in mismatched or "rule_pack_version" in mismatched:
+                incomparable = True
+                print("ANCHOR INCOMPARABLE 外部锚点与包不可比（schema/rule_pack_version 不同）：",
+                      ",".join(mismatched))
+            else:
+                print("ANCHOR FAIL 外部锚点与包内不一致：", ",".join(mismatched))
             for key in mismatched:
                 expected_value = expected_anchor[key]
                 if key == "schema_version":
@@ -2175,7 +2181,12 @@ def main():
         mismatched = [k for k in TRIPLE_KEYS if expected[k] != triple.get(k)]
         if mismatched:
             triple_ok = False
-            print("TRIPLE FAIL 外部期望三元组与包内不一致：", ",".join(mismatched))
+            if "rule_pack_version" in mismatched:
+                incomparable = True
+                print("TRIPLE INCOMPARABLE 外部三元组与包不可比（rule_pack_version 不同）：",
+                      ",".join(mismatched))
+            else:
+                print("TRIPLE FAIL 外部期望三元组与包内不一致：", ",".join(mismatched))
             for key in mismatched:
                 print("  ", key, "期望", expected[key], "包内", str(triple.get(key)))
         else:
@@ -2334,8 +2345,12 @@ def main():
     elif inputs_digest_bound:
         print("INPUTS SELF-CHECK OK (inputs_digest matches manifest; NOT signed)")
 
-    result_ok = (epoch_ok and ok and triple_ok and anchor_ok and inputs_ok
-                 and artifact_ok and signature_ok)
+    base_ok = (epoch_ok and ok and triple_ok and inputs_ok
+               and artifact_ok and signature_ok)
+    result_ok = base_ok and anchor_ok
+    if incomparable and base_ok:
+        print("RESULT INCOMPARABLE")
+        return 3
     print("RESULT", "OK" if result_ok else "FAIL")
     return 0 if result_ok else 1
 

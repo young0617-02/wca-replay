@@ -19,6 +19,7 @@ from src.engine import run_check
 from src.evidence import export_package
 from src.ingest import import_csv_file
 from src.replay import replay
+from src.package_verify import verify_package
 
 DAY = date(2025, 9, 2)
 
@@ -113,6 +114,54 @@ def test_five_segment_anchor_on_trimmed_package_passes(conn, cfg, tmp_path):
     assert res["external_mismatched_fields"] == []
     assert res["expected_external_anchor"]["projection_fingerprint"] == \
         manifest["projection_fingerprint"]
+
+
+def test_cross_version_anchor_is_incomparable_not_fail(conn, cfg, tmp_path):
+    """0.4.9：跨 rule_pack_version 的锚点输出 INCOMPARABLE（exit 3），不是 FAIL。"""
+    _seed(conn, cfg)
+    manifest, _ = _signed_manifest(conn, cfg, omit=False)
+    parts = _four(manifest).split(",")
+    parts[1] = "rp-2026.11.gd-pilot-standard.v4"
+    anchor = ",".join(parts)
+    pkg = _unpack(Path(manifest["package_zip"]), tmp_path / "cross-version")
+
+    proc = _run_verify(pkg, "--expect-anchor", anchor)
+    assert proc.returncode == 3
+    assert "ANCHOR INCOMPARABLE" in proc.stdout
+    assert "RESULT INCOMPARABLE" in proc.stdout
+    assert "RESULT FAIL" not in proc.stdout
+
+    res = replay(Path(manifest["package_zip"]), expect_anchor=anchor)
+    assert res["incomparable"]
+    assert not res["ok"]
+    assert res["external_mismatched_fields"] == ["rule_pack_version"]
+
+    # anchor 文件里的 comparability_scope 与包不同：同样不可比。
+    direct = verify_package(pkg, expect_anchor=anchor, expect_comparability={
+        "rule_pack_version": "rp-2026.11.gd-pilot-standard.v4",
+        "schema": manifest["schema"],
+    })
+    assert direct["incomparable"]
+
+
+def test_same_version_digest_mismatch_still_fails(conn, cfg, tmp_path):
+    """同版本同 schema 但摘要不符，必须仍是 FAIL（exit 1），不得放宽。"""
+    _seed(conn, cfg)
+    manifest, _ = _signed_manifest(conn, cfg, omit=False)
+    parts = _four(manifest).split(",")
+    parts[3] = "0" * 64
+    anchor = ",".join(parts)
+    pkg = _unpack(Path(manifest["package_zip"]), tmp_path / "digest-fail")
+
+    proc = _run_verify(pkg, "--expect-anchor", anchor)
+    assert proc.returncode == 1
+    assert "ANCHOR FAIL" in proc.stdout
+    assert "RESULT FAIL" in proc.stdout
+
+    res = replay(Path(manifest["package_zip"]), expect_anchor=anchor)
+    assert not res["ok"]
+    assert not res["incomparable"]
+    assert "ANCHOR FAIL" in res["reason"]
 
 
 def test_five_segment_mismatch_names_projection(conn, cfg, tmp_path):
