@@ -140,7 +140,7 @@ def load_employee_bundle(conn: Connection, cfg: Config, emp_id: str,
     for r in conn.execute(
         "SELECT punch_id, event_ts, punch_type, raw_text, day_anchor, device_id, "
         "source_file_id, source_line_no "
-        "FROM punch WHERE emp_id = ? ORDER BY event_ts, punch_id", (emp_id,)
+        "FROM punch WHERE emp_id = ?", (emp_id,)
     ).fetchall():
         punches.setdefault(r["day_anchor"], []).append(PunchEvent(
             ts=parse_timestamp(r["event_ts"]), punch_type=r["punch_type"], raw_text=r["raw_text"],
@@ -151,6 +151,17 @@ def load_employee_bundle(conn: Connection, cfg: Config, emp_id: str,
         if r["source_file_id"] is not None:
             punch_refs.setdefault(r["day_anchor"], []).append(
                 {"file_id": r["source_file_id"], "line_no": r["source_line_no"]})
+
+    # 排序不再依赖 DB 自增 punch_id：同一时间戳的并列行按包内相对路径/行号/类型
+    # 确定顺序，换库重导与反向导入都不会改变配对结果（0.4.8）。
+    for day, events in punches.items():
+        punches[day] = sorted(events, key=lambda e: (
+            e.ts, (e.rel_path or "").encode("utf-8"), int(e.line_no or 0),
+            e.punch_type.encode("utf-8"), e.device_id.encode("utf-8")))
+    for day, refs in punch_refs.items():
+        punch_refs[day] = sorted(refs, key=lambda r: (
+            str(file_paths.get(int(r["file_id"]) or 0) or "").encode("utf-8"),
+            int(r["line_no"] or 0)))
 
     # 补卡：仅在已批准时参与配对（未批准补卡不改事实，只在质量门禁里体现）
     corrections: dict[str, list[PunchEvent]] = {}

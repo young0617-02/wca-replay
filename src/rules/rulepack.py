@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from datetime import date
 
 from ..config import Config
+from ..quality_batch import batch_id_from_sources, date_from_raw_value
 from ..util import round_half_up
 from . import citations as C
 from .approvals import evaluate_approval_evidence
@@ -41,7 +42,7 @@ from .regime import (
 RULE_PACK_V4 = "rp-2026.10.gd-pilot-standard.v4"
 RULE_PACK_V5 = "rp-2026.11.gd-pilot-standard.v5"
 RULE_PACK_V6 = "rp-2026.11.gd-pilot-standard.v6"
-RULE_PACK_VERSION = RULE_PACK_V5   # 默认仍 v5；v6 需显式 WCA_RULE_PACK 启用
+RULE_PACK_VERSION = RULE_PACK_V6   # 0.4.8 起默认 v6；v5 仍可显式 WCA_RULE_PACK 使用与回放
 
 # 《劳动法》第 36 条：平均每周不超过 44 小时（40 小时来自国务院令第 174 号第 3 条）
 WEEKLY_STATUTORY_CAP_MINUTES = 44 * 60
@@ -549,13 +550,100 @@ def rule_scope(emp: EmpScope, cfg: Config) -> list[Finding]:
 
 
 # ------------------------------------------------------------------ 质量门禁结论化
+def _source_ref(issue: dict) -> dict | None:
+    """质量问题的行级来源；只用包内相对路径 + 行号，不带 DB 主键。"""
+    rel_path = issue.get("rel_path")
+    line_no = issue.get("line_no")
+    if not rel_path or line_no is None:
+        return None
+    return {"rel_path": str(rel_path), "line_no": int(line_no)}
+
+
+def _issue_day(issue: dict, fallback: str = "") -> str:
+    """质量问题的实际发生日；重复行也必须有日期，不再落进空日期汇总条。"""
+    day = str(issue.get("work_date") or "")
+    if day:
+        return day
+    return date_from_raw_value(issue.get("raw_value")) or fallback
+
+
 def rule_quality(emp: EmpScope, cfg: Config) -> list[Finding]:
     out: list[Finding] = []
+    # 质量问题先在 Python 里按“包内相对路径字节序 + 行号 + 规则”排好，再分组。
+    # 原顺序来自 SQL 的 rel_path 文本排序，SQLite(BINARY) 与 PG 默认 collation
+    # 可能不同，会让 sample_raw_values / line_refs 的取值顺序漂移（0.4.8）。
+    quality_issues = sorted(emp.quality_issues, key=lambda i: (
+        str(i.get("rel_path") or "").encode("utf-8"), int(i.get("line_no") or 0),
+        str(i.get("rule_id") or "").encode("utf-8"),
+        str(i.get("raw_value") or "").encode("utf-8"),
+    ))
+
+    # 0.4.8 批次语义：把一个员工同一天的全部重复行合并成 1 条 finding，
+    # work_date = period_key = 实际发生日；metric 带内容派生的 batch_id、batch_size
+    # 与全部 sources（不再只留前 3/5 条）。batch_id 不含任何 DB 自增/运行序号/时间戳。
+    dup_by_day: dict[str, list[dict]] = {}
+    others: list[dict] = []
+    for issue in quality_issues:
+        if str(issue.get("rule_id")) == "QUAL-DUP":
+            dup_by_day.setdefault(_issue_day(issue), []).append(issue)
+        elif str(issue.get("severity")) != "REJECT":
+            # 被拒收行由 QUAL-02 单独呈现；QUAL-01 不再把 REJECT 混进按日汇总，
+            # 从而不再生成“空日期汇总”条（0.4.8）。
+            others.append(issue)
+
+    for day_key, issues in sorted(dup_by_day.items()):
+        if not day_key:
+            raise ValueError(
+                f"{emp.emp_id} 的重复批次无法从来源行确定实际发生日；"
+                "拒绝生成空日期汇总，请检查打卡时间戳后再导出")
+        sources: list[dict] = []
+        seen_refs: set[tuple[str, int]] = set()
+        for issue in issues:
+            ref = _source_ref(issue)
+            if ref is None:
+                continue
+            key = (ref["rel_path"], ref["line_no"])
+            if key in seen_refs:
+                continue
+            seen_refs.add(key)
+            sources.append(ref)
+        sources.sort(key=lambda r: (r["rel_path"].encode("utf-8"), r["line_no"]))
+        batch_size = len(issues)
+        batch_id = batch_id_from_sources(sources)
+        out.append(_finding(
+            emp, "QUAL-01", SEV_DEFENSIBLE,
+            f"{day_key} 存在 {batch_size} 条重复打卡行（批次 {batch_id[:12]}…），"
+            "只保留首次出现；批次号由来源行集合内容派生，换库重导或反向导入都不变。"
+            "质量门禁不改写原始事实，全部来源见 metric.sources，举证包可逐行反查（A7）。",
+            {
+                "batch_id": batch_id,
+                "batch_size": batch_size,
+                "sources": sources,
+                "issue_rule_ids": ["QUAL-DUP"],
+                "issue_count": batch_size,
+                "sample_raw_values": [str(i.get("raw_value", ""))[:64] for i in issues[:3]],
+                # 兼容旧消费方：line_refs 与 sources 同步，全量不截断。
+                "line_refs": list(sources),
+            },
+            work_date=day_key,
+            period_key=day_key,
+        ))
+
     by_day: dict[str, list[dict]] = {}
-    for issue in emp.quality_issues:
-        by_day.setdefault(str(issue.get("work_date") or ""), []).append(issue)
+    # 非重复的个别质量问题若来源行确实没有日期（例如单元格为 None），
+    # 按校验区间起始日归档并在说明里标注来源行无日期；不再退回“空日期汇总条”。
+    fallback_day = emp.range_start.isoformat() if emp.range_start else ""
+    for issue in others:
+        by_day.setdefault(_issue_day(issue, fallback_day), []).append(issue)
 
     for day_key, issues in sorted(by_day.items()):
+        if not day_key:
+            raise ValueError(
+                f"{emp.emp_id} 的数据质量问题无法从来源行确定实际发生日；"
+                "拒绝生成空日期汇总，请检查来源行后再导出")
+        undated_note = "" if any(
+            str(i.get("work_date") or "") or date_from_raw_value(i.get("raw_value"))
+            for i in issues) else "（来源行无可用日期，按校验区间起始日归档）"
         rule_ids = sorted({str(i["rule_id"]) for i in issues})
         if any(i.get("severity") == SEV_VIOLATION for i in issues):
             worst = SEV_REVIEW   # 数据质量本身不直接判违规，最多要求复核
@@ -566,21 +654,22 @@ def rule_quality(emp: EmpScope, cfg: Config) -> list[Finding]:
         out.append(_finding(
             emp, "QUAL-01", worst,
             f"{day_key or '期间汇总'} 存在数据质量问题：{', '.join(rule_ids)}。"
+            f"{undated_note}"
             "质量门禁不改写原始事实，只标注并保留行级来源，举证包可反查原始行（A7）。",
             {
                 "issue_rule_ids": rule_ids,
                 "issue_count": len(issues),
                 "sample_raw_values": [str(i.get("raw_value", ""))[:64] for i in issues[:3]],
-                "line_refs": [{"rel_path": i.get("rel_path"), "line_no": i.get("line_no")}
-                              for i in issues[:5]],
+                "line_refs": [_source_ref(i) for i in issues[:5] if _source_ref(i)],
             },
-            work_date=day_key or None,
+            work_date=day_key,
+            period_key=day_key,
         ))
 
     # O-2：整行被拒收 = 该日事实缺失。这类缺口过去只躺在 quality_issues.csv 与举证包里，
     # 不进结论也不开复核单 —— 最该补录的数据反而没人看见。
     reject_days: dict[str, list[dict]] = {}
-    for issue in emp.quality_issues:
+    for issue in quality_issues:
         if str(issue.get("severity")) == "REJECT":
             reject_days.setdefault(str(issue.get("work_date") or ""), []).append(issue)
     for day_key, items in sorted(reject_days.items()):
@@ -799,10 +888,13 @@ def rule_day_v5(emp: EmpScope, cfg: Config, *, base_findings: list[Finding] | No
 DAY_RULES_V4 = [rule_day, rule_week, rule_month, rule_scope, rule_quality]
 DAY_RULES_V5 = [rule_day_v5, rule_week, rule_month, rule_scope, rule_quality,
                 rule_reg_01, rule_comp_c01, rule_shift_01, rule_off_01]
-DAY_RULES = DAY_RULES_V5
+# v6 冻结：独立列表，后续修改 v5 列表不会改变已冻结的 v6 规则组合。
+DAY_RULES_V6 = [rule_day_v5, rule_week, rule_month, rule_scope, rule_quality,
+                rule_reg_01, rule_comp_c01, rule_shift_01, rule_off_01]
+DAY_RULES = DAY_RULES_V6
 
 _RULES_BY_PACK = {RULE_PACK_V4: DAY_RULES_V4, RULE_PACK_V5: DAY_RULES_V5,
-                  RULE_PACK_V6: DAY_RULES_V5}
+                  RULE_PACK_V6: DAY_RULES_V6}
 
 
 def rules_for_pack(rule_pack_id: str) -> list | None:

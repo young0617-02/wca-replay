@@ -22,7 +22,7 @@ uv run python -m src.cli status                          # 用 `uv run` 就不�
 # 需求文档已同步修订到 v2.1：US-EV-01 / NFR-07 的验收命令就是上面这条（裁决 D-07）。
 # 下面所有命令都等价于先 `source .venv/bin/activate` 再 `python -m …`。
 uv run python -m src.cli all                             # 生成→导入→建库→校验→报表→举证包
-uv run python -m pytest tests/ -q -m "not llm"           # 549 passed / 8 skipped，无网络、无云凭证
+uv run python -m pytest tests/ -q -m "not llm"           # 585 passed / 10 skipped，无网络、无云凭证
 uv run python evals/judge.py --write-report              # 70 条评测集打分
 uv run python tools/mutation_test.py                     # 注入 31 个缺陷，看测试抓不抓得住
 uv run python tools/perf_probe.py --pg-url "$WCA_TEST_POSTGRES_URL" --employees 1000 --dense \
@@ -106,15 +106,28 @@ citations, explanation` 九个规范字段；`source_rel_path`、`source_line_no
 `--expect-evidence-digest`（或单包 anchor 文件的 `evidence_digest`，环境变量
 `WCA_EXPECT_EVIDENCE_DIGEST` 可兜底）才能 `RESULT OK`；缺失 → `RESULT PARTIAL`，错值 →
 `RESULT FAIL`。签名者作恶或私钥失窃时，签名本身不再可信，必须靠包外 evidence 锚定。
-`input_fingerprint` 是内容与范围指纹；`inputs_digest` 是包内 `inputs/` 实际文件字节（已不含
+`input_fingerprint` 是内容与范围指纹；`inputs_digest` 是包内 `inputs/` 实际文件字节（不含
 `run_id` 与 DB `file_id`；文件名由 `rel_path` 推导）。同一批输入跨 run/跨库导包，`inputs_digest`
 必须相同；实测见 `tests/test_evidence_digest.py::test_inputs_manifest_cross_database_stable`。
+注意：包内 `manifest.json` **顶层确实有 1 个 `run_id`**，它只用于把包回指到库内 run 与审计段；
+它不参与 `inputs_digest`、`conclusion_digest`、`evidence_digest`、`artifacts_digest` 或
+`input_fingerprint` 的任何计算，四联值本身不含 `run_id`（第十轮复测的表述冲突已按此改写）。
 0.4.4 起 `QUAL-01/02` 的 `metric.line_refs` 与 `OFF-01` 的 `conflicts.sources` 只写
 `rel_path+line_no`，不再写 DB `file_id`；换新库重导与反向导入顺序（punch/schedule 互换）
 `conclusion_digest` 都必须相同，实测四包均为 `b9cc6fd0…`。旧 0.4.3 包的 `01bd4403…`
 含 `file_id=4`，移除后不可能复现；不要把旧值当成本轮目标。0.4.5 起同一打卡内容出现在
 多个 punch CSV 时，`QUAL-DUP` 行引用按 `rel_path` 字典序确定，全部来源纳入包内输入；
 单 `punch.csv` 场景四联值保持 `b9cc6fd0… / 01cb5aeb… / aad527d1… / 8b3b54a0…` 不变。
+
+### 跨数据库后端可复算（0.4.8）
+
+同一批输入分别导入 SQLite 与 PostgreSQL，导出包的 `conclusion_digest`、`evidence_digest`、
+`inputs_digest`、`input_fingerprint`、`artifacts_digest` 必须逐字节相同（回归用例
+`tests/test_postgres_integration.py::test_sqlite_and_postgres_export_five_digests_identical`）。
+0.4.8 起，导出侧不再依赖 SQL `ORDER BY` 的 NULL 顺序或文本 collation：`findings.csv`、
+`quality_issues.csv`、`input_files.csv`、`responsibility.json`、`anomaly.csv`、投影指纹都把
+行序改到 Python 里按“空值在前 / 整数数值 / UTF-8 字节序”显式排序；`QUAL-01` 的空日期
+期间汇总路径已删除，49 条空日期行不再存在。
 
 ## v4 历史结果（2026-10-08，规则包 `rp-2026.10.gd-pilot-standard.v4`）
 
@@ -135,7 +148,7 @@ citations, explanation` 九个规范字段；`source_rel_path`、`source_line_no
 | 举证包导出（含自含输入 7 个文件 / 301,586 字节） | 101 行 **185.2 ms**；1,000 行（复制行，仅测代码形状）**396.0 ms**（预算 ≤3 s 达成）；真实 1,000 员工规模**未测** |
 | 重放一份举证包 | `python -m src.cli replay <包>` 全流程 **1.04–1.26 s**（3 次取样）：解包 → 临时库重导输入 → 重跑引擎 → 三元组逐项一致；只用系统 Python 跑包内 `verify.py` 也能验掉链与输入哈希 |
 | 界面首屏 TTFB | 复核台 30.8–33.4 ms、问答页 28.7 ms、未登录 401 6.5–7.7 ms（本机 loopback + 真实服务） |
-| 发现（未签认）条数与对账 | v2 110 条 → v3/v4 **101 条**，差值逐条可解释（`reports/判据修订.md`）；v5 新包 116 条发现 / 0 条已确认结论 |
+| 发现（未签认）条数与对账 | v2 110 条 → v3/v4 **101 条**，差值逐条可解释（`reports/判据修订.md`）；v5 116 条 → 0.4.8 **115 条**（原期间汇总+逐日 2 条合并为 1 条批次 finding，展开后 `issues_total=115`）/ 0 条已确认结论 |
 | 外部重放（US-EX-01） | 包内自带 `inputs/` 原始 CSV；`replay` 把输入喂回引擎重比三元组；改一个打卡时间必须报 `≠`（`tests/test_replay.py` 7 项 + 变异体 M20） |
 | 已确认结论集 | 演示库 101 条发现（未签认）里**只有 2 条**有人工结论进了已确认结论集，其余 99 条留在 `findings.csv` 等处置——这是纪律，不是漏数 |
 | 服务启停 | 一键开关六条路径实跑通过：启动就绪 1450–1539 ms、优雅停止 764–862 ms、强杀 784 ms、`在跑→先停后起` 总 3051 ms、`--no-restart` 不动进程（rc=1 并给处置建议） |
@@ -174,9 +187,11 @@ V1 → V1.1 优化的前后对照（含没达成的目标）在 [`reports/优化
 
 ---
 
-## v6 规则包（REG-01 切换覆盖投影，2026-11-02，实验性）
+## v6 规则包（REG-01 切换覆盖投影；2026-11-05 起为默认）
 
-- 版本串 `rp-2026.11.gd-pilot-standard.v6`；**默认仍是 v5**，v6 需显式 `WCA_RULE_PACK` 启用。
+- 版本串 `rp-2026.11.gd-pilot-standard.v6`；**0.4.8 起默认 v6**（切换日 2026-11-05），
+  v5/v4 仍可用显式 `WCA_RULE_PACK` 选择与回放。切换记录（谁/何时/何版本）见
+  `policies/RULE-PACK.md`；活动库未在本轮切换，仍由部署配置显式钉住 v5。
 - v6 的 REG-01 改读 `employee_approval_coverage`；旧 `worktime_approval` 在 v6 下**不再参与计算**，只保留 legacy 输入与回放。
 - v6 首次写入 v5 库时追加 `rule_pack.epoch.start`；v5 genesis 不重置，v5 旧包继续 legacy 回放。
 - v6 `input_fingerprint` 纳入覆盖投影摘要（员工、批文号、版本、生效期、工时制、岗位/城市、附件哈希、发布时间）。
@@ -193,9 +208,29 @@ V1 → V1.1 优化的前后对照（含没达成的目标）在 [`reports/优化
 
 ---
 
+## 如何正确统计重复类问题（0.4.8 批次语义）
+
+`findings.csv` 里一条 `QUAL-01` 可能代表一整批重复行。直接数 CSV 行数会把 49 条重复
+算成 1 条。按下面三个口径分别读 `manifest.counts`：
+
+| 字段 | 含义 | 示例（49 条重复、无其他结论） |
+|---|---|---|
+| `findings_total` | `findings.csv` 数据行数（每条结论一行） | 1 |
+| `findings_batched` | 其中带 `batch_id` 的批次 finding 条数 | 1 |
+| `issues_total` | 把批次展开后的实际问题条数 | 49 |
+
+关系：`issues_total = findings_total - findings_batched + 各批 batch_size 合计`。
+同一批的 `batch_id` 由来源行内容派生，换库重导、反向导入、不同机器都相同。
+审计方复算 `batch_id`：把该批 `metric.sources` 每项写成 `rel_path:line_no`，去重后按
+UTF-8 字节序排序，用换行符连接，取 SHA-256 十六进制小写摘要；与 `metric.batch_id` 比对。
+`policies/CONFIDENCE.md`、`未覆盖清单.md`、`manifest.counts` 三处计数必须一致。
+0.4.8 离线实测 **585 passed / 10 skipped**（`-m "not llm"`，2026-11-04）。
+
+---
+
 ## 它能做什么
 
-1. **举证级工时合规校验**（价值核心，规则包 `rp-2026.11.gd-pilot-standard.v5`）
+1. **举证级工时合规校验**（价值核心，默认规则包 `rp-2026.11.gd-pilot-standard.v6`；v5/v4 仍可显式选择）
    22 条确定性规则（v4 的 18 条 + v5 新增 4 条）：工作日延长工时、休息日与补休、法定节假日当天 300%、
    每日/每月加班上限、每周至少休息一日、周 40/44 小时、跨零点切分、夜间时段、数据质量、
    内部制度预警、年度日历未核标记、**工时制未覆盖标记（SCOPE-02/03）**；
@@ -423,7 +458,7 @@ uv run python tools/start_services.py --json     # 机器可读结果（退出�
 | A6 测试可跑且可复现 | **已达成** | v4 时点仓库副本 + **无 `.env`**，依赖走 `uv sync`：`uv run python -m src.cli all`（rc=0）→ `uv run python -m pytest tests/ -q -m "not llm"` = **197 passed / 1 deselected**（历史记录；当前工作区为 **549 passed / 8 skipped** 实测（相对第六轮 545 增加 4 项跨文件重复行与 artifacts 稳定性测试），带 PG **572 passed / 1 skipped / 1 deselected**（2026-11-04 实测）；2026-11-04 新增 0.4.5 发行物干净 venv 演练：只装 wheel + 带哈希锁，在仓库外 venv 内对四个第七轮包（engine-only、confirmed、cross-db、reverse-order）执行 `wca-verify`/`wca replay`，五项外部门禁齐全才 `RESULT OK`；`SHA256SUMS.sig` 验签通过；但这**不是**全量 pytest 干净环境复跑，A6 仍按上述历史记录，不冒充复验）；三元组与本机库逐字符一致。需求文档已同步修订到 **v2.1**（US-EV-01/NFR-07 的验收命令改为 uv，裁决 D-07），所以这不是「实现偏离需求」，是需求本身按决定改了；换 uv 之前那一趟走的是 `pip install -r requirements.txt`，那段历史保留在 `reports/干净环境复跑.md`；
   且旧版 `export --sign-as → replay → 包内 verify.py` 整条复核链同一趟跑通（`reports/干净环境复跑.md`；历史记录；现独立验算用发行 wheel 的 `wca-verify`，包内 `verify.py` 只是便利脚本；旧命令名现为 `--record-delivery-as`，`--sign-as` 仍保留为迁移别名、非密码学签名） |
 | A7 行级可追溯 | **已达成** | `tests/test_ingest_quality.py` + 举证包 `findings.csv` 的 `source_rel_path/source_line_no` |
-| A8 举证包可复核 | **已达成** | `test_exported_package_reproduces_same_triple`（同输入重跑）+ `tests/test_replay.py`（**把包内输入喂回引擎逐项比三元组**，改输入必须报不一致）；`tests/test_signature.py` 15 项守住 v3 签名/输入摘要/结论集哈希/外部 pin/旧包兼容；`tests/test_projection.py` 5 项守住投影字段清单/裁剪/replay；`tests/test_anchor_projection.py` 5 项守住五段锚点；`tests/test_producer.py` 2 项守住 producer 版本指纹与 `PRODUCER FAIL` 失败关闭；`tests/test_package_binding.py` 28 项守住工件逐文件哈希/`artifacts_digest`/包内 `verify.py` 哈希/findings 反算摘要/额外文件失败关闭/七种坏包/五项门禁/早退状态/`--anchor-file` 兜底/evidence 环境变量与显式优先级；`tests/test_evidence_digest.py` 13 项守住 `conclusion_digest` 稳定为 `b9cc6fd0…`、同 run 重导与重复确认的 `artifacts_digest` 稳定（旧 `01bd` 含 DB `file_id`，仅历史）、跨 run/跨库/反向导入 `inputs_digest` 与四联值稳定、QUAL/OFF 行引用只用相对路径、单条 evidence 只改 evidence 摘要、删除 evidence 失败关闭、旧包分档与 24 条清单；`tests/test_cross_file_duplicates.py` 2 项守住多 punch 文件重复行在两种导入顺序下四联值相同（含 >20 行聚合路径）；另 4 项守住结论集纪律、交付登记人入链、责任区块与未覆盖清单随包给出。2026-11-04 0.4.5 发行物干净 venv 实测：四个第七轮包 `wca-verify` 输出 `RESULT OK`（必须五项外部门禁齐全），`EVIDENCE DIGEST OK ... / external=OK`，`wca replay` 三元组逐项 `=`；`handoff/20261104-第七轮整改/` 的 engine-only（116/0）、confirmed（116/2）、cross-db（116/0）、reverse-order（116/0）四包均验通；包内 `policies/` 5 个文件纳入工件哈希/签名，`ARTIFACTS OK checked=14`；`未覆盖清单.md` 逐条列 24 条证据定位（6/17/1） |
+| A8 举证包可复核 | **已达成** | `test_exported_package_reproduces_same_triple`（同输入重跑）+ `tests/test_replay.py`（**把包内输入喂回引擎逐项比三元组**，改输入必须报不一致）；`tests/test_signature.py` 15 项守住 v3 签名/输入摘要/结论集哈希/外部 pin/旧包兼容；`tests/test_projection.py` 5 项守住投影字段清单/裁剪/replay；`tests/test_anchor_projection.py` 5 项守住五段锚点；`tests/test_producer.py` 2 项守住 producer 版本指纹与 `PRODUCER FAIL` 失败关闭；`tests/test_package_binding.py` 28 项守住工件逐文件哈希/`artifacts_digest`/包内 `verify.py` 哈希/findings 反算摘要/额外文件失败关闭/七种坏包/五项门禁/早退状态/`--anchor-file` 兜底/evidence 环境变量与显式优先级；`tests/test_evidence_digest.py` 13 项守住 `conclusion_digest` 稳定为 `5dc46558…`（0.4.8 单批形状）、同 run 重导与重复确认的 `artifacts_digest` 稳定（旧 `01bd` 含 DB `file_id`，仅历史）、跨 run/跨库/反向导入 `inputs_digest` 与四联值稳定、QUAL/OFF 行引用只用相对路径、单条 evidence 只改 evidence 摘要、删除 evidence 失败关闭、旧包分档与 24 条清单；`tests/test_cross_file_duplicates.py` 2 项守住多 punch 文件重复行在两种导入顺序下四联值相同（含 >20 行聚合路径）；另 4 项守住结论集纪律、交付登记人入链、责任区块与未覆盖清单随包给出。2026-11-04 0.4.5 发行物干净 venv 实测：四个第七轮包 `wca-verify` 输出 `RESULT OK`（必须五项外部门禁齐全），`EVIDENCE DIGEST OK ... / external=OK`，`wca replay` 三元组逐项 `=`；`handoff/20261104-第七轮整改/` 的 engine-only（116/0）、confirmed（116/2）、cross-db（116/0）、reverse-order（116/0）四包均验通；包内 `policies/` 5 个文件纳入工件哈希/签名，`ARTIFACTS OK checked=14`；`未覆盖清单.md` 逐条列 24 条证据定位（6/17/1） |
 | A9 性能口径诚实 | **已达成** | `docs/口径声明.md` 每个数字标实测/设计值/未测；`tests/test_acceptance.py` 检查 |
 | A10 ★ 无虚假宣称 | **已达成** | `tests/test_acceptance.py::test_no_false_claims_in_docs_and_code` 扫 README/docs/src/evals/data，禁词命中数=0 |
 | A11 合成数据如实标注 | **部分** | 生成器与 README 已明示合成+seed；**「字段语义取得人事部门口径确认」这句不成立**（F-001 未完成，见下） |

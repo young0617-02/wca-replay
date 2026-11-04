@@ -38,8 +38,14 @@ def load_approvals(conn: Connection, emp_id: str) -> list[dict]:
     rows = conn.execute(
         "SELECT approval_id, emp_id, doc_no, regime, valid_from, valid_to, job_codes, "
         "region_code, attachment_sha256, recorded_at FROM worktime_approval "
-        "WHERE emp_id = ? ORDER BY valid_to DESC, doc_no", (emp_id,)
+        "WHERE emp_id = ?", (emp_id,)
     ).fetchall()
+    # 原 SQL 为 valid_to DESC, doc_no；日期与字符串排序放到 Python 显式完成，
+    # 避免依赖 PG 的文本 collation（SQLite BINARY / PG 默认 collation 可能不同）。
+    rows.sort(key=lambda r: (
+        -(_as_date(r["valid_to"]) or date.min).toordinal(),
+        str(r["doc_no"]).encode("utf-8"),
+    ))
     return [dict(r) for r in rows]
 
 
@@ -50,10 +56,14 @@ def _ledger_rows(conn: Connection, emp_ids: list[str]) -> list[dict]:
     placeholders = ",".join("?" * len(ids))
     fetched = conn.execute(
         f"SELECT {', '.join(APPROVAL_FIELDS)} FROM worktime_approval "
-        f"WHERE emp_id IN ({placeholders}) ORDER BY emp_id, doc_no, regime",
+        f"WHERE emp_id IN ({placeholders})",
         ids,
     ).fetchall()
-    return [{k: r[k] for k in APPROVAL_FIELDS} for r in fetched]
+    rows = [{k: r[k] for k in APPROVAL_FIELDS} for r in fetched]
+    rows.sort(key=lambda r: (str(r["emp_id"]).encode("utf-8"),
+                             str(r["doc_no"]).encode("utf-8"),
+                             str(r["regime"]).encode("utf-8")))
+    return rows
 
 
 def _ledger_digest_of(rows: list[dict]) -> str:
@@ -161,11 +171,15 @@ def _coverage_rows(conn: Connection, emp_ids: list[str]) -> list[dict]:
     placeholders = ",".join("?" * len(ids))
     fetched = conn.execute(
         f"SELECT {', '.join(COVERAGE_FIELDS)} FROM employee_approval_coverage "
-        f"WHERE emp_id IN ({placeholders}) "
-        f"ORDER BY emp_id, doc_no, version_no, valid_from",
+        f"WHERE emp_id IN ({placeholders})",
         ids,
     ).fetchall()
-    return [{k: r[k] for k in COVERAGE_FIELDS} for r in fetched]
+    rows = [{k: r[k] for k in COVERAGE_FIELDS} for r in fetched]
+    # 与 _ledger_rows 同理：文本/版本排序在 Python 显式完成（0.4.8 跨后端可复算）。
+    rows.sort(key=lambda r: (str(r["emp_id"]).encode("utf-8"),
+                             str(r["doc_no"]).encode("utf-8"),
+                             int(r["version_no"]), str(r["valid_from"])))
+    return rows
 
 
 def coverage_ledger_digest(conn: Connection, emp_ids: list[str]) -> str:
@@ -177,10 +191,14 @@ def load_coverage_approvals(conn: Connection, emp_id: str) -> list[dict]:
     """v6 REG-01 只读 P0 覆盖投影，映射成与旧台账相同的 evidence 字段。"""
     rows = conn.execute(
         f"SELECT {', '.join(COVERAGE_FIELDS)} FROM employee_approval_coverage "
-        f"WHERE emp_id = ? ORDER BY valid_to DESC, doc_no, version_no", (emp_id,)
+        f"WHERE emp_id = ?", (emp_id,)
     ).fetchall()
+    ordered = sorted(rows, key=lambda r: (
+        -(_as_date(r["valid_to"]) or date.min).toordinal(),
+        str(r["doc_no"]).encode("utf-8"), int(r["version_no"]),
+    ))
     return [{**{k: r[k] for k in COVERAGE_FIELDS}, "recorded_at": r["published_at"]}
-            for r in rows]
+            for r in ordered]
 
 
 def export_coverage_csv(conn: Connection, emp_ids: list[str], path: Path) -> dict:
@@ -215,7 +233,9 @@ def import_coverage_csv(conn: Connection, path: Path | str, *,
     if unescape_formula:
         rows = [{k: str(csv_unescape_cell(v)) for k, v in row.items()} for row in rows]
     if not rows:
-        raise ValueError("覆盖投影 CSV 没有数据行")
+        # v6 允许“没有任何特殊工时批文”的包：覆盖投影只有表头是合法状态，
+        # 重放时应重建为 0 条覆盖，而不是报错。
+        return 0
     now = rows[0]["published_at"] or "replay"
     with transaction(conn):
         for line_no, row in enumerate(rows, start=2):

@@ -17,6 +17,7 @@ from .db import Connection, Row, get_meta, insert_many, set_meta, transaction
 from .evidence import append_audit, conclusion_digest, genesis_of, input_fingerprint, set_genesis
 from .evidence_digest import evidence_digest as compute_evidence_digest
 from .observability import Timer
+from .quality_batch import date_from_raw_value
 from .rules.approvals import (approval_ledger_digest, coverage_ledger_digest,
                               load_approvals, load_coverage_approvals)
 from .rules.dayfacts import DayFacts, compute_day_facts, load_employee_bundle, stamp
@@ -131,8 +132,8 @@ def build_scope(conn: Connection, cfg: Config, calendar: HolidayCalendar, emp: R
         (emp["emp_id"],),
     ).fetchall()
     for r in issues:
-        # QUAL-DUP 大量重复时，ingest 存一条按员工汇总的摘要；这里按天展开，
-        # 保持 QUAL-01 的 issue_count / 前 3 个样本 / 前 5 个行号引用与治理前一致。
+        # QUAL-DUP 大量重复时，ingest 存一条按员工汇总的摘要；这里按天展开。
+        # 0.4.8 起展开后的每条都带实际发生日，供 QUAL-01 单批 finding 聚合使用。
         if str(r["rule_id"]) == "QUAL-DUP":
             try:
                 payload = json.loads(str(r["detail"] or "{}"))
@@ -143,6 +144,11 @@ def build_scope(conn: Connection, cfg: Config, calendar: HolidayCalendar, emp: R
                     count = int(meta.get("count", 0))
                     samples = list(meta.get("samples") or [])
                     refs = list(meta.get("line_refs") or [])
+                    if not day:
+                        # 历史库可能没有日期：从原值里的时间戳补；仍取不到则交给
+                        # rule_quality 明确报错，绝不静默生成空日期汇总。
+                        day = date_from_raw_value(
+                            samples[0] if samples else str(r["raw_value"] or ""))
                     for idx in range(count):
                         file_id, line_no = (refs[idx] if idx < len(refs)
                                             else (r["file_id"], r["line_no"]))
@@ -381,9 +387,11 @@ def _unattributed_findings(conn: Connection, cfg: Config) -> list[Finding]:
     rows = conn.execute(
         "SELECT i.rule_id, i.severity, i.file_id, i.line_no, f.rel_path "
         "FROM ingest_issue i LEFT JOIN raw_file f ON f.file_id = i.file_id "
-        "WHERE (i.emp_id = '' OR i.emp_id NOT IN (SELECT emp_id FROM employee)) "
-        "ORDER BY COALESCE(f.rel_path, ''), i.line_no"
+        "WHERE (i.emp_id = '' OR i.emp_id NOT IN (SELECT emp_id FROM employee))"
     ).fetchall()
+    # 排序改到 Python：SQL 的文本 ORDER BY 依赖后端 collation，跨 SQLite/PG 会漂移。
+    rows.sort(key=lambda r: (str(r["rel_path"] or "").encode("utf-8"),
+                             int(r["line_no"] or 0)))
     if not rows:
         return []
 

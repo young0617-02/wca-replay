@@ -24,6 +24,7 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 import pytest
+from nacl.signing import SigningKey
 
 from conftest import load_full_facts, ORGS, EMPLOYEES, punch
 from src.auth import User
@@ -311,6 +312,8 @@ def test_postgres_and_sqlite_produce_same_conclusion_digest(tmp_path):
 def test_postgres_epoch_transition_preserves_v4_chain(pg):
     """PG 单库切换：旧 v4 genesis 不变，v5 新段可验证，旧 v4 链仍可验证。"""
     cfg5, conn = pg
+    # 0.4.8 默认已是 v6；本用例专门验证 v4→v5 的纪元切换，必须显式钉 v5。
+    cfg5 = replace(cfg5, rule_pack_id=RULE_PACK_V5)
     cfg4 = replace(cfg5, rule_pack_id=RULE_PACK_V4)
     load_full_facts(conn, cfg4)
     run_check(conn, cfg4, start=date(2025, 9, 1), end=date(2025, 9, 30), notes="pg v4")
@@ -1181,3 +1184,103 @@ if TEST_URL:
         assert len(rows) == len(build_anomalies(conn, out.run_id)) + 1
         hits = rule_hit_counts(conn, out.run_id)
         assert sum(r["count"] for r in hits) == len(out.findings)
+
+
+def test_sqlite_and_postgres_export_five_digests_identical(tmp_path):
+    """同一批输入（含 49 条重复）分别用 SQLite/PG 导出，五个摘要必须逐字节相同。
+
+    这是第十轮复测阻断项的直接回归：0.4.7 的 49 条空 work_date 行在 PG 上因
+    NULL 排序（PG 在后、SQLite 在前）得到不同的 findings.csv 行序，进而让
+    artifacts_digest 变成 5914034d…；0.4.8 改为批次 finding 后，该空日期路径消失，
+    且导出侧排序全部改到 Python 显式完成。
+    """
+    def make_cfg(base: Path, backend: str) -> Config:
+        kwargs = dict(
+            env_path=base / "none.env",
+            WCA_DB_BACKEND=backend,
+            WCA_DB_IDENTITY_PATH=str(base / "target.json"),
+            WCA_DATA_DIR=str(base / "data"),
+            WCA_REPORTS_DIR=str(base / "reports"),
+            WCA_PACKAGES_DIR=str(base / "packages"),
+            WCA_USERS_PATH=str(base / "users.json"),
+            WCA_UPLOAD_DIR=str(base / "uploads"),
+            WCA_REGION_CODE="440300", WCA_RULE_PACK=RULE_PACK_V5,
+            WCA_LLM_PROVIDER="stub", WCA_EMBEDDING_BACKEND="bm25",
+        )
+        if backend == DB_BACKEND_SQLITE:
+            kwargs.update(WCA_DB_PATH=str(base / "wca.sqlite3"),
+                          WCA_SQLITE_SYNCHRONOUS="OFF")
+        else:
+            kwargs.update(
+                WCA_DATABASE_URL=_with_database(TEST_URL, f"wca_test_{uuid.uuid4().hex[:10]}"),
+                WCA_DB_PATH=str(base / "unused.sqlite3"))
+        return Config.load(**kwargs)
+
+    def seed(cfg: Config, conn) -> None:
+        cfg.ensure_dirs()
+        cfg.data_dir.mkdir(parents=True, exist_ok=True)
+        rows_by_name = {
+            "org.csv": ("org", ORGS),
+            "employee.csv": ("employee", EMPLOYEES),
+            "punch.csv": ("punch", [punch("T-STD", "2025-09-02T09:00:00+08:00", "in")] * 50),
+        }
+        for name, (kind, rows) in rows_by_name.items():
+            path = cfg.data_dir / name
+            with path.open("w", encoding="utf-8", newline="") as fh:
+                writer = csv.DictWriter(fh, fieldnames=list(rows[0].keys()),
+                                        lineterminator="\n")
+                writer.writeheader()
+                writer.writerows(rows)
+            import_csv_file(conn, cfg, path, kind=kind, rel_path=name)
+
+    key = SigningKey(bytes(range(32)))
+    sqlite_cfg = make_cfg(tmp_path / "sql", DB_BACKEND_SQLITE)
+    pg_cfg = make_cfg(tmp_path / "pg", DB_BACKEND_POSTGRES)
+    ensure_database(pg_cfg)
+    sqlite_conn = connect(sqlite_cfg)
+    pg_conn = connect(pg_cfg)
+    init_db(sqlite_conn)
+    init_db(pg_conn)
+    try:
+        seed(sqlite_cfg, sqlite_conn)
+        seed(pg_cfg, pg_conn)
+        sq_out = run_check(sqlite_conn, sqlite_cfg, start=date(2025, 9, 2),
+                           end=date(2025, 9, 2), notes="sqlite cross-backend")
+        pg_out = run_check(pg_conn, pg_cfg, start=date(2025, 9, 2),
+                           end=date(2025, 9, 2), notes="postgres cross-backend")
+        sq_manifest = export_package(sqlite_conn, sqlite_cfg, sq_out.run_id, signing_key=key)
+        pg_manifest = export_package(pg_conn, pg_cfg, pg_out.run_id, signing_key=key)
+
+        # 五联值逐一逐字节断言；输入指纹/输入摘要不受后端影响。
+        assert sq_manifest["triple"] == pg_manifest["triple"]
+        assert sq_out.input_fingerprint == pg_out.input_fingerprint
+        assert sq_manifest["evidence_digest"] == pg_manifest["evidence_digest"]
+        assert sq_manifest["inputs_digest"] == pg_manifest["inputs_digest"]
+        assert sq_manifest["artifacts_digest"] == pg_manifest["artifacts_digest"]
+        assert sq_manifest["artifact_sha256"] == pg_manifest["artifact_sha256"]
+        # 批次口径：1 条批次 finding 代表 49 条问题，三字段在后端之间一致。
+        for manifest in (sq_manifest, pg_manifest):
+            assert manifest["counts"]["findings_batched"] >= 1
+            assert manifest["counts"]["issues_total"] > manifest["counts"]["findings_total"]
+            assert manifest["counts"]["quality_issues"] == 1
+        assert sq_manifest["counts"] == pg_manifest["counts"]
+        # 0.4.8 已消除“空 work_date”路径：两个后端包内都不得再有空日期 finding。
+        for manifest in (sq_manifest, pg_manifest):
+            with zipfile.ZipFile(manifest["package_zip"]) as zf:
+                finding_rows = list(csv.DictReader(
+                    zf.read("findings.csv").decode("utf-8").splitlines()))
+                issue_rows = list(csv.DictReader(
+                    zf.read("quality_issues.csv").decode("utf-8").splitlines()))
+            # 0.4.8 已删除 QUAL-01 的空日期期间汇总路径；QUAL-02（整行拒收）仍可有空
+            # 日期，这是有意保留，不属于本轮要删除的“重复行汇总条”。
+            qual01 = [r for r in finding_rows if r["rule_id"] == "QUAL-01"]
+            assert qual01 and all(r["work_date"] for r in qual01), \
+                "QUAL-01 不得再出现空 work_date 的期间汇总条"
+            assert len(issue_rows) == 1 and issue_rows[0]["rule_id"] == "QUAL-DUP"
+        # approval_ledger.csv（v5）逐字节披露：97→93 的构成写在 manifest 里。
+        assert sq_manifest["inputs"]["approval_export"]["normalized_bytes"] == 93
+        assert sq_manifest["inputs"]["approval_export"]["ledger_97_to_93"]["original_bytes"] == 97
+    finally:
+        sqlite_conn.close()
+        pg_conn.close()
+        _drop_database(pg_cfg.database_url)

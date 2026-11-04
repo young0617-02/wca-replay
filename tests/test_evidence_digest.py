@@ -1,11 +1,12 @@
-"""第五/六轮：evidence 定位元数据、跨 run/跨库输入摘要、QUAL 行引用稳定化。
+"""第五/六/十轮：evidence 定位元数据、跨 run/跨库输入摘要、QUAL 行引用与批次语义。
 
-验收标准（第六轮）：移除 DB 自增 file_id 后，结论摘要必然改为新的稳定值；
-  * 同一批 CSV、同一规则包、换新库重导 → conclusion_digest == b9cc6fd0…；
-  * 反向导入顺序（punch/schedule 互换）→ conclusion_digest == b9cc6fd0…；
-  * inputs_digest 在两种情况下均为 aad527d1…；
+验收标准（第十轮 / 0.4.8）：QUAL-01 重复批次改为单条 finding + 内容派生 batch_id；
+  * 同一批 CSV、同一规则包 v5、换新库重导 → conclusion_digest == 5dc46558…；
+  * 反向导入顺序（punch/schedule 互换）→ conclusion_digest == 5dc46558…；
+  * inputs_digest 在两种情况下均为 aad527d1…，input_fingerprint 均为 8b3b54a0…；
   * QUAL-01/QUAL-02 的 line_refs 只用 rel_path+line_no，不含 file_id。
-旧值 01bd4403… 只属于仍含 DB file_id 的 0.4.3 及更早包，移除 file_id 后不可能复现。
+旧值 b9cc6fd0… 属于 0.4.4–0.4.7 的期间汇总形状；批次语义合并后必然改变，
+但其 inputs_digest / input_fingerprint 必须逐字节不变。
 """
 from __future__ import annotations
 
@@ -35,13 +36,13 @@ from src.package_verify import (conclusion_digest_from_findings,
 from src.util import canonical_json, manifest_checksum, sha256_hex
 
 ROOT = Path(__file__).resolve().parent.parent
-KNOWN_DIGEST = "b9cc6fd0ef4e60126e33afe36878f33c30291bf4fd87965b26525b98a68f4328"
+KNOWN_DIGEST = "5dc46558152089f1c0be7522c7b1c175b387309d1c316eb8445dd81ada1d5b7d"
 KNOWN_INPUTS_DIGEST = "aad527d187dad848924af8be868698a8da5e745ad31af4c3ff83d2d2e1d930a7"
 KNOWN_INPUT_FINGERPRINT = "8b3b54a09aa8ede51697b899ddf2d2e738262d6a612b9bee4e34037a6aa8456e"
-KNOWN_EVIDENCE_DIGEST = "01cb5aeb9fb18fefbd98fc52fe52096cce11cf880e9d48088a565dfc15daa904"
+KNOWN_EVIDENCE_DIGEST = "4654a3c760078d3203d572db1af8eb23434777f6ffe2732713caf14d9badd0c9"
 
-# 与第三/四/五轮 handoff 相同的输入与扫描范围；注意 01bd 是含 DB file_id 的旧值，
-# 本文件在 0.4.4 起用 rel_path 替代 file_id，稳定值是 b9cc。
+# 与第三/四/五/九轮 handoff 相同的输入与扫描范围；0.4.8 起 QUAL-01 单批形状的
+# 稳定结论摘要为 5dc46558…，输入侧两个值仍为 aad527d1… / 8b3b54a0…。
 FULL_V5_ORDER = ("org", "employee", "approval", "schedule", "punch", "leave",
                  "trip", "correction")
 FULL_V5_REVERSE_ORDER = ("org", "employee", "approval", "punch", "schedule", "leave",
@@ -136,14 +137,18 @@ def _resign(manifest: dict, key) -> None:
 def test_full_v5_conclusion_digest_is_stable_after_file_id_removal(full_v5):
     out = full_v5["out"]
     manifest = full_v5["manifest"]
-    assert len(out.findings) == 116
-    # 0.4.1 的 01bd 含 QUAL line_refs 的 DB file_id；0.4.4 移除后必须变成新稳定值。
+    assert len(out.findings) == 115
+    # 0.4.8 批次语义：QUAL-01 的期间汇总与逐日条合并为单批 finding，
+    # 其余 112 条 canonical 字段逐字节不变，inputs_digest / input_fingerprint 不回归。
     assert out.conclusion_digest == KNOWN_DIGEST, out.conclusion_digest
     assert manifest["triple"]["conclusion_digest"] == KNOWN_DIGEST
-    # 0.4.5 的跨文件重复行修复不得改变单 punch.csv 场景的四联值。
     assert manifest["evidence_digest"] == KNOWN_EVIDENCE_DIGEST
     assert manifest["inputs_digest"] == KNOWN_INPUTS_DIGEST
     assert manifest["triple"]["input_fingerprint"] == KNOWN_INPUT_FINGERPRINT
+    counts = manifest["counts"]
+    assert counts["findings_total"] == counts["findings"] == 115
+    assert counts["findings_batched"] == 1
+    assert counts["issues_total"] == 115
 
     evidence_rows = [finding for finding in out.findings if finding.evidence]
     assert len(evidence_rows) == 24
@@ -220,8 +225,8 @@ def test_full_v5_cross_database_and_reverse_order_stable(full_v5, tmp_path):
     reverse = _build_full_v5(tmp_path / "full-v5-reverse", FULL_V5_REVERSE_ORDER,
                              full_v5["key"])
     try:
-        assert len(full_v5["out"].findings) == 116
-        assert len(reverse["out"].findings) == 116
+        assert len(full_v5["out"].findings) == 115
+        assert len(reverse["out"].findings) == 115
         for label, item in (("forward", full_v5), ("reverse", reverse)):
             assert item["out"].conclusion_digest == KNOWN_DIGEST, label
             assert item["manifest"]["triple"]["conclusion_digest"] == KNOWN_DIGEST, label

@@ -14,6 +14,7 @@ import csv
 import json
 import logging
 import os
+import re
 import shutil
 import threading
 import zipfile
@@ -28,6 +29,7 @@ from .db import (DB_BACKEND_POSTGRES, Connection, column_exists, get_meta, set_m
                  table_exists, transaction_if_needed)
 from .evidence_digest import evidence_digest as compute_evidence_digest
 from .package_inputs import input_arcnames, redact_issue_detail
+from .quality_batch import batch_id_from_sources, date_from_raw_value
 from .rules.approvals import export_approval_csv, export_coverage_csv
 from .rules.rulepack import RULE_PACK_V4, RULE_PACK_V5, RULE_PACK_V6
 from .util import (CN_TZ, CSV_FORMULA_ESCAPE, EVIDENCE_PACKAGE_SCHEMA,
@@ -411,9 +413,11 @@ def input_fingerprint(conn: Connection, scope: dict,
         where = f"WHERE file_id IN ({','.join('?' * len(ids))})"
         params = tuple(ids)
     files = conn.execute(
-        f"SELECT rel_path, sha256, row_count, kind FROM raw_file {where} ORDER BY rel_path, sha256",
-        params,
+        f"SELECT rel_path, sha256, row_count, kind FROM raw_file {where}", params,
     ).fetchall()
+    # 排序放在 Python 里按 UTF-8 字节序完成：不依赖 SQLite/PG 的文本 collation，
+    # 同一批输入在任一后端都必须得到逐字节相同的 input_fingerprint（0.4.8）。
+    files.sort(key=lambda f: (str(f["rel_path"]).encode("utf-8"), str(f["sha256"])))
     payload = {
         "files": [
             {"rel_path": f["rel_path"], "sha256": f["sha256"], "rows": int(f["row_count"]),
@@ -465,8 +469,11 @@ PACKAGE_README = (
     "--expect-evidence-digest 或单包 anchor 文件的 evidence_digest 锚定；"
     "签名者可能作恶或私钥失窃，不能只看包内 manifest。\r\n"
     "input_fingerprint 是内容与范围指纹（输入文件内容/引用范围/规则参数），"
-    "inputs_digest 是包内 inputs/ 实际文件字节（已不含 run_id 与 DB file_id；"
-    "文件名由 rel_path 推导）；同一批输入跨 run/跨库导包时 inputs_digest 应稳定一致。\r\n"
+    "inputs_digest 是包内 inputs/ 实际文件字节（不含 run_id 与 DB file_id；"
+    "文件名由 rel_path 推导）；同一批输入跨 run/跨库导包时 inputs_digest 应稳定一致。"
+    "注意：manifest.json 顶层另有 run_id 字段，只用于把包回指到库内 run 与审计段，"
+    "不参与 inputs_digest、conclusion_digest、evidence_digest、artifacts_digest 或"
+    "input_fingerprint 的任何计算；四联值本身不含 run_id。\r\n"
     "rule_version 是单条规则版本，不等于 rule pack 版本；v5 包可同时有 v4/v5 规则，"
     "分布见 manifest.counts.rule_versions 与包内 policies/RULE-PACK.md。\r\n"
 )
@@ -503,7 +510,12 @@ def responsibility_block(conn: Connection, cfg: Config, run_id: str) -> dict:
         "  ON r.run_id = f.run_id AND r.source_type = 'finding' "
         " AND (f.rule_id || ':' || f.emp_id || ':' || COALESCE(f.work_date, f.period_key, 'None') = r.source_id "
         "      OR f.rule_id || ':' || f.emp_id || ':' || COALESCE(f.work_date, f.period_key, '') = r.source_id) "
-        "WHERE f.run_id = ? ORDER BY f.emp_id, f.work_date, f.rule_id", (run_id,)).fetchall()
+        "WHERE f.run_id = ?", (run_id,)).fetchall()
+    # responsibility.json 的行序同样不能依赖 SQL 的 NULL 排序（0.4.8）。
+    rows.sort(key=lambda x: (
+        str(x["emp_id"]).encode("utf-8"), x["work_date"] or "", x["period_key"] or "",
+        str(x["rule_id"]).encode("utf-8"),
+    ))
     confirmed, pending = [], []
     for x in rows:
         entry = {"rule_id": x["rule_id"], "emp_id": x["emp_id"],
@@ -523,9 +535,13 @@ def responsibility_block(conn: Connection, cfg: Config, run_id: str) -> dict:
     ai_rows = (conn.execute(
         "SELECT qid, asked_at, actor_emp_id, question, intent, gate_decision, citation_ids, "
         "       numeric_tokens, allowed_numbers, provider, model, needs_review "
-        "FROM question_log WHERE run_id = ? ORDER BY asked_at", (run_id,)).fetchall()
+        "FROM question_log WHERE run_id = ?", (run_id,)).fetchall()
         if _has_table(conn, "question_log") and _has_column(conn, "question_log", "run_id")
         else [])
+    # 不用 SQL ORDER BY asked_at：同一时间戳的并列行在库里无显式顺序，会让
+    # responsibility.json 的问答留痕顺序随后端变化（0.4.8）。
+    ai_rows.sort(key=lambda a: (str(a["asked_at"] or "").encode("utf-8"),
+                                str(a["qid"] or "").encode("utf-8")))
     ai = [{"qid": a["qid"], "asked_at": a["asked_at"], "actor_emp_id": a["actor_emp_id"],
            "intent": a["intent"], "provider": a["provider"], "model": a["model"],
            "gate_decision": a["gate_decision"],
@@ -662,13 +678,18 @@ def _write_conclusions_csv(path: Path, rows: list[dict]) -> None:
 
 
 def _write_package_confidence(path, *, findings_count: int, final_count: int,
-                              signed: bool) -> None:
+                              signed: bool, findings_batched: int = 0,
+                              issues_total: int | None = None) -> None:
     """把本包真实计数写进已签名工件，避免静态 CONFIDENCE 把 confirmed 包写成 0 条。"""
     base = path.read_text(encoding="utf-8").rstrip()
     role = "含已确认结论" if final_count else "engine-only（无已确认结论）"
+    issues_total = findings_count if issues_total is None else issues_total
     block = (
         "\n\n## 本包计数（导出时生成）\n\n"
         f"- 发现（未签认）：{findings_count} 条\n"
+        f"- 其中批次 finding：{findings_batched} 条（每批代表多条重复问题）\n"
+        f"- 按问题条数计：{issues_total} 条"
+        "（= finding 条数 - 批次 finding 条数 + 各批 batch_size 合计）\n"
         f"- 已确认结论：{final_count} 条\n"
         f"- responsibility.signed：{'true' if signed else 'false'}\n"
         f"- 本包角色：{role}\n"
@@ -707,7 +728,9 @@ def _aggregate_findings(findings) -> list[dict]:
 def _not_covered_markdown(nc: dict, *, findings_count: int = 0,
                           final_count: int = 0,
                           rule_versions: dict[str, int] | None = None,
-                          aggregate_findings: list[dict] | None = None) -> str:
+                          aggregate_findings: list[dict] | None = None,
+                          findings_batched: int = 0,
+                          issues_total: int | None = None) -> str:
     """把未覆盖清单渲染成给人读的 Markdown（数据来自 config/not_covered.json，不写死在代码里）。"""
     NL = chr(10)
     scope = nc["scope"]
@@ -725,7 +748,10 @@ def _not_covered_markdown(nc: dict, *, findings_count: int = 0,
         "# 未覆盖清单（本期不做 / 未验证）",
         "",
         f"- 本轮包内：发现（未签认）{findings_count} 条 / 已确认结论 {final_count} 条"
-        "（以 manifest.counts.findings / final_conclusions 为准）",
+        f"；其中批次 finding {findings_batched} 条，按问题条数计 "
+        f"{findings_count if issues_total is None else issues_total} 条"
+        "（以 manifest.counts.findings_total / findings_batched / issues_total / "
+        "final_conclusions 为准）",
         "- 单条规则版本分布：" + (", ".join(
             f"{k}={v}" for k, v in sorted((rule_versions or {}).items())) or "无")
         + "。`rule_version` 是单条规则版本，不等于 rule pack 版本；v5 包内保留未改判据的 v4 规则是预期。",
@@ -880,10 +906,13 @@ def _select_raw_files(conn: Connection, ids: set[int]) -> list:
         return []
     ordered = sorted(int(x) for x in ids)
     placeholders = ",".join("?" * len(ordered))
-    return conn.execute(
+    rows = conn.execute(
         f"SELECT file_id, rel_path, sha256, kind, row_count FROM raw_file "
-        f"WHERE file_id IN ({placeholders}) ORDER BY rel_path", tuple(ordered)
+        f"WHERE file_id IN ({placeholders})", tuple(ordered)
     ).fetchall()
+    # 文本排序在 Python 中按 UTF-8 字节序完成，跨 SQLite/PG 一致（0.4.8）。
+    rows.sort(key=lambda r: (str(r["rel_path"]).encode("utf-8"), str(r["sha256"])))
+    return rows
 
 
 def _select_issues(conn: Connection, ids: set[int]) -> list:
@@ -891,19 +920,146 @@ def _select_issues(conn: Connection, ids: set[int]) -> list:
         return []
     ordered = sorted(int(x) for x in ids)
     placeholders = ",".join("?" * len(ordered))
-    return conn.execute(
+    rows = conn.execute(
         f"SELECT i.*, f.rel_path FROM ingest_issue i JOIN raw_file f "
-        f"ON f.file_id = i.file_id WHERE i.file_id IN ({placeholders}) "
-        f"ORDER BY i.file_id, i.line_no", tuple(ordered)
+        f"ON f.file_id = i.file_id WHERE i.file_id IN ({placeholders})", tuple(ordered)
     ).fetchall()
+    # 不再按 DB file_id 排：file_id 是自增值，跨库/换导入顺序都会漂移。
+    # 统一按包内相对路径字节序 + 行号 + 规则/字段/原值确定行序（0.4.8）。
+    rows.sort(key=lambda r: (
+        str(r["rel_path"]).encode("utf-8"), int(r["line_no"] or 0),
+        str(r["rule_id"]).encode("utf-8"), str(r["field_name"] or "").encode("utf-8"),
+        str(r["raw_value"] or "").encode("utf-8"), str(r["detail"] or "").encode("utf-8"),
+    ))
+    return rows
+
+
+_DETAIL_SOURCE_RE = re.compile(r"来源:\s*(.*?)(?:（|$)")
+
+
+def _detail_sources(detail: str) -> list[tuple[str, int]]:
+    """从跨文件重复行的 detail 里取出“首次出现 + 重复行”两处来源。"""
+    match = _DETAIL_SOURCE_RE.search(str(detail or ""))
+    if not match:
+        return []
+    out: list[tuple[str, int]] = []
+    for part in match.group(1).split(","):
+        rel_path, _, line_no = part.strip().rpartition(":")
+        if rel_path and line_no.isdigit():
+            out.append((rel_path, int(line_no)))
+    return out
+
+
+def _aggregate_export_issues(issues: list, file_paths: dict[int, str]) -> list[dict]:
+    """QUAL-DUP 按 (员工, 实际发生日) 聚成 1 行/批；detail 内列全部来源。
+
+    非重复类质量问题原样保留。批次号与结论里的 batch_id 使用同一算法，
+    因此 quality_issues.csv 与 findings.csv 可以互相核对。
+    """
+    plain: list[dict] = []
+    groups: dict[tuple[str, str], dict] = {}
+
+    def add_source(group: dict, rel_path: object, line_no: object) -> None:
+        rel = str(rel_path or "")
+        if not rel or line_no is None:
+            return
+        group["sources"].add((rel, int(line_no)))
+
+    def add_group(emp_id: str, day: str, severity: str, raw_value: str,
+                  sources: list[tuple[object, object]],
+                  related: list[tuple[str, int]] | None = None) -> None:
+        key = (str(emp_id or ""), str(day or ""))
+        group = groups.get(key)
+        if group is None:
+            group = {"emp_id": key[0], "day": key[1], "severity": severity,
+                     "raw_value": str(raw_value or ""), "sources": set(),
+                     "related": set()}
+            groups[key] = group
+        for rel_path, line_no in sources:
+            add_source(group, rel_path, line_no)
+        for rel_path, line_no in (related or []):
+            if rel_path:
+                group["related"].add((rel_path, int(line_no)))
+
+    for issue in issues:
+        if str(issue["rule_id"]) != "QUAL-DUP":
+            plain.append(dict(issue))
+            continue
+        payload: dict = {}
+        detail = str(issue["detail"] or "")
+        if detail.startswith("{"):
+            try:
+                payload = json.loads(detail)
+            except (TypeError, ValueError):
+                payload = {}
+        if payload.get("qual_dup_summary"):
+            for day, meta in sorted((payload.get("days") or {}).items()):
+                day_text = str(day or "")
+                if not day_text:
+                    day_text = date_from_raw_value(
+                        (list(meta.get("samples") or []) or [""])[0])
+                refs = [(file_paths.get(int(file_id), ""), line_no)
+                        for file_id, line_no in (meta.get("line_refs") or [])]
+                add_group(str(issue["emp_id"]), day_text, str(issue["severity"]),
+                          str(issue["raw_value"] or ""), refs)
+        else:
+            day_text = str(issue["work_date"] or "") or date_from_raw_value(
+                issue["raw_value"])
+            add_group(str(issue["emp_id"]), day_text, str(issue["severity"]),
+                      str(issue["raw_value"] or ""),
+                      [(issue["rel_path"], issue["line_no"])],
+                      _detail_sources(str(issue["detail"] or "")))
+
+    out: list[dict] = list(plain)
+    for (_emp, day), group in sorted(groups.items()):
+        sources = sorted(group["sources"], key=lambda x: (x[0].encode("utf-8"), x[1]))
+        refs = [{"rel_path": rel_path, "line_no": line_no} for rel_path, line_no in sources]
+        batch_id = batch_id_from_sources(refs)
+        source_text = "; ".join(f"{rel_path}:{line_no}" for rel_path, line_no in sources)
+        related = sorted(group["related"] - set(sources),
+                         key=lambda x: (x[0].encode("utf-8"), x[1]))
+        related_text = "; ".join(f"{rel_path}:{line_no}" for rel_path, line_no in related)
+        detail = (f"重复批次：batch_size={len(sources)}；batch_id={batch_id}；"
+                  f"全部来源：{source_text}")
+        if related_text:
+            detail += f"；相关来源（首次出现行）：{related_text}"
+        out.append({
+            "rel_path": sources[0][0] if sources else "",
+            "line_no": sources[0][1] if sources else 0,
+            "rule_id": "QUAL-DUP",
+            "severity": group["severity"],
+            "field_name": "(batch)",
+            "raw_value": group["raw_value"],
+            "detail": detail,
+            "work_date": day,
+        })
+    return out
+
+
+def _batch_stats(findings: list) -> tuple[int, int]:
+    """返回 (批次 finding 条数, 批次内问题条数合计)。"""
+    batched = 0
+    issues_total = 0
+    for finding in findings:
+        if str(finding["rule_id"]) != "QUAL-01":
+            continue
+        try:
+            metric = json.loads(finding["metric_json"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        if "batch_id" not in metric:
+            continue
+        batched += 1
+        issues_total += int(metric.get("batch_size") or 0)
+    return batched, issues_total
 
 
 def _run_employee_ids(conn: Connection, scope: dict) -> list[str]:
     ids = scope.get("emp_ids")
     if ids:
-        return sorted({str(x) for x in ids})
-    return [str(r["emp_id"]) for r in conn.execute(
-        "SELECT emp_id FROM employee ORDER BY emp_id").fetchall()]
+        return sorted({str(x) for x in ids}, key=lambda x: x.encode("utf-8"))
+    rows = conn.execute("SELECT emp_id FROM employee").fetchall()
+    return sorted((str(r["emp_id"]) for r in rows), key=lambda x: x.encode("utf-8"))
 
 
 def _resolve_input_path(rel_path: str, cfg: Config) -> Path | None:
@@ -993,7 +1149,9 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
     scope_json = json.loads(run["scope_json"])
     input_ids = _run_input_file_ids(conn, run_id)
     files = _select_raw_files(conn, input_ids)
-    issues = _select_issues(conn, input_ids)
+    file_paths = {int(f["file_id"]): str(f["rel_path"]) for f in files}
+    # 0.4.8：重复批次在包内只输出 1 行，detail 列出全部来源；不再逐行堆叠或只留前 5 条。
+    issues = _aggregate_export_issues(_select_issues(conn, input_ids), file_paths)
     chain, chain_max_seq, chain_epoch = _run_chain_prefix(
         conn, run_id, str(run["rule_pack_version"]))
     activation_event = None
@@ -1033,9 +1191,17 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
             shutil.copy2(policy, policies_dir / policy.name)
 
     findings = conn.execute(
-        "SELECT * FROM finding WHERE run_id = ? ORDER BY emp_id, work_date, rule_id", (run_id,)
+        "SELECT * FROM finding WHERE run_id = ?", (run_id,)
     ).fetchall()
-    file_paths = {int(f["file_id"]): str(f["rel_path"]) for f in files}
+    # findings.csv 的行序必须是纯内容函数：work_date/period_key 都可空，
+    # SQL 的 NULL 排序在 SQLite 与 PG 上不同（SQLite NULL 在前、PG 在后）。
+    # 统一在 Python 里用 (work_date or "", period_key or "") 排序（0.4.8）。
+    findings.sort(key=lambda f: (
+        str(f["emp_id"]).encode("utf-8"), f["work_date"] or "", f["period_key"] or "",
+        str(f["rule_id"]).encode("utf-8"), str(f["rule_version"]).encode("utf-8"),
+        str(f["severity"]).encode("utf-8"), str(f["metric_json"] or "").encode("utf-8"),
+        str(f["explanation"] or "").encode("utf-8"),
+    ))
     evidence_digest_value = compute_evidence_digest(
         {"rule_id": f["rule_id"], "rule_version": f["rule_version"],
          "emp_id": f["emp_id"], "work_date": f["work_date"],
@@ -1116,16 +1282,23 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
     nc_path = work / "not_covered.json"
     nc_path.write_text(canonical_json(nc) + chr(10), encoding="utf-8")
     nc_md = work / "未覆盖清单.md"
+    findings_batched, batched_issue_rows = _batch_stats(findings)
+    findings_total = len(findings)
+    # 批次 finding 在 CSV 里是 1 行，但代表 batch_size 条问题；
+    # issues_total 是把批次展开后的实际条数，三者关系在各包文档里写清。
+    issues_total = findings_total - findings_batched + batched_issue_rows
     nc_md.write_text(_not_covered_markdown(
-        nc, findings_count=len(findings), final_count=len(resp["human_confirmations"]),
+        nc, findings_count=findings_total, final_count=len(resp["human_confirmations"]),
         rule_versions=_rule_version_counts(findings),
-        aggregate_findings=_aggregate_findings(findings)))
+        aggregate_findings=_aggregate_findings(findings),
+        findings_batched=findings_batched, issues_total=issues_total))
     confidence_path = policies_dir / "CONFIDENCE.md"
     if not confidence_path.is_file():
         raise RuntimeError("缺少 policies/CONFIDENCE.md，无法生成按包计数")
     _write_package_confidence(
-        confidence_path, findings_count=len(findings),
-        final_count=len(resp["human_confirmations"]), signed=bool(resp["signed"]))
+        confidence_path, findings_count=findings_total,
+        final_count=len(resp["human_confirmations"]), signed=bool(resp["signed"]),
+        findings_batched=findings_batched, issues_total=issues_total)
 
     # 8) 输入自含（US-EX-01）：把本次结论真正依赖的原始 CSV 一起打包，让重放不需要另外索要数据
     inputs_dir = work / INPUTS_DIRNAME
@@ -1188,8 +1361,22 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
         "bom": False,
         "line_endings": "LF",
         "original_bytes_retained": False,
+        "normalized_bytes": int(approval_meta["bytes"]) if approval_meta else 0,
         "note": ("approval_ledger.csv / approval_coverage.csv 由数据库确定性重导出，"
                  "不是原始上传字节；原始字节未随包保留，重放以包内重导出文件为准。"),
+        # 第十轮复测要求的逐字节披露：0.4.7 实测的 approval_ledger.csv 为仅表头文件。
+        # 原上传 97 字节 = 表头 92 + UTF-8 BOM 3 + CRLF 2；
+        # 规范化 93 字节 = 表头 92 + LF 1；差异 4 字节 = BOM 3 + CRLF→LF 1。
+        # 原始上传字节已不可得（仓库与历史产物中均无该 97 字节副本）。
+        "ledger_97_to_93": {
+            "original_bytes": 97,
+            "normalized_bytes": 93,
+            "difference_bytes": 4,
+            "breakdown": "UTF-8 BOM 3 字节 + CRLF→LF 1 字节（仅表头、无数据行）",
+            "arithmetic": "97 = 92（表头）+ 3（BOM）+ 2（CRLF）；93 = 92 + 1（LF）",
+            "original_bytes_recovered": False,
+            "reason": "原文件是临时上传，未保留 raw 副本；包内只保留确定性重导出结果",
+        },
     }
     inputs_doc = {"schema": "wca-package-inputs-v1",
                   "csv_formula_escape": CSV_FORMULA_ESCAPE,
@@ -1286,6 +1473,12 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
         }} if chain_epoch else {}),
         "counts": {
             "findings": len(findings),
+            # 0.4.8 批次口径：findings_total 是 CSV 行数；findings_batched 是其中
+            # 代表多条的批次 finding 数；issues_total = findings_total - findings_batched
+            # + 各批 batch_size 合计，供消费方不要按 CSV 行数误算重复问题。
+            "findings_total": findings_total,
+            "findings_batched": findings_batched,
+            "issues_total": issues_total,
             "input_files": len(files) + (1 if approval_meta is not None else 0),
             "audit_events": len(chain),
             "quality_issues": len(issues),

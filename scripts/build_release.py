@@ -144,6 +144,19 @@ def _readme(version: str, commit: str, wheel: str, build_time: str) -> str:
 - **默认流程可从 wheel 复现**：0.4.7 起 wheel 内含 `data/generator/make_synthetic.py`；
   `wca gen` 在当前目录写出 `data/raw/*.csv`，随后不指定数据目录即可依次跑
   `ingest → check → export → verify → replay`，交付方已用干净 venv 实测。
+- **重复批次语义**：0.4.8 起同一员工同一实际发生日的重复行合并为 1 条 `QUAL-01` finding，
+  `work_date = period_key =` 实际发生日；`metric` 带 `batch_id`、`batch_size`、`sources`
+  （全部来源，不截断）。`batch_id` 只由 `rel_path:line_no` 集合内容派生，换库重导、反向导入、
+  不同机器均相同，禁用 DB 自增/`file_id`/`run_id`/计数器/时间戳。
+- **计数口径**：`manifest.counts` 新增 `findings_total` / `findings_batched` / `issues_total`；
+  三处计数（manifest、`policies/CONFIDENCE.md`、`未覆盖清单.md`）必须一致。统计重复类问题时
+  不要直接数 `findings.csv` 行数，见 README“如何正确统计重复类问题”。
+- **规则包 v6**：0.4.8 起默认 `rp-2026.11.gd-pilot-standard.v6`（切换日 2026-11-05），
+  v5/v4 仍可用显式 `WCA_RULE_PACK` 选择与回放；v5 旧包继续配 0.4.7 wheel，v6 新包配 0.4.8 wheel。
+- **跨后端可复算**：同一输入用 SQLite 或 PostgreSQL 18 导出，`conclusion_digest`、
+  `evidence_digest`、`inputs_digest`、`input_fingerprint`、`artifacts_digest` 逐字节相同。
+  导出侧行序全部在 Python 显式排序，不依赖 SQL 的 NULL 顺序或文本 collation；回归用例
+  `tests/test_postgres_integration.py::test_sqlite_and_postgres_export_five_digests_identical`。
 
 ## 前置条件（缺一不可）
 

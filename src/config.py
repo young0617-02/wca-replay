@@ -207,7 +207,8 @@ class Config:
             region_code=_as_str(values, "WCA_REGION_CODE", ""),
             region_label="",   # 由城市档位表解析，代码里不写市名（需求 US-AD-06）
             locked_worktime_regime=_as_str(values, "WCA_WORKTIME_REGIME", "standard"),
-            rule_pack_id=_as_str(values, "WCA_RULE_PACK", "rp-2026.11.gd-pilot-standard.v5"),
+            # 0.4.8 起默认 v6（2026-11-05 切换）；旧包/活动库仍可用 WCA_RULE_PACK 显式指定 v5。
+            rule_pack_id=_as_str(values, "WCA_RULE_PACK", "rp-2026.11.gd-pilot-standard.v6"),
             llm_provider=_as_str(values, "WCA_LLM_PROVIDER", "stub"),
             llm_model=_as_str(values, "WCA_LLM_MODEL", "stub-offline-v1"),
             llm_timeout_s=_as_int(values, "WCA_LLM_TIMEOUT_S", 25),

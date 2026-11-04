@@ -54,17 +54,8 @@ PROJECTION_TABLE_FIELDS: dict[str, tuple[str, ...]] = {
 }
 
 # 排序不是“字段列表”的一部分，但必须固定，否则同数据不同插入顺序会导致不同指纹。
-PROJECTION_TABLE_ORDER = {
-    "employee": "emp_id",
-    "punch": "emp_id, event_ts, punch_type, COALESCE(device_id, '')",
-    "punch_correction": "emp_id, claimed_ts, claimed_type, COALESCE(reason, ''), approved",
-    "leave_record": "emp_id, leave_kind, start_ts, end_ts, approved",
-    "trip_record": "emp_id, start_ts, end_ts",
-    "shift_plan": "emp_id, work_date, planned_start, planned_end, rest_minutes",
-    "worktime_approval": "emp_id, doc_no, regime, valid_from, valid_to",
-    "employee_approval_coverage": "emp_id, doc_no, version_no, regime, valid_from, valid_to",
-    "ingest_issue": "COALESCE(line_no, -1), rule_id, field_name",
-}
+# 0.4.8 起排序在 Python 中按归一化值显式完成（见 _row_sort_key），不再用 SQL ORDER BY，
+# 以消除 SQLite/PG 的 NULL 顺序与文本 collation 差异。
 
 PROJECTION_TIME_FIELDS = {
     ("punch", "event_ts"),
@@ -172,10 +163,24 @@ EMP_FILTERED_TABLES = {
 }
 
 
+def _row_sort_key(row: list[Any]) -> tuple:
+    """跨后端一致的排序键：空值在前、整数按数值、其余按 UTF-8 字节序。
+
+    原实现直接用 SQL `ORDER BY`，其文本顺序依赖数据库 collation，空值顺序在
+    SQLite（NULL 在前）与 PG（默认 NULL 在后）也不同；投影指纹是摘要的一部分，
+    因此必须在 Python 里固定顺序（0.4.8）。
+    """
+    return tuple(
+        (0, 0, b"") if value is None else
+        (1, 0, value) if isinstance(value, int) and not isinstance(value, bool) else
+        (1, 1, str(value).encode("utf-8"))
+        for value in row
+    )
+
+
 def _table_rows(conn: Connection, table: str, rel_paths: set[str] | None,
                 emp_ids: list[str] | None) -> list[list[Any]]:
     fields = PROJECTION_TABLE_FIELDS[table]
-    order = PROJECTION_TABLE_ORDER[table]
     clauses: list[str] = []
     params: list[Any] = []
     if rel_paths is not None:
@@ -193,9 +198,12 @@ def _table_rows(conn: Connection, table: str, rel_paths: set[str] | None,
             params.extend(ids)
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     rows = conn.execute(
-        f"SELECT {', '.join(fields)} FROM {table}{where} ORDER BY {order}",
+        f"SELECT {', '.join(fields)} FROM {table}{where}",
         tuple(params)).fetchall()
-    return [[_normalize_value(table, field, row[field]) for field in fields] for row in rows]
+    normalized = [[_normalize_value(table, field, row[field]) for field in fields]
+                  for row in rows]
+    normalized.sort(key=_row_sort_key)
+    return normalized
 
 
 def _active_tables(rule_pack_version: str) -> set[str]:

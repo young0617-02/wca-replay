@@ -23,5 +23,7 @@
 ## 使用建议
 
 - 只把本包作为“发现（未签认）清单 + 可复算证据”，不要把 findings 当已确认结论；
+- 统计重复类问题时读 `manifest.counts` 的 `findings_total` / `findings_batched` / `issues_total`，
+  不要按 `findings.csv` 行数直接算重复条数；批次 `batch_id` 可按 `policies/RULE-PACK.md` 的口径复算；
 - 对外结论必须经具名人工复核并写入 `conclusions_final.csv`/`responsibility.json`；
 - 规则/条文争议项应先按 `字段口径与条文依据-对外版.md` 第六点五节补充确认，再用于对外交付。

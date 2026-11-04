@@ -58,9 +58,13 @@ def build_anomalies(conn: Connection, run_id: str) -> list[AnomalyItem]:
         # 用 INNER JOIN 会把它们从异常报表里悄悄丢掉。
         "SELECT f.*, COALESCE(e.pseudonym, '(未归属)') AS pseudonym FROM finding f "
         "LEFT JOIN employee e ON e.emp_id = f.emp_id "
-        "WHERE f.run_id = ? ORDER BY f.emp_id, f.work_date, f.period_key, f.rule_id",
+        "WHERE f.run_id = ?",
         (run_id,),
     ).fetchall()
+    # work_date/period_key 可空，且文本排序依赖后端 collation；组内顺序改由
+    # Python 按员工 + 规则 ID 显式确定，最终报表再按严重度/日期排序（0.4.8）。
+    rows.sort(key=lambda r: (str(r["emp_id"]).encode("utf-8"),
+                             str(r["rule_id"]).encode("utf-8")))
     grouped: dict[tuple, AnomalyItem] = {}
     for r in rows:
         key = (r["emp_id"], r["work_date"], r["period_key"])

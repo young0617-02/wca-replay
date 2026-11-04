@@ -1,13 +1,33 @@
 # 规则包定义（对外版）
 
-规则包：`rp-2026.11.gd-pilot-standard.v5`（兼容 v4/v5/v6 历史回放）。
+默认规则包：`rp-2026.11.gd-pilot-standard.v6`（0.4.8 起，2026-11-05 切换）；
+`v4`/`v5` 保持不可变，仍可显式 `WCA_RULE_PACK` 选择并回放。
 阈值默认值：`daily_std_minutes=480`、`weekly_std_minutes=2400`、
 `ot_cap_daily_general_minutes=60`、`ot_cap_daily_special_minutes=180`、
 `ot_cap_monthly_minutes=2160`。这些是代码默认值，可由部署配置覆盖；包内 `manifest.scope_json`
 会记录实际钉回值，未记录的参数沿用默认值。
 
 `rule_version` 是**单条规则版本**，不等于 rule pack 版本。v5 包内保留未改判据的 v4 规则是预期；
-`manifest.counts.rule_versions` 公开分布。
+`manifest.counts.rule_versions` 公开分布。v6 是独立冻结列表，`rule_version` 在 v6 run 中统一标为
+`rp-2026.11.gd-pilot-standard.v6`，便于回放时一眼区分运行时规则包。
+
+### 规则包版本与切换记录
+
+| 规则包 | 规则包冻结日 | 规则包切换日 | 规则实现 | 旧包回放配套 wheel |
+|---|---|---|---|---|
+| `rp-2026.10.gd-pilot-standard.v4` | 2026-10-08 | 2026-10-08 | v4 判据集合 | 0.4.4–0.4.6 |
+| `rp-2026.11.gd-pilot-standard.v5` | 2026-11-02 | 2026-11-02 | v5 判据集合（含 REG-01/COMP-C01/SHIFT-01/OFF-01） | 0.4.7 |
+| `rp-2026.11.gd-pilot-standard.v6` | 2026-11-05 | 2026-11-05 | 独立冻结列表；实现与 v5 相同，run 时统一标 `rule_version=v6` | 0.4.8 |
+
+| 切换动作 | 谁 | 何时 | 从 → 到 | 记录/证据 |
+|---|---|---|---|---|
+| 默认规则包切换 | 0.4.8 发布维护者（项目负责人批复） | 2026-11-05 | `v5` → `v6` | 本文件 + `reports/0.4.8-批次语义实施.md` |
+| 运行库首次 v6 run | `system:audit`（`ensure_audit_epoch`） | 首次 run 的 UTC 时间 | 记录 `prev_rule_pack_version` / `rule_pack_version` / `switched_at` | 审计链 `rule_pack.epoch.start` 事件 |
+
+旧包不回改、不重签：v5 包继续用 0.4.7 wheel 回放，v6 包用 0.4.8 wheel；配对关系见
+`OLD-WHEELS.md` 与 README。切换按 run 时版本计算，不是立法溯及。
+
+### 规则清单
 
 | rule_id | 名称 | 层级 | 规则版本 | 条文引用 | 阈值/公式 | 法律条文生效日 | 规则包冻结/切换日 |
 |---|---|---|---|---|---|---|---|
@@ -41,11 +61,36 @@
 - `COMP-C01` 只作统计，不判违规、不出倍数；周期是否被批准覆盖仍以 `REG-01` 台账核验为准。
 - 具体启用/废止日期、特殊工时审批台账有效性需交付方书面确认。
 
-### 两列日期的区别
+### `QUAL-01` 重复批次（0.4.8 起）
+
+- 同一员工、同一**实际发生日**的全部重复行合并为 **1 条** `QUAL-01` finding；
+  `work_date = period_key =` 该日，不再出现空日期的“期间汇总”条。
+- `metric.batch_id` 由来源行集合内容派生：每条来源取 `rel_path:line_no`，按 UTF-8 字节序排序、
+  用 `\n` 连接后取 SHA-256；不含 DB 自增、`file_id`、`run_id`、计数器或时间戳。
+- `metric.batch_size` 是该批重复问题条数；`metric.sources` 列出该批**全部**来源行，
+  不截断为前 3/5 条。`quality_issues.csv` 同一批只输出 1 行，`detail` 内列全部来源。
+- 被拒收的无日期输入行仍由 `QUAL-02` 单独呈现；这是**有意保留**的事实缺口提示，
+  不属于重复批次汇总，也不会被并入 `QUAL-01` 的批次 finding。
+
+### 计数口径（findings_total / findings_batched / issues_total）
+
+- `findings_total`：`findings.csv` 的数据行数（每条 conclusion 一行）。
+- `findings_batched`：其中带 `batch_id` 的批次 finding 条数（每 1 条代表多条重复问题）。
+- `issues_total`：把批次展开后的实际问题条数，
+  `= findings_total - findings_batched + 各批 batch_size 合计`。
+- `manifest.counts`、`policies/CONFIDENCE.md`、`未覆盖清单.md` 三处必须一致；
+  README 的“如何正确统计重复类问题”给出示例。
+
+### 三类日期的区别
 
 - **法律条文生效日**：条文本身在何时生效/修订；它是法律依据的时间属性，不是本项目规则包的启用日。
-- **规则包冻结/切换日**：本项目把该规则及其阈值冻结进规则包的日期。规则包是**不可变快照**，
-  每次 run 按当时的规则包版本计算；`findings.csv` 的 `rule_version` 记录的是单条规则版本。
+- **规则包冻结日**：本项目把该规则及其阈值冻结进规则包、之后不再改动的日期。规则包是
+  **不可变快照**；冻结后只允许新建下一版，不回改旧包。
+- **规则包切换日**：本项目把**默认**规则包从上一版切到新版的日期（本版为 2026-11-05，v5 → v6）。
+  切换日只影响“未显式指定规则包”的新 run；已有包按包内 `rule_pack_version` 回放。
+  表中的“规则包冻结/切换日”合写两列；v6 的冻结日与切换日均为 2026-11-05。
+  每次 run 按当时的规则包版本计算；`findings.csv` 的 `rule_version` 记录的是单条规则版本（v6
+  run 统一为 v6）。
 
 **为什么 2025 年事件适用 2026 年规则包**：本工具不是立法机关，也不是在 2025 年做“当时法”的
 实时裁判；它是在导出/复核时，用**当时冻结的规则包快照**重算历史区间，并用单条 `rule_version`

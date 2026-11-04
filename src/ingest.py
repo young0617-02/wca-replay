@@ -407,7 +407,8 @@ class _DupGroup:
     line_max: int | None = None
     summary_key: tuple[str, int] | None = None
     summary_raw: str = ""
-    # day -> [count, samples[:3], refs[:5]]；refs = (rel_path, line_no, file_id)
+    # day -> [count, samples[:3], 全部 refs]；refs = (rel_path, line_no, file_id)
+    # refs 不截断：0.4.8 起批次 finding 必须能列出该批全部来源（不再只留前 5 条）。
     days: dict[str, list] = field(default_factory=dict)
     related_file_ids: set[int] = field(default_factory=set)
     canonical_file_ids: set[int] = field(default_factory=set)
@@ -437,8 +438,7 @@ class _DupGroup:
         meta[0] += 1
         if len(meta[1]) < 3:
             meta[1].append(str(issue.raw_value or ""))
-        if len(meta[2]) < 5:
-            meta[2].append((rel_path, line_no, target_file_id))
+        meta[2].append((rel_path, line_no, target_file_id))
 
     @property
     def file_ids(self) -> set[int]:
@@ -640,7 +640,8 @@ def _ingest_rows(conn: Connection, cfg: Config, *, file_id: int, kind: str,
                     if line_no not in new_lines:
                         params = payload[1]
                         issues.append(_seen_duplicate_issue(
-                            line_no, (params[0], params[1], params[5], params[4] or "")))
+                            line_no, (params[0], params[1], params[5], params[4] or ""),
+                            params[3]))
                         result.rows_rejected += 1
                         for iss in issues:
                             iss.emp_id = iss.emp_id or owner
@@ -750,12 +751,18 @@ def _row_org(conn, cfg: Config, raw: Mapping[str, Any], line_no: int, seen: set[
     return (sql, (org_id, org_name or org_id, parent or None)), issues
 
 
-def _seen_duplicate_issue(line_no: int, key: tuple) -> Issue:
-    """文件内完全重复行（key = emp_id, ts, ptype, device）。"""
-    return Issue("QUAL-DUP", SEV_DEFENSIBLE, line_no, "*",
-                 f"{key[0]}|{key[1]}|{key[2]}|{key[3]}",
-                 "完全重复的打卡行：只保留首次出现，重复行不进入事实表"
-                 "（可申辩：终端重复上传或补录）")
+def _seen_duplicate_issue(line_no: int, key: tuple, work_date: str = "") -> Issue:
+    """文件内完全重复行（key = emp_id, ts, ptype, device）。
+
+    必须带上该行实际发生日：0.4.8 起 QUAL-01 的重复批次按“实际发生日”聚合，
+    不能再落进空日期汇总条。日期来自打卡时间锚点，不依赖数据库状态。
+    """
+    issue = Issue("QUAL-DUP", SEV_DEFENSIBLE, line_no, "*",
+                  f"{key[0]}|{key[1]}|{key[2]}|{key[3]}",
+                  "完全重复的打卡行：只保留首次出现，重复行不进入事实表"
+                  "（可申辩：终端重复上传或补录）")
+    issue.work_date = work_date or None
+    return issue
 
 
 def _mark_seen_lines(conn: Connection, mode: str, candidates: list[tuple],
@@ -900,7 +907,7 @@ def _row_punch(conn, cfg: Config, raw: Mapping[str, Any], line_no: int, seen: se
     key = (emp_id, ts, ptype, device)
     if check_seen:
         if key in seen:
-            issues.append(_seen_duplicate_issue(line_no, key))
+            issues.append(_seen_duplicate_issue(line_no, key, anchor))
             return None, issues
         seen.add(key)
 

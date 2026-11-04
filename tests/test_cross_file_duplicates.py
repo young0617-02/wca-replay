@@ -87,10 +87,15 @@ def _punch_file_id(conn, rel_path: str) -> int:
     ).fetchone()["file_id"])
 
 
+def _dup_batches(out) -> list:
+    return [finding for finding in out.findings
+            if finding.rule_id == "QUAL-01" and "batch_id" in finding.metric]
+
+
 def _quality_refs(out) -> list[list[dict]]:
     return [
         finding.metric.get("line_refs") or []
-        for finding in out.findings if finding.rule_id == "QUAL-01"
+        for finding in _dup_batches(out)
     ]
 
 
@@ -110,9 +115,18 @@ def test_cross_file_duplicate_import_order_stable(tmp_path):
         assert a["manifest"]["triple"]["input_fingerprint"] == \
             b["manifest"]["triple"]["input_fingerprint"]
 
-        refs_a = _quality_refs(a["out"])
-        refs_b = _quality_refs(b["out"])
-        assert refs_a == refs_b == [[{"rel_path": "punch-a.csv", "line_no": 2}]]
+        batches_a = _dup_batches(a["out"])
+        batches_b = _dup_batches(b["out"])
+        assert len(batches_a) == len(batches_b) == 1
+        assert batches_a[0].work_date == batches_a[0].period_key == "2025-09-02"
+        assert batches_a[0].metric["batch_size"] == 1
+        assert batches_a[0].metric["sources"] == [{"rel_path": "punch-a.csv", "line_no": 2}]
+        assert batches_a[0].metric["batch_id"] == batches_b[0].metric["batch_id"]
+        assert _quality_refs(a["out"]) == _quality_refs(b["out"]) == [
+            [{"rel_path": "punch-a.csv", "line_no": 2}]]
+        # 不能残留空日期汇总条。
+        assert all(f.work_date and f.period_key
+                   for f in a["out"].findings if f.rule_id == "QUAL-01")
     finally:
         a["conn"].close()
         b["conn"].close()
@@ -137,10 +151,19 @@ def test_cross_file_duplicate_aggregate_import_order_stable(tmp_path):
         assert a["manifest"]["inputs_digest"] == b["manifest"]["inputs_digest"]
         assert a["manifest"]["triple"]["input_fingerprint"] == \
             b["manifest"]["triple"]["input_fingerprint"]
+        batches_a = _dup_batches(a["out"])
+        batches_b = _dup_batches(b["out"])
+        assert len(batches_a) == len(batches_b) == 1
+        batch_a = batches_a[0]
+        assert batch_a.metric["batch_size"] == 26
+        assert len(batch_a.metric["sources"]) == 26
+        assert batch_a.metric["batch_id"] == batches_b[0].metric["batch_id"]
+        assert batch_a.work_date == batch_a.period_key == "2025-09-02"
         refs_a = _quality_refs(a["out"])
         refs_b = _quality_refs(b["out"])
         assert refs_a == refs_b
-        assert refs_a and refs_a[0][0] == {"rel_path": "punch-a.csv", "line_no": 2}
+        assert len(refs_a[0]) == 26
+        assert refs_a[0][0] == {"rel_path": "punch-a.csv", "line_no": 2}
     finally:
         a["conn"].close()
         b["conn"].close()
