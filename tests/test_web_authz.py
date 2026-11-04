@@ -417,3 +417,30 @@ def test_decided_review_rows_stay_visible_with_amount(ui):
     assert "rv1" in page, "必须看得见是谁登记的"
     qa = client.get("/qa", params={"q": "我该拿多少加班费"}).text
     assert "12345" not in qa, "人工录入的金额不得串进问答视图"
+
+
+def test_rendered_pages_and_import_api_never_expose_db_keys(ui):
+    """A4：抓取实际渲染页面与 JSON 响应，断言无 DB 主键且来源行非空。"""
+    client, conn, cfg, out = ui
+    login(client, "rv1")
+    for path in ("/", "/review"):
+        page = client.get(path).text
+        assert "related_file_ids" not in page, f"{path} 渲染出 related_file_ids"
+        assert not re.search(r"\bfile_id\b", page), f"{path} 渲染出裸 file_id"
+    home = client.get("/").text
+    review = client.get("/review").text
+    # 来源行必须是 rel_path:line_no，而不是“—”
+    assert re.search(r"inline://ui-([a-z]+)-T-STD:\d+", home + review), \
+        "首页/复核台没有渲染出任何 rel_path:line_no 来源行"
+
+    # /api/import 的 JSON 响应不得回传 file_id；rel_path 必须是可读相对路径
+    login(client, "op1")
+    text = ("emp_id,event_ts,punch_type,device_id\n"
+            "T-STD,2025-09-02T09:00:00+08:00,in,DEV-1\n"
+            "T-STD,2025-09-02T20:00:00+08:00,out,DEV-1\n")
+    res = client.post("/api/import", json={"filename": "upload.csv", "content": text,
+                                          "kind": "punch", "region_code": cfg.region_code})
+    assert res.status_code == 200, res.text[:300]
+    body = res.json()
+    assert "file_id" not in json.dumps(body), "导入响应回传了 DB 主键"
+    assert body.get("rel_path", "").startswith("uploads/"), body
