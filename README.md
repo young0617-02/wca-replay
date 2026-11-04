@@ -102,8 +102,10 @@ citations, explanation` 九个规范字段；`source_rel_path`、`source_line_no
 
 **证据定位与两层输入摘要（0.4.4/0.4.5）**：`metric` 只保留数值与计量口径；证据定位元数据（表/区间/
 规则/聚合口径）放在 finding 的非 canonical `evidence` 块，由独立的 `evidence_digest` 覆盖，
-**不进入** `conclusion_digest`。v5 包里有 **24 条**带 evidence 的结论（6 VIOLATION + 17 REVIEW +
-1 DEFENSIBLE），逐条列在 `未覆盖清单.md` 的“证据定位（非单行结论）”一节。
+**不进入** `conclusion_digest`。v5 包里有 **24 条**带证据定位（`tables/window/rules/aggregation`）
+的结论（6 VIOLATION + 17 REVIEW + 1 DEFENSIBLE），逐条列在 `未覆盖清单.md` 的
+“证据定位（非单行结论）”一节；0.4.9 起另有 **1 条**重复批次 finding 仅带 `retained_refs`
+（被保留行的 `rel_path:line_no`），不计入这 24 条。
 `evidence_digest` 是**第五项外部门禁**：`wca-verify`/`wca replay` 必须同时传
 `--expect-evidence-digest`（或单包 anchor 文件的 `evidence_digest`，环境变量
 `WCA_EXPECT_EVIDENCE_DIGEST` 可兜底）才能 `RESULT OK`；缺失 → `RESULT PARTIAL`，错值 →

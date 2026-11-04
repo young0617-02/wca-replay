@@ -406,7 +406,9 @@ if TEST_URL:
                 writer = csv.DictWriter(fh, fieldnames=list(rows[0].keys()), lineterminator="\n")
                 writer.writeheader()
                 writer.writerows(rows)
-            import_csv_file(conn, cfg6, path, kind=kind, rel_path=name)
+            # 0.4.9 起新库首次使用即写入当前规则包的 genesis 纪元；这里必须先用 v5
+            # 建库并跑基线，再由 v6 的批文发布触发真实纪元切换，不能先以 v6 导入。
+            import_csv_file(conn, cfg5, path, kind=kind, rel_path=name)
 
         t0 = time.perf_counter()
         run_check(conn, cfg5, start=date(2025, 9, 2), end=date(2025, 9, 2), notes="pg v5 base")
