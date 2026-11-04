@@ -59,7 +59,8 @@ python verify.py --public-key <固定公钥文件> --expect-anchor "<四/五段>
 - **`NOT CHECKED` 含义**：只表示早退时尚未走到该检查，不等于“缺失/不符”。例如
   `ANCHOR SKIPPED (early exit)` 表示已传锚点、但前序检查先失败，不能据此判锚点缺失或错误；
   只有真正未传锚点才输出 `ANCHOR NOT CHECKED（未传外部锚点）`。
-- **anchor 对象与环境变量**：`anchor.json` 的 `packages` 是**对象**（key → 单包记录），不是数组；
+- **anchor 结构与环境变量**：`anchor.json` 的 `packages` 是**数组**（每项含
+  `role/file/sha256/anchor/…` 的单包记录），不是 key → 记录的映射；
   `--anchor-file` 只接受单包扁平 JSON，组合式文件会被拒绝。环境变量：`WCA_EXPECT_ANCHOR`
   （锚点）、`WCA_EXPECT_EVIDENCE_DIGEST`（证据定位摘要）；包 SHA 与 `artifacts_digest`
   只能走显式参数或单包 anchor 文件。
@@ -461,7 +462,7 @@ sha256 `25ad007314b54a46f83afcda8c0905d8aaf796472d6c872f7cef5159daf996f1`。
 中性表述 `pinned (key matches supplied pin; independent key_id verification not done)`，不再比
 `KEY-NOTE.txt` 更乐观；`RESULT OK` 只表示包内检查与四项外部比对通过，不是来源身份核验。
 `--anchor-file <单包 anchor.json>` 可一次提供 `anchor`/`package_sha256`/`artifacts_digest`，
-显式参数优先、文件兜底；组合式 `anchor.json` 的 `packages` 是对象，不能直接用于单包验算。
+显式参数优先、文件兜底；组合式 `anchor.json` 的 `packages` 是数组，不能直接用于单包验算。
 
 **0.4.1 对外材料修复**：
 - `policies/CONFIDENCE.md` 由导出器在文末写入“本包计数”（发现/已确认/`responsibility.signed`/
