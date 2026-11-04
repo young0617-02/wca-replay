@@ -105,9 +105,14 @@ def build_scope(conn: Connection, cfg: Config, calendar: HolidayCalendar, emp: R
 
     # O-2：导入期就尽力归属到人。旧实现靠 JOIN punch 反查，
     # 而「整行被拒收」的数据根本没进 punch，于是永远查不出来。
+    # 结论 metric 只用包内相对路径 + 行号；file_id 只留在 DB/内部引用。
+    file_paths = {int(row["file_id"]): str(row["rel_path"])
+                  for row in conn.execute("SELECT file_id, rel_path FROM raw_file").fetchall()}
     issues = conn.execute(
-        "SELECT rule_id, severity, field_name, raw_value, detail, file_id, line_no, work_date "
-        "FROM ingest_issue WHERE emp_id = ? ORDER BY file_id, line_no",
+        "SELECT i.rule_id, i.severity, i.field_name, i.raw_value, i.detail, "
+        "i.file_id, i.line_no, i.work_date "
+        "FROM ingest_issue i LEFT JOIN raw_file f ON f.file_id = i.file_id "
+        "WHERE i.emp_id = ? ORDER BY COALESCE(f.rel_path, ''), i.line_no",
         (emp["emp_id"],),
     ).fetchall()
     for r in issues:
@@ -131,12 +136,14 @@ def build_scope(conn: Connection, cfg: Config, calendar: HolidayCalendar, emp: R
                             "work_date": day,
                             "raw_value": (samples[idx] if idx < len(samples)
                                           else str(r["raw_value"] or "")),
+                            "rel_path": file_paths.get(int(file_id)) if file_id is not None else None,
                             "file_id": file_id, "line_no": line_no,
                         })
                 continue
         scope.quality_issues.append({
             "rule_id": r["rule_id"], "severity": r["severity"], "work_date": r["work_date"],
-            "raw_value": r["raw_value"], "file_id": r["file_id"], "line_no": r["line_no"],
+            "raw_value": r["raw_value"], "rel_path": file_paths.get(int(r["file_id"])),
+            "file_id": r["file_id"], "line_no": r["line_no"],
         })
 
     return scope
@@ -350,18 +357,34 @@ def _unattributed_findings(conn: Connection, cfg: Config) -> list[Finding]:
     旧行为是这类行只存在于 ingest_issue 与举证包 quality_issues.csv，
     既不进 finding 也不开复核单 —— 最该补录的数据反而没人看见。
     """
+    # 代表行按包内相对路径排序，不用 MIN(file_id)：数据库自增 ID 随导入顺序变化，
+    # 会让同一批输入在不同库里选到不同文件的同一规则代表行，进而改变结论摘要。
     rows = conn.execute(
-        "SELECT rule_id, severity, COUNT(*) AS c, MIN(file_id) AS file_id, MIN(line_no) AS line_no "
-        "FROM ingest_issue "
-        "WHERE (emp_id = '' OR emp_id NOT IN (SELECT emp_id FROM employee)) "
-        "GROUP BY rule_id, severity ORDER BY c DESC"
+        "SELECT i.rule_id, i.severity, i.file_id, i.line_no, f.rel_path "
+        "FROM ingest_issue i LEFT JOIN raw_file f ON f.file_id = i.file_id "
+        "WHERE (i.emp_id = '' OR i.emp_id NOT IN (SELECT emp_id FROM employee)) "
+        "ORDER BY COALESCE(f.rel_path, ''), i.line_no"
     ).fetchall()
     if not rows:
         return []
 
-    counts = {r["rule_id"]: int(r["c"]) for r in rows}
-    refs = [{"file_id": int(r["file_id"]), "line_no": int(r["line_no"])}
-            for r in rows if r["file_id"] is not None]
+    groups: dict[tuple[str, str], dict] = {}
+    for r in rows:
+        key = (str(r["rule_id"]), str(r["severity"]))
+        group = groups.get(key)
+        if group is None:
+            group = {"count": 0, "file_id": r["file_id"], "line_no": r["line_no"],
+                     "rel_path": r["rel_path"]}
+            groups[key] = group
+        group["count"] += 1
+    ordered = sorted(groups.items(), key=lambda kv: (-kv[1]["count"], kv[0]))
+    counts: dict[str, int] = {}
+    for (rule_id, _severity), group in ordered:
+        counts[rule_id] = int(group["count"])
+    source_refs = [{"file_id": int(g["file_id"]), "line_no": int(g["line_no"])}
+                   for _key, g in ordered if g["file_id"] is not None]
+    line_refs = [{"rel_path": g["rel_path"], "line_no": int(g["line_no"])}
+                 for _key, g in ordered if g["file_id"] is not None]
     return [Finding(
         rule_id="QUAL-02",
         rule_version=cfg.rule_pack_id,
@@ -373,9 +396,9 @@ def _unattributed_findings(conn: Connection, cfg: Config) -> list[Finding]:
             "须修正主数据或表头后重跑。原始行与文件指纹保留，可逐行反查。"
         ),
         citations=["policy.sz.attendance", "law.labor-contract.4"],
-        metric={"issue_rule_counts": counts, "line_refs": refs[:5],
+        metric={"issue_rule_counts": counts, "line_refs": line_refs[:5],
                 "total_rejected_lines": sum(counts.values())},
-        source_refs=refs[:5],
+        source_refs=source_refs[:5],
     )]
 
 

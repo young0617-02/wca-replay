@@ -35,7 +35,8 @@ PROJECTION_SPEC = "wca-projection-v1"
 #   employee.pseudonym、normal_hourly_cents、pay_base_*、is_manager、acl_scope；
 #   approval.recorded_at/version_no/published_at、org_unit.parent_id/org_name；
 #   raw_file.file_id / ingest_issue.file_id 是数据库分配序号，不作为业务字段；
-#   QUAL-01 的 line_refs 仍记录 file_id，跨库分配不同属于既有未覆盖边界。
+#   QUAL-01/02 的 line_refs 改用包内 rel_path + line_no，OFF-01 conflicts.sources 同样
+#   不再暴露 file_id；DB file_id 只留在 source_refs/内部查询，不进 canonical。
 PROJECTION_TABLE_FIELDS: dict[str, tuple[str, ...]] = {
     "employee": ("emp_id", "job_code", "org_id", "region_code", "worktime_regime",
                  "contract_approved_flex"),

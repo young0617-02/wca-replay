@@ -318,8 +318,8 @@ def _register_file(conn: Connection, rel: str, digest: str, kind: str,
                      (row_count, created_at, file_id))
         return file_id, True
     # 显式取号（MAX+1）而不是 autoincrement：回滚会连同 raw_file 行一起撤销，
-    # 下一次重跑仍拿到同一个 file_id。file_id 会写进 OFF-01 / QUAL-01 的 metric，
-    # 用序列取号会因回滚跳号而导致同一输入重跑摘要漂移。
+    # 下一次重跑仍拿到同一个 file_id。file_id 只用于内部查询与 source_refs 行级反查，
+    # 不进入 metric/canonical；用序列取号仍会因回滚跳号，影响 source_refs 的稳定排序。
     # 并发不同文件可能同时取到同一个 id，ON CONFLICT DO NOTHING 让后到者重取。
     for _ in range(8):
         next_id = int(conn.execute(

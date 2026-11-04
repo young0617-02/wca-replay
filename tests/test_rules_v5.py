@@ -224,8 +224,10 @@ def _conflict_day() -> DayFacts:
                      {"file_id": 5, "line_no": 2}],
         conflicts=[{
             "event_ts": "2025-11-04T09:00:00+08:00", "punch_type": "in",
-            "sources": [{"kind": "punch", "device_id": "DEV-1", "file_id": 4, "line_no": 1},
-                        {"kind": "punch", "device_id": "DEV-2", "file_id": 5, "line_no": 2}],
+            "sources": [{"kind": "punch", "device_id": "DEV-1",
+                         "rel_path": "punch.csv", "line_no": 1},
+                        {"kind": "punch", "device_id": "DEV-2",
+                         "rel_path": "punch.csv", "line_no": 2}],
         }],
     )
 

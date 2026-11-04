@@ -571,7 +571,7 @@ def rule_quality(emp: EmpScope, cfg: Config) -> list[Finding]:
                 "issue_rule_ids": rule_ids,
                 "issue_count": len(issues),
                 "sample_raw_values": [str(i.get("raw_value", ""))[:64] for i in issues[:3]],
-                "line_refs": [{"file_id": i.get("file_id"), "line_no": i.get("line_no")}
+                "line_refs": [{"rel_path": i.get("rel_path"), "line_no": i.get("line_no")}
                               for i in issues[:5]],
             },
             work_date=day_key or None,
@@ -593,7 +593,7 @@ def rule_quality(emp: EmpScope, cfg: Config) -> list[Finding]:
             {
                 "rejected_lines": len(items),
                 "issue_rule_ids": sorted({str(i["rule_id"]) for i in items}),
-                "line_refs": [{"file_id": i.get("file_id"), "line_no": i.get("line_no")}
+                "line_refs": [{"rel_path": i.get("rel_path"), "line_no": i.get("line_no")}
                               for i in items[:5]],
                 "sample_raw_values": [str(i.get("raw_value", ""))[:64] for i in items[:3]],
             },

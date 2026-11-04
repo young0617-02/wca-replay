@@ -1,10 +1,11 @@
-"""第四轮阻断项：evidence 定位元数据与 conclusion_digest 解耦。
+"""第五/六轮：evidence 定位元数据、跨 run/跨库输入摘要、QUAL 行引用稳定化。
 
-验收标准（用户第四轮原文）:
-  * 同一输入 + 同一规则包 → conclusion_digest 回到 01bd4403…；
-  * 同一批输入、不同 run 导包 → inputs_digest 完全相同；
-  * 只补一条 evidence 注释 → 只有 evidence_digest 变化；
-  * 删掉 evidence 块的新版本包 → EVIDENCE DIGEST 失败关闭。
+验收标准（第六轮）：移除 DB 自增 file_id 后，结论摘要必然改为新的稳定值；
+  * 同一批 CSV、同一规则包、换新库重导 → conclusion_digest == b9cc6fd0…；
+  * 反向导入顺序（punch/schedule 互换）→ conclusion_digest == b9cc6fd0…；
+  * inputs_digest 在两种情况下均为 aad527d1…；
+  * QUAL-01/QUAL-02 的 line_refs 只用 rel_path+line_no，不含 file_id。
+旧值 01bd4403… 只属于仍含 DB file_id 的 0.4.3 及更早包，移除 file_id 后不可能复现。
 """
 from __future__ import annotations
 
@@ -33,9 +34,17 @@ from src.package_verify import (conclusion_digest_from_findings,
 from src.util import canonical_json, manifest_checksum, sha256_hex
 
 ROOT = Path(__file__).resolve().parent.parent
-KNOWN_DIGEST = "01bd44034d61a8ead8248a1b7845b794488b46a26424c488bb525ff0d25ac10a"
+KNOWN_DIGEST = "b9cc6fd0ef4e60126e33afe36878f33c30291bf4fd87965b26525b98a68f4328"
+KNOWN_INPUTS_DIGEST = "aad527d187dad848924af8be868698a8da5e745ad31af4c3ff83d2d2e1d930a7"
+KNOWN_INPUT_FINGERPRINT = "8b3b54a09aa8ede51697b899ddf2d2e738262d6a612b9bee4e34037a6aa8456e"
+KNOWN_EVIDENCE_DIGEST = "01cb5aeb9fb18fefbd98fc52fe52096cce11cf880e9d48088a565dfc15daa904"
 
-# 与第三轮 handoff 相同的输入与扫描范围；这两个数字必须与第三轮实测一致。
+# 与第三/四/五轮 handoff 相同的输入与扫描范围；注意 01bd 是含 DB file_id 的旧值，
+# 本文件在 0.4.4 起用 rel_path 替代 file_id，稳定值是 b9cc。
+FULL_V5_ORDER = ("org", "employee", "approval", "schedule", "punch", "leave",
+                 "trip", "correction")
+FULL_V5_REVERSE_ORDER = ("org", "employee", "approval", "punch", "schedule", "leave",
+                         "trip", "correction")
 RAW_KINDS = {
     "org": "org", "employee": "employee", "approval_ledger": "approval",
     "schedule": "schedule", "punch": "punch", "leave": "leave",
@@ -123,10 +132,11 @@ def _resign(manifest: dict, key) -> None:
         manifest, key, manifest["chain_verification"]["head_hash"])
 
 
-def test_full_v5_conclusion_digest_returns_to_01bd4403(full_v5):
+def test_full_v5_conclusion_digest_is_stable_after_file_id_removal(full_v5):
     out = full_v5["out"]
     manifest = full_v5["manifest"]
     assert len(out.findings) == 116
+    # 0.4.1 的 01bd 含 QUAL line_refs 的 DB file_id；0.4.4 移除后必须变成新稳定值。
     assert out.conclusion_digest == KNOWN_DIGEST, out.conclusion_digest
     assert manifest["triple"]["conclusion_digest"] == KNOWN_DIGEST
     assert manifest["evidence_digest"]
@@ -137,6 +147,108 @@ def test_full_v5_conclusion_digest_returns_to_01bd4403(full_v5):
         "VIOLATION", "REVIEW", "DEFENSIBLE"}
     for finding in evidence_rows:
         assert not any(str(key).startswith("evidence_") for key in finding.metric), finding.metric
+
+
+def test_quality_line_refs_use_relative_paths_only(full_v5):
+    """QUAL-01/02 的 canonical metric 不得再出现 DB file_id。"""
+    seen = 0
+    for finding in full_v5["out"].findings:
+        if finding.rule_id not in ("QUAL-01", "QUAL-02"):
+            continue
+        refs = finding.metric.get("line_refs") or []
+        for ref in refs:
+            assert set(ref) == {"rel_path", "line_no"}, ref
+            assert isinstance(ref["rel_path"], str) and ref["rel_path"], ref
+            assert isinstance(ref["line_no"], int), ref
+            assert "file_id" not in ref
+            seen += 1
+    assert seen >= 1, "全量夹具应至少有一条 QUAL 行引用"
+    # OFF-01 的 conflicts.sources 也只用 rel_path + line_no。
+    for finding in full_v5["out"].findings:
+        if finding.rule_id != "OFF-01":
+            continue
+        for conflict in finding.metric.get("conflicts") or []:
+            for source in conflict.get("sources") or []:
+                assert set(source) == {"kind", "device_id", "rel_path", "line_no"}, source
+
+
+def _build_full_v5(work: Path, order: tuple[str, ...], key) -> dict:
+    """用同一批 data/raw CSV 在全新库里按指定顺序重导，返回 run 与包。"""
+    data_dir = work / "data"
+    data_dir.mkdir(parents=True)
+    for path in (ROOT / "data" / "raw").glob("*.csv"):
+        shutil.copy2(path, data_dir / path.name)
+    cfg = Config.load(
+        env_path=work / "nonexistent.env",
+        WCA_DB_BACKEND="sqlite",
+        WCA_DB_PATH=str(work / "db.sqlite3"),
+        WCA_DB_IDENTITY_PATH=str(work / "db_target.json"),
+        WCA_DATA_DIR=str(data_dir),
+        WCA_REPORTS_DIR=str(work / "reports"),
+        WCA_PACKAGES_DIR=str(work / "packages"),
+        WCA_USERS_PATH=str(work / "users.json"),
+        WCA_UPLOAD_DIR=str(work / "uploads"),
+        WCA_REGION_CODE="440300",
+        WCA_RULE_PACK="rp-2026.11.gd-pilot-standard.v5",
+        WCA_LLM_PROVIDER="stub",
+        WCA_EMBEDDING_BACKEND="bm25",
+        WCA_SQLITE_SYNCHRONOUS="OFF",
+    )
+    cfg.ensure_dirs()
+    conn = connect(cfg.db_path)
+    init_db(conn)
+    by_kind = {}
+    for path in data_dir.glob("*.csv"):
+        kind = RAW_KINDS.get(path.stem)
+        if kind:
+            by_kind[kind] = path
+    for kind in order:
+        if kind in by_kind:
+            path = by_kind[kind]
+            import_csv_file(conn, cfg, path, kind=kind, rel_path=path.name)
+    out = run_check(conn, cfg, start=date(2025, 9, 1), end=date(2026, 4, 30))
+    manifest = export_package(conn, cfg, out.run_id, signing_key=key)
+    return {"conn": conn, "cfg": cfg, "out": out, "manifest": manifest}
+
+
+def test_full_v5_cross_database_and_reverse_order_stable(full_v5, tmp_path):
+    """同一批 CSV、同一规则包：换新库重导与反向导入顺序都必须得到同一四联值。"""
+    reverse = _build_full_v5(tmp_path / "full-v5-reverse", FULL_V5_REVERSE_ORDER,
+                             full_v5["key"])
+    try:
+        assert len(full_v5["out"].findings) == 116
+        assert len(reverse["out"].findings) == 116
+        for label, item in (("forward", full_v5), ("reverse", reverse)):
+            assert item["out"].conclusion_digest == KNOWN_DIGEST, label
+            assert item["manifest"]["triple"]["conclusion_digest"] == KNOWN_DIGEST, label
+            assert item["manifest"]["inputs_digest"] == KNOWN_INPUTS_DIGEST, label
+            assert item["manifest"]["triple"]["input_fingerprint"] == \
+                KNOWN_INPUT_FINGERPRINT, label
+            assert item["manifest"]["evidence_digest"] == KNOWN_EVIDENCE_DIGEST, label
+
+        # 反向导入确实改变了 punch 的 DB file_id；摘要仍必须相同。
+        def file_id_of(conn, rel_path: str) -> int:
+            return int(conn.execute(
+                "SELECT file_id FROM raw_file WHERE rel_path = ?", (rel_path,)
+            ).fetchone()["file_id"])
+
+        assert file_id_of(full_v5["conn"], "punch.csv") != \
+            file_id_of(reverse["conn"], "punch.csv")
+        assert file_id_of(full_v5["conn"], "schedule.csv") != \
+            file_id_of(reverse["conn"], "schedule.csv")
+
+        for item in (full_v5, reverse):
+            seen = 0
+            for finding in item["out"].findings:
+                if finding.rule_id not in ("QUAL-01", "QUAL-02"):
+                    continue
+                for ref in finding.metric.get("line_refs") or []:
+                    assert set(ref) == {"rel_path", "line_no"}, ref
+                    assert ref["rel_path"] and "file_id" not in ref
+                    seen += 1
+            assert seen >= 1
+    finally:
+        reverse["conn"].close()
 
 
 def test_not_covered_lists_all_24_evidence_findings(full_v5):

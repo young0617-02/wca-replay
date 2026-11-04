@@ -99,9 +99,14 @@ def _readme(version: str, commit: str, wheel: str, build_time: str) -> str:
   period_key, severity, metric, citations, explanation` 九个规范字段；`source_rel_path`、
   `source_line_no`、`severity_label` 由 `artifact_sha256["findings.csv"]` 负责。
   **单个 `FINDINGS DIGEST OK` 不等于整张 `findings.csv` 未变**，必须同时 `ARTIFACTS OK`。
+- **数据库自增 ID 不进摘要**：0.4.4 起 `QUAL-01/QUAL-02` 的 `metric.line_refs` 与
+  `OFF-01` 的 `metric.conflicts.sources` 只记包内相对路径（`rel_path`）与行号，
+  不再记数据库 `file_id`；`source_refs` 仍可保留 `file_id` 供行级反查，但它不参与
+  `conclusion_digest`。同一批 CSV 换新库重导、或 punch/schedule 反向导入顺序，
+  `inputs_digest` 与 `conclusion_digest` 都必须相同。
 - **证据定位摘要**：`evidence_digest` 单独覆盖全部 finding 的 `evidence` 块
   （`tables/window/rules/aggregation`，固定字段序、空值 `null`、路径 `/`），**不进入**
-  `conclusion_digest`。0.4.3 起新包必须有该字段；旧包缺失按 `NOT CHECKED` 分档，
+  `conclusion_digest`。0.4.3 起（0.4.4 延续）新包必须有该字段；旧包缺失按 `NOT CHECKED` 分档，
   且不能因此给 `RESULT OK`。签名者可能作恶或私钥失窃，**必须**用包外
   `--expect-evidence-digest` 锚定，不能只看包内 manifest。
 - **两层输入摘要**：`input_fingerprint` 是内容与范围指纹（输入文件内容/引用范围/规则参数）；
@@ -175,7 +180,7 @@ py -3.12 -m venv .venv-clean
 **不等于“缺失/不符”**；已传入锚点但前序失败时输出 `ANCHOR SKIPPED (early exit)`，与
 “未提供锚点”的 `ANCHOR NOT CHECKED（未传外部锚点）` 彻底分开。`ARTIFACTS FAIL` 行会带具体
 失败文件名；`FINDINGS DIGEST OK` 会带后缀 `(9 fields; source_* not covered by digest)`；
-`EVIDENCE DIGEST` 在 0.4.3 新包上内部必须 `OK`，且外部 `evidence_digest` 必须匹配；
+`EVIDENCE DIGEST` 在 0.4.3+ 新包上内部必须 `OK`，且外部 `evidence_digest` 必须匹配；
 新版本包缺字段会 `FAIL` 失败关闭，无 producer 或 producer.version < 0.4.3 的旧包输出
 `NOT CHECKED`（明确不能给 `RESULT OK`）。
 `input_fingerprint` 与 `inputs_digest` 的分工见上；`inputs_digest` 不含 `run_id`/DB `file_id`，

@@ -111,11 +111,12 @@ def test_o2_rejected_row_becomes_a_conclusion_and_a_review_item(conn, cfg):
     assert _m(qual[0])["rejected_lines"] == 1
     assert "QUAL-TS" in _m(qual[0])["issue_rule_ids"]
 
-    # A7 反查：结论里带的行号要能回到原始文件与原始行
+    # A7 反查：结论里带的相对路径 + 行号要能回到原始文件与原始行
     refs = _m(qual[0])["line_refs"]
-    assert refs and refs[0]["file_id"] == res.file_id
-    got = conn.execute("SELECT rel_path, sha256 FROM raw_file WHERE file_id = ?",
-                       (refs[0]["file_id"],)).fetchone()
+    assert refs and refs[0]["rel_path"] == "inline://o2-rejected"
+    assert "file_id" not in refs[0]
+    got = conn.execute("SELECT rel_path, sha256 FROM raw_file WHERE rel_path = ?",
+                       (refs[0]["rel_path"],)).fetchone()
     assert got["rel_path"] == "inline://o2-rejected" and len(got["sha256"]) == 64
 
     # 自动开单：质量缺口进复核队列（旧行为是零条）

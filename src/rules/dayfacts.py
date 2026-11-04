@@ -30,6 +30,7 @@ class PunchEvent:
     raw_text: str
     file_id: int | None
     line_no: int | None
+    rel_path: str | None = None
     device_id: str = ""
     from_correction: bool = False
 
@@ -134,6 +135,8 @@ def load_employee_bundle(conn: Connection, cfg: Config, emp_id: str,
 
     punches: dict[str, list[PunchEvent]] = {}
     punch_refs: dict[str, list[dict]] = {}
+    file_paths = {int(row["file_id"]): str(row["rel_path"])
+                  for row in conn.execute("SELECT file_id, rel_path FROM raw_file").fetchall()}
     for r in conn.execute(
         "SELECT punch_id, event_ts, punch_type, raw_text, day_anchor, device_id, "
         "source_file_id, source_line_no "
@@ -142,6 +145,8 @@ def load_employee_bundle(conn: Connection, cfg: Config, emp_id: str,
         punches.setdefault(r["day_anchor"], []).append(PunchEvent(
             ts=parse_timestamp(r["event_ts"]), punch_type=r["punch_type"], raw_text=r["raw_text"],
             file_id=r["source_file_id"], line_no=r["source_line_no"],
+            rel_path=(file_paths.get(int(r["source_file_id"]))
+                      if r["source_file_id"] is not None else None),
             device_id=str(r["device_id"] or "")))
         if r["source_file_id"] is not None:
             punch_refs.setdefault(r["day_anchor"], []).append(
@@ -158,7 +163,10 @@ def load_employee_bundle(conn: Connection, cfg: Config, emp_id: str,
         anchor = _anchor_day(ts, cfg.cross_day_cut_hour).isoformat()
         corrections.setdefault(anchor, []).append(PunchEvent(
             ts=ts, punch_type=c["claimed_type"], raw_text="correction:" + c["claimed_type"],
-            file_id=c["source_file_id"], line_no=c["source_line_no"], from_correction=True))
+            file_id=c["source_file_id"], line_no=c["source_line_no"],
+            rel_path=(file_paths.get(int(c["source_file_id"]))
+                      if c["source_file_id"] is not None else None),
+            from_correction=True))
         if c["source_file_id"] is not None:
             corr_refs.setdefault(anchor, []).append(
                 {"file_id": c["source_file_id"], "line_no": c["source_line_no"]})
@@ -219,7 +227,7 @@ def compute_day_facts(bundle: EmployeeBundle, cfg: Config, calendar: HolidayCale
         by_event.setdefault((iso_minute(event.ts), event.punch_type), []).append(event)
     for (event_ts, punch_type), group in sorted(by_event.items()):
         identities = {
-            (e.from_correction, e.device_id, e.file_id, e.line_no) for e in group
+            (e.from_correction, e.device_id, e.rel_path, e.line_no) for e in group
         }
         if len(identities) < 2:
             continue
@@ -228,9 +236,9 @@ def compute_day_facts(bundle: EmployeeBundle, cfg: Config, calendar: HolidayCale
             "punch_type": punch_type,
             "sources": [
                 {"kind": "correction" if e.from_correction else "punch",
-                 "device_id": e.device_id, "file_id": e.file_id, "line_no": e.line_no}
+                 "device_id": e.device_id, "rel_path": e.rel_path, "line_no": e.line_no}
                 for e in sorted(group, key=lambda x: (x.from_correction, x.device_id,
-                                                      str(x.file_id), str(x.line_no)))
+                                                      str(x.rel_path), str(x.line_no)))
             ],
         })
 
