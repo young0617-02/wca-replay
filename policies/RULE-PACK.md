@@ -27,8 +27,10 @@
 **新库 genesis 纪元（0.4.9 起）**：库内既无审计事件也无纪元行时，首次使用会直接写入一条
 `prev_rule_pack_version='genesis'` 的 `rule_pack_epoch`（版本、生效时刻、`segment_start_seq=1`、
 `segment_start_prev_hash` 均为显式值）；随后第一个 run 的审计事件落在该段。因此“新库没有纪元
-记录”不再是常态。`prev_rule_pack_version='legacy'` 只保留给**既有历史库**（已有审计事件但
-从未记录纪元）迁移时使用，不是新库语义。
+记录”不再是常态。`meta.audit_genesis` 是**纪元起点记录**（记录该段起点哈希与版本），不是
+`audit_event`，不占 `seq`，也不出现在审计链事件列表里；不要把它与 `audit_event` 混为一谈。
+`prev_rule_pack_version='legacy'` 只保留给**既有历史库**（已有审计事件但从未记录纪元）迁移时
+使用，不是新库语义。
 
 旧包不回改、不重签：v5 包继续用 0.4.7 wheel 回放，v6 包用 0.4.8 wheel；配对关系见
 `OLD-WHEELS.md` 与 README。切换按 run 时版本计算，不是立法溯及。
@@ -81,7 +83,9 @@
   用 `\n` 连接后取 SHA-256；不含 DB 自增、`file_id`、`run_id`、计数器或时间戳。
 - `metric.batch_size` 是该批**重复行**条数；`metric.sources` 列出该批全部重复行，不截断为
   前 3/5 条。首次出现行仍是事实表保留的那一条，**不进批次**；`quality_issues.csv` 同一批只输出
-  1 行，`detail` 同时列“重复行来源”与“首次出现行（不重复计）”，两处均给 `rel_path:line_no`。
+  1 行，`detail` 只列“重复行来源”（`rel_path:line_no`），**不列首次出现行**。
+  首次出现行的物理位置不在 `detail` 里，而在该批次 finding 的非 canonical
+  `evidence.retained_refs`（0.4.9 起，`finding.evidence`，不进 `conclusion_digest`）。
 - 被拒收的无日期输入行仍由 `QUAL-02` 单独呈现；这是**有意保留**的事实缺口提示，
   不属于重复批次汇总，也不会被并入 `QUAL-01` 的批次 finding。
 

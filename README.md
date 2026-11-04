@@ -122,8 +122,11 @@ citations, explanation` 九个规范字段；`source_rel_path`、`source_line_no
 含 `file_id=4`，移除后不可能复现；不要把旧值当成本轮目标。0.4.5 起同一打卡内容出现在
 多个 punch CSV 时，`QUAL-DUP` 行引用按 `rel_path` 字典序确定，全部来源纳入包内输入；
 单 `punch.csv` 场景在 0.4.5–0.4.7 曾保持 `b9cc6fd0… / 01cb5aeb… / aad527d1… / 8b3b54a0…`；
-0.4.8 批次语义后 `conclusion_digest` 统一为 `5dc46558…`、`evidence_digest` 为 `4654a3c7…`，
-`inputs_digest` 与 `input_fingerprint` 仍为 `aad527d1… / 8b3b54a0…`（旧包值只作历史对照）。
+0.4.8 批次语义后 `conclusion_digest` 统一为 `5dc46558…`、`evidence_digest` 为 `4654a3c7…`；
+0.4.9 起批次 finding 增加 `evidence.retained_refs`，四主包 `evidence_digest` 为 `ed3b3f1b…`，
+`conclusion_digest` 仍 `5dc46558…`；0.4.10 只改锚点校验与文档，`conclusion_digest` /
+`evidence_digest` / `inputs_digest` / `input_fingerprint` 均与 0.4.9 相同。`inputs_digest` 与
+`input_fingerprint` 仍为 `aad527d1… / 8b3b54a0…`（旧包值只作历史对照）。
 
 ### 跨数据库后端可复算（0.4.8）
 
@@ -285,8 +288,25 @@ UTF-8 字节序排序，用换行符连接，取 SHA-256 十六进制小写摘�
    比对输出 `RESULT INCOMPARABLE`（**exit 3**），不是 `FAIL`。同版本同 schema 摘要不符仍是
    `FAIL`（exit 1）；缺字段/缺签名仍按原规则失败关闭，**不因 INCOMPARABLE 放宽任何真失败**。
    旧锚点按版本命名（`anchor-<version>-<role>.json`），新版本不覆盖旧文件。
-   **退出码**：0 = OK；1 = FAIL（内容/摘要/签名/工件真实不符）；2 = PARTIAL（外部门禁缺失）；
-   3 = INCOMPARABLE（锚点与包跨版本或跨 schema，不可比）。
+   **退出码（完整表）**：
+
+| 退出码 | 标签 | 含义 | 脚本处置 |
+| --- | --- | --- | --- |
+| 0 | `RESULT OK` | 包体、工件、审计链、输入、签名、外部锚点与摘要全部一致 | 可通过 |
+| 1 | `RESULT FAIL` | 同版本同 schema 下内容/摘要/签名/工件真实不符，或锚点文件自相矛盾 | **阻断**，按篡改/损坏调查 |
+| 2 | `RESULT PARTIAL` | 外部门禁缺失（如未传 artifacts_digest / evidence_digest） | **不得当通过**；补齐门禁后重跑 |
+| 3 | `RESULT INCOMPARABLE` | 锚点与包跨 `rule_pack_version`/schema，或锚点文件缺 `comparability_scope` | **不得当通过，也不得当篡改**；转人工核对版本，改用对应版本锚点与 wheel |
+
+   **锚点文件缺 `comparability_scope`（0.4.10）**：只要传了带 `anchor` 串的锚点文件却缺
+   `comparability_scope`，输出 `RESULT INCOMPARABLE`（exit 3），**不静默按可比处理**；
+   仅用 `--expect-anchor` 命令行串时，串本身已声明的 schema/rule_pack 就是可比范围，行为不变。
+   新版本锚点文件必须带该字段；旧文件缺字段时请按 3 处理并换新版本锚点。
+   **锚点冗余字段校验（0.4.10）**：锚点文件除 `anchor` 串外若还写了 `schema` /
+   `rule_pack_version` / `input_fingerprint` / `conclusion_digest`，必须与串解出值逐项一致；
+   不一致报 `ANCHOR SELF-CONFLICT` 并 `FAIL`（exit 1）。校验逻辑在
+   `load_anchor_record`，`wca-verify` 与 `wca replay` 共用。
+   **多包组合式 `anchor.json`** 不能直接传给 `--anchor-file`；单包验算请用
+   `anchor-<version>-<role>.json`。
    **`PRODUCER FAIL` ≠ 篡改**：用新版 wheel 验旧包会先报 `PRODUCER FAIL`，签名检查早退为
    `SIGNATURE NOT CHECKED`；这是 wheel/包版本配对问题，应改用对应版本旧 wheel，不能据此认定包被改。
    **交付验收必须两条一起跑**：`wca-verify` 校验包体完整性、工件绑定、审计链、输入逐文件哈希、
