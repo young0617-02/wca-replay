@@ -42,6 +42,7 @@ from ..db import Connection, DatabaseError, get_meta
 from ..engine import run_check
 from ..evidence import ExportBusyError, export_package, record_delivery_event
 from ..ingest import import_csv_file
+from ..package_inputs import redact_issue_detail
 from ..region_profile import RegionProfileError
 from ..rules.approval_docs import (APPROVAL_READ_ROLES, APPROVAL_WRITE_ROLES,
                                    ApprovalConflictError, VALID_REGIMES,
@@ -206,7 +207,7 @@ def register_web_routes(app: Any, cfg: Config, get_conn) -> None:
         return page(request, "index.html", {
             "me": _user_view(user), "run_id": run_id,
             "anomalies": anomalies[:120], "rollup": severity_rollup(anomalies),
-            "issues": [dict(i) for i in issues],
+            "issues": [dict(i, detail=redact_issue_detail(i["detail"])) for i in issues],
             "reject_count": int(conn.execute("SELECT COUNT(*) c FROM ingest_issue "
                                              "WHERE severity = 'REJECT'").fetchone()["c"]),
             "hits": rule_hit_counts(conn, run_id) if run_id else [],
@@ -237,18 +238,21 @@ def register_web_routes(app: Any, cfg: Config, get_conn) -> None:
         target.write_bytes(text.encode("utf-8"))
         kind = str(body.get("kind") or "").strip() or None
         try:
-            res = import_csv_file(conn, cfg, target, kind=kind, actor=f"user:{user.username}")
+            res = import_csv_file(conn, cfg, target, kind=kind,
+                                  rel_path=f"uploads/{name}",
+                                  actor=f"user:{user.username}")
         except ValueError as exc:
             # 文件名推不出类型时不猜：让界面提示操作人选数据类型
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {"file_id": res.file_id, "rel_path": res.rel_path, "sha256": res.sha256,
+        return {"rel_path": res.rel_path, "sha256": res.sha256,
                 "kind": res.kind, "rows_seen": res.rows_seen, "rows_accepted": res.rows_accepted,
                 "rows_rejected": res.rows_rejected, "issue_count": len(res.issues),
                 "reimported": res.reimported, "unattributed": res.unattributed,
                 "write_mode": res.write_mode, "requested_write_mode": res.requested_write_mode,
                 "degraded_from": res.degraded_from, "chunk_rows": res.chunk_rows,
                 "issues": [{"rule_id": i.rule_id, "line_no": i.line_no, "field": i.field_name,
-                            "detail": i.detail} for i in res.issues[:60]]}
+                            "detail": redact_issue_detail(i.detail)}
+                           for i in res.issues[:60]]}
 
     @app.post("/api/check", summary="选城市档 + 规则版本发起校验（与 cli check 同一函数，带 CSRF）")
     def api_check(request: Request, body: dict, conn: Connection = Depends(get_conn),
@@ -281,13 +285,15 @@ def register_web_routes(app: Any, cfg: Config, get_conn) -> None:
                     user: User = Depends(principal)):
         require(user, *REVIEWER_ROLES)
         run_id = get_meta(conn, "last_run_id")
+        file_map = {int(r["file_id"]): r["rel_path"]
+                    for r in conn.execute("SELECT file_id, rel_path FROM raw_file")}
         return page(request, "review.html", {
             "me": _user_view(user), "run_id": run_id,
-            "queue": [_decorate_review_row(r) for r in
+            "queue": [_decorate_review_row(r, file_map) for r in
                       review_queue(conn, run_id=run_id, only_open=True, limit=150)],
             # 已登记的要能回看（含人工录入的金额与录入人/时间），否则"责任落到人"这句话
             # 在界面上只存在于登记的那一瞬间
-            "decided_rows": [_decorate_review_row(r) for r in
+            "decided_rows": [_decorate_review_row(r, file_map) for r in
                              review_queue(conn, run_id=run_id, only_open=False, limit=40)
                              if r["status"] != "OPEN"],
             "decided": int(conn.execute("SELECT COUNT(*) c FROM review_item "
@@ -580,10 +586,12 @@ def _user_count(conn: Connection) -> int:
         return 0
 
 
-def _decorate_review_row(row: dict) -> dict:
-    """复核台一行需要的东西：条文列表 + 可点开的原始行号（file:line）。
+def _decorate_review_row(row: dict, file_map: dict[int, str] | None = None) -> dict:
+    """复核台一行需要的东西：条文列表 + 可点开的原始行号（rel_path:line_no）。
 
-    库里存的是 JSON 文本，渲染前解出来；解不动就原样带上并在界面显示为空，不编造行号。
+    `source_refs` 只存 DB file_id，渲染前用 `file_map` 还原相对路径；
+    若 `source_refs` 为空，则回退 `metric_json.line_refs`（QUAL-01/02 等
+    结论的行级位置记在 metric 里）。两者都没有才留空，不编造行号。
     """
     out = dict(row)
     for key, target in (("citation_ids", "citations"), ("source_refs", "refs")):
@@ -595,9 +603,33 @@ def _decorate_review_row(row: dict) -> dict:
                 out[target] = []
         elif out.get(target) is None:
             out[target] = []
-    refs = out.get("refs") or []
-    out["line_refs"] = " · ".join(f"{r.get('rel_path') or '?'}:{r.get('line_no', '?')}"
-                                 for r in refs[:3]) or ""
+    refs = list(out.get("refs") or [])
+    if not refs:
+        metric = out.get("metric_json")
+        if isinstance(metric, str) and metric:
+            try:
+                metric_doc = json.loads(metric)
+            except (ValueError, TypeError):
+                metric_doc = {}
+            refs = list(metric_doc.get("line_refs") or [])
+    paths = []
+    clean_refs = []
+    for ref in refs[:3]:
+        rel = ref.get("rel_path")
+        if not rel and file_map:
+            fid = ref.get("file_id")
+            if fid is not None:
+                rel = file_map.get(int(fid))
+        if rel:
+            line_no = ref.get("line_no", "?")
+            paths.append(f"{rel}:{line_no}")
+            clean_refs.append({"rel_path": rel, "line_no": line_no})
+    # A4：渲染结果只保留 rel_path:line_no；DB 主键（file_id/source_refs 原文）不出模板。
+    out["refs"] = clean_refs
+    out.pop("source_refs", None)
+    out["line_refs"] = " · ".join(paths)
     if not out.get("citations"):
         out["citations"] = []
+    if "detail" in out:
+        out["detail"] = redact_issue_detail(out.get("detail"))
     return out

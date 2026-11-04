@@ -93,7 +93,7 @@ def test_export_package_contains_triple_and_chain(conn, cfg):
     assert manifest["triple"]["input_fingerprint"] == out.input_fingerprint
     assert manifest["triple"]["conclusion_digest"] == out.conclusion_digest
     assert manifest["chain_verification"]["ok"] is True
-    zip_path = cfg.packages_dir / f"{out.run_id}.zip"
+    zip_path = Path(manifest["package_zip"])
     assert zip_path.is_file()
     with zipfile.ZipFile(zip_path) as zf:
         names = set(zf.namelist())
@@ -120,7 +120,7 @@ def test_exported_package_reproduces_same_triple(conn, cfg):
     import zipfile
     from src.util import sha256_hex
 
-    with zipfile.ZipFile(cfg.packages_dir / f"{first.run_id}.zip") as z1,             zipfile.ZipFile(cfg.packages_dir / f"{again.run_id}.zip") as z2:
+    with zipfile.ZipFile(Path(m1["package_zip"])) as z1,             zipfile.ZipFile(Path(m2["package_zip"])) as z2:
         assert sha256_hex(z1.read("findings.csv")) == sha256_hex(z2.read("findings.csv"))
         assert sha256_hex(z1.read("input_files.csv")) == sha256_hex(z2.read("input_files.csv"))
 
@@ -160,7 +160,7 @@ def test_unsigned_findings_never_reach_the_conclusion_set(conn, cfg):
     assert cold["counts"]["findings"] > 0
     assert cold["counts"]["final_conclusions"] == 0
     assert cold["counts"]["unsigned_pending"] == cold["counts"]["findings"]
-    with zipfile.ZipFile(cfg.packages_dir / f"{out.run_id}.zip") as zf:
+    with zipfile.ZipFile(Path(cold["package_zip"])) as zf:
         lines = zf.read("conclusions_final.csv").decode("utf-8").strip().split(chr(10))
         assert len(lines) == 1, f"未复核时结论集只应有表头：{lines}"
 
@@ -172,7 +172,7 @@ def test_unsigned_findings_never_reach_the_conclusion_set(conn, cfg):
     warm = export_package(conn, cfg, out.run_id)
     assert warm["counts"]["final_conclusions"] == 1, "登记了几条就进几条，不多不少"
     assert warm["counts"]["unsigned_pending"] == warm["counts"]["findings"] - 1
-    with zipfile.ZipFile(cfg.packages_dir / f"{out.run_id}.zip") as zf:
+    with zipfile.ZipFile(Path(warm["package_zip"])) as zf:
         body = zf.read("conclusions_final.csv").decode("utf-8")
         assert body.strip().count(chr(10)) == 1, "结论集必须只有那一条已确认记录"
         assert "rv1" in body and "amount_cents_input" not in body
@@ -252,7 +252,7 @@ def test_package_declares_what_it_does_not_cover(conn, cfg):
     manifest = export_package(conn, cfg, out.run_id)
     assert manifest["not_covered"]["rules_excluded"] == [r["rule_id"] for r in nc["rules_excluded"]]
     assert manifest["not_covered"]["not_tested_count"] == len(nc["not_tested"])
-    with zipfile.ZipFile(cfg.packages_dir / f"{out.run_id}.zip") as zf:
+    with zipfile.ZipFile(Path(manifest["package_zip"])) as zf:
         names = set(zf.namelist())
         assert {"not_covered.json", "未覆盖清单.md"} <= names
         md = zf.read("未覆盖清单.md").decode("utf-8")
@@ -297,8 +297,8 @@ def test_responsibility_block_separates_machine_and_human(conn, cfg):
     assert "本 run" in resp["ai_participation_scope_note"], "问答留痕必须标明按 run 过滤"
 
     assert resp["signed"] is False, "没签字就不能显示成已签发"
-    export_package(conn, cfg, out.run_id)
-    with zipfile.ZipFile(cfg.packages_dir / f"{out.run_id}.zip") as zf:
+    manifest = export_package(conn, cfg, out.run_id)
+    with zipfile.ZipFile(Path(manifest["package_zip"])) as zf:
         in_zip = json.loads(zf.read("responsibility.json").decode("utf-8"))
         assert in_zip["human_confirmed_findings"] == 1
         assert in_zip["ai_participation_count"] == 1

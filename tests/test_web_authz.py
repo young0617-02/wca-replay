@@ -160,7 +160,8 @@ def test_ui_parity_two_channels_agree(ui):
     script_side_csv = cfg.data_dir / "parity-punch.csv"
     script_side_csv.parent.mkdir(parents=True, exist_ok=True)
     script_side_csv.write_bytes(csv_text.encode("utf-8"))   # 文本模式会改写行尾，指纹按字节算
-    imported = import_csv_file(conn, cfg, script_side_csv)
+    imported = import_csv_file(conn, cfg, script_side_csv, kind="punch",
+                               rel_path="parity-punch.csv")
 
     # 界面通道：同样的内容用 /api/import 提交（不同文件名、相同字节）
     res = client.post("/api/import", json={"filename": "parity-ui-punch.csv",

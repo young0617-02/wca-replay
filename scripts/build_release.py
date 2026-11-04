@@ -38,6 +38,9 @@ from src.util import (EVIDENCE_PACKAGE_SCHEMA_V1, EVIDENCE_PACKAGE_SCHEMA_V2,  #
 RELEASE_PREFIX = "wca-replay-"
 RELEASE_INFO_SOURCE = ROOT / "src" / "_release_info.py"
 SUPPORTED_RULE_PACKS = [RULE_PACK_V4, RULE_PACK_V5, RULE_PACK_V6]
+# 发行物签名钥是客户验“wheel 是谁发的”的外部锚点：必须持久，不能每版更换。
+# 0.4.1–0.4.5 使用该钥；0.4.6 误用了包签名钥 b07741b2…（第九轮 A7），0.4.7 恢复。
+EXPECTED_RELEASE_KEY_ID = "ed25519:5e797e18"
 SCHEMA_VERSIONS = [EVIDENCE_PACKAGE_SCHEMA_V1, EVIDENCE_PACKAGE_SCHEMA_V2,
                    EVIDENCE_PACKAGE_SCHEMA_V3]
 
@@ -264,6 +267,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--signing-key", default=os.environ.get("WCA_RELEASE_SIGNING_KEY"),
                         help="Ed25519 私钥路径；给出时生成 SHA256SUMS.sig 与 "
                              "VERIFY-SIGNATURE.txt（也可用 WCA_RELEASE_SIGNING_KEY）")
+    parser.add_argument("--allow-key-rotation", default="", metavar="理由",
+                        help="显式允许发行钥轮换，并把理由写入 RELEASE.json；"
+                             "不给理由时 key_id 不匹配会直接失败")
     args = parser.parse_args(argv)
 
     version = _project_version()
@@ -331,6 +337,14 @@ def main(argv: list[str] | None = None) -> int:
     if signing_key is not None:
         public_b64 = signing.public_key_b64(signing_key.verify_key.encode())
         key_id = signing.key_id_for_public_key(signing_key.verify_key.encode())
+        if not key_id.startswith(EXPECTED_RELEASE_KEY_ID):
+            if not args.allow_key_rotation:
+                raise SystemExit(
+                    f"发行签名钥 key_id={key_id} 与记录的发行钥 "
+                    f"{EXPECTED_RELEASE_KEY_ID}… 不一致。\n"
+                    "发行钥是客户的信任锚点，禁止静默轮换；请改用 "
+                    "`--signing-key var/release-keys/ed25519.key`。\n"
+                    "确需轮换时传 --allow-key-rotation \"<原因>\"，并同步更新 KEY-NOTE.")
         release["release_signature"] = {
             "file": "SHA256SUMS.sig",
             "algorithm": "Ed25519",
@@ -340,6 +354,8 @@ def main(argv: list[str] | None = None) -> int:
             "scope": "SHA256SUMS 覆盖除 SHA256SUMS.sig 与自身外的发行文件",
             "note": "签名只证明 SHA256SUMS 与私钥匹配；来源身份需独立核验 key_id",
         }
+        if args.allow_key_rotation:
+            release["release_signature"]["rotation_reason"] = args.allow_key_rotation
     release_json = release_dir / "RELEASE.json"
     release_json.write_text(json.dumps(release, ensure_ascii=False, indent=2) + "\n",
                             encoding="utf-8")

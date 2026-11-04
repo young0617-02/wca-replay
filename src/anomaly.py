@@ -73,9 +73,15 @@ def build_anomalies(conn: Connection, run_id: str) -> list[AnomalyItem]:
             grouped[key] = item
         item.rule_ids.append(r["rule_id"])
         item.citations.extend(json.loads(r["citation_ids"]))
-        item.metrics[r["rule_id"]] = json.loads(r["metric_json"])
+        metric_doc = json.loads(r["metric_json"])
+        item.metrics[r["rule_id"]] = metric_doc
         item.explanations.append(r["explanation"])
-        for ref in _with_rel_path(conn, json.loads(r["source_refs"])):
+        refs = json.loads(r["source_refs"])
+        if not refs:
+            # QUAL-01/02 等结论的行级位置记在 metric.line_refs；source_refs 为空时回退，
+            # 否则界面“来源行”会空白（第九轮 A4）。
+            refs = metric_doc.get("line_refs") or []
+        for ref in _with_rel_path(conn, refs):
             if ref not in item.source_refs:
                 item.source_refs.append(ref)
         if SEV_RANK[r["severity"]] > SEV_RANK[item.severity]:
@@ -99,8 +105,8 @@ def _with_rel_path(conn: Connection, refs: list[dict]) -> list[dict]:
     out = []
     for ref in refs:
         fid = ref.get("file_id")
-        rel = ""
-        if fid is not None:
+        rel = str(ref.get("rel_path") or "")
+        if not rel and fid is not None:
             row = conn.execute("SELECT rel_path FROM raw_file WHERE file_id = ?", (fid,)).fetchone()
             rel = row["rel_path"] if row else ""
         out.append({"rel_path": rel, "line_no": ref.get("line_no")})

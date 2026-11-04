@@ -27,7 +27,7 @@ from .config import Config, PROJECT_ROOT
 from .db import (DB_BACKEND_POSTGRES, Connection, column_exists, get_meta, set_meta,
                  table_exists, transaction_if_needed)
 from .evidence_digest import evidence_digest as compute_evidence_digest
-from .package_inputs import input_arcnames
+from .package_inputs import input_arcnames, redact_issue_detail
 from .rules.approvals import export_approval_csv, export_coverage_csv
 from .rules.rulepack import RULE_PACK_V4, RULE_PACK_V5, RULE_PACK_V6
 from .util import (CN_TZ, CSV_FORMULA_ESCAPE, EVIDENCE_PACKAGE_SCHEMA,
@@ -441,7 +441,11 @@ PACKAGE_README = (
     "结论摘要必须逐字节一致。\r\n"
     "本包不含任何应付金额：引擎只输出小时数与法定倍数档位，金额由 HR 负责人在复核台具名录入。\r\n"
     "包内 inputs/ 带本次结论真正依赖的原始 CSV；v5 另带审批台账 approval_ledger.csv，"
-    "选择规则见 manifest.inputs.selection_rule。audit_chain.jsonl 是本次 run 的链前缀"
+    "选择规则见 manifest.inputs.selection_rule。"
+    "注意：approval_ledger.csv / approval_coverage.csv 由数据库确定性重导出"
+    "（UTF-8 无 BOM、LF），不是原始上传字节，原始字节未随包保留；"
+    "该事实记录在 manifest.inputs.approval_export。"
+    "audit_chain.jsonl 是本次 run 的链前缀"
     "（到该 run 最后一条事件），边界见 manifest.audit_window。"
     "包内 verify.py 只是便利脚本，**不是信任依据**；正式验收应使用发行 wheel 的 "
     "wca-verify（独立实现，不执行包内代码），再用 wca replay 重放引擎比对三元组。\r\n"
@@ -908,7 +912,8 @@ def _resolve_input_path(rel_path: str, cfg: Config) -> Path | None:
         return None
     p = Path(rel_path)
     candidates = [p if p.is_absolute() else PROJECT_ROOT / p, Path.cwd() / p,
-                  cfg.data_dir / p, cfg.data_dir / p.name]
+                  cfg.data_dir / p, cfg.data_dir / p.name,
+                  cfg.upload_dir / p, cfg.upload_dir / p.name]
     for c in candidates:
         if c.is_file():
             return c
@@ -1091,7 +1096,7 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
         for i in issues:
             w.writerow(csv_safe_row([
                 i["rel_path"], int(i["line_no"]), i["rule_id"], i["severity"],
-                i["field_name"], i["raw_value"], i["detail"],
+                i["field_name"], i["raw_value"], redact_issue_detail(i["detail"]),
             ]))
 
     # 5) 对外结论集：只收"已登记人工结论"的条目（US-RV-01★）
@@ -1177,6 +1182,15 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
                      "warning_message": "", "critical_message": ""}
         omitted_fields = _apply_omissions(collected, work, omit_fields)
     inputs_manifest = work / INPUTS_MANIFEST_NAME
+    approval_export_doc = {
+        "mode": "db_export",
+        "encoding": "utf-8",
+        "bom": False,
+        "line_endings": "LF",
+        "original_bytes_retained": False,
+        "note": ("approval_ledger.csv / approval_coverage.csv 由数据库确定性重导出，"
+                 "不是原始上传字节；原始字节未随包保留，重放以包内重导出文件为准。"),
+    }
     inputs_doc = {"schema": "wca-package-inputs-v1",
                   "csv_formula_escape": CSV_FORMULA_ESCAPE,
                   "cap_bytes": EXPORT_INPUTS_MAX_BYTES,
@@ -1308,6 +1322,7 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
                    "approval_rows": int(collected.get("approval_rows", 0)),
                    "approval_sha256": str(collected.get("approval_sha256") or ""),
                    "approval_source": approval_source,
+                   "approval_export": approval_export_doc,
                    **({"omitted_fields": omitted_fields} if omit_fields else {}),
                    "missing": collected["missing"],
                    "reason": collected["reason"],
@@ -1340,8 +1355,11 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
     # manifest 自身的哈希，用于「重跑后比对包是否等价」
     manifest_sha = sha256_hex(manifest_path.read_bytes())
 
-    zip_path = cfg.packages_dir / f"{run_id}.zip"
-    tmp_zip = cfg.packages_dir / f".{run_id}.{os.getpid()}.zip.tmp"
+    stamp = datetime.now(CN_TZ).strftime("%Y%m%dT%H%M%S")
+    zip_path = cfg.packages_dir / f"{run_id}-{stamp}-{os.urandom(3).hex()}.zip"
+    if zip_path.exists():
+        raise ValueError(f"导出失败：目标包已存在，拒绝覆盖：{zip_path}")
+    tmp_zip = cfg.packages_dir / f".{zip_path.name}.{os.getpid()}.tmp"
     try:
         with zipfile.ZipFile(tmp_zip, "w", zipfile.ZIP_DEFLATED) as zf:
             zf.writestr(README_FILE, PACKAGE_README.encode("utf-8"))

@@ -18,7 +18,6 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-RAW = ROOT / "data" / "raw"
 
 # 官方放假安排是「哪些日子不该上班」的唯一依据：直接读项目内的日历，保证生成器与
 # 校验引擎用的是同一份节假日口径，不会出现自己排班又自己判违规的循环。
@@ -257,21 +256,24 @@ def build(seed: int) -> dict[str, list[list]]:
 
 
 def write(seed: int) -> dict:
-    RAW.mkdir(parents=True, exist_ok=True)
+    # 发行 wheel 内生成器位于 site-packages，不能写回安装目录；默认流程统一写到
+    # 当前工作目录的 data/raw（与 `wca ingest` 默认目录一致）。
+    raw = Path.cwd() / "data" / "raw"
+    raw.mkdir(parents=True, exist_ok=True)
     data = build(seed)
     manifest = {"generator": "data/generator/make_synthetic.py", "seed": seed,
                 "period": {"start": START.isoformat(), "end": END.isoformat()},
                 "files": {}, "privacy": "合成数据，不含任何真实个人信息"}
     for name, rows in data.items():
-        path = RAW / name
+        path = raw / name
         with path.open("w", encoding="utf-8", newline="") as fh:
             csv.writer(fh, lineterminator="\n").writerows(rows)
         body = path.read_bytes()
         manifest["files"][name] = {"sha256": hashlib.sha256(body).hexdigest(),
                                    "rows": max(0, len(rows) - 1)}
-    (RAW / "MANIFEST.json").write_text(json.dumps(manifest, ensure_ascii=False, sort_keys=True,
-                                                  indent=2) + "\n", encoding="utf-8")
-    (RAW / "SCENARIOS.md").write_text(_scenarios_md(seed), encoding="utf-8")
+    (raw / "MANIFEST.json").write_text(json.dumps(manifest, ensure_ascii=False, sort_keys=True,
+                                                 indent=2) + "\n", encoding="utf-8")
+    (raw / "SCENARIOS.md").write_text(_scenarios_md(seed), encoding="utf-8")
     return manifest
 
 

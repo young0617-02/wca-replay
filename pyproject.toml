@@ -1,6 +1,6 @@
 [project]
 name = "worktime-compliance-agent"
-version = "0.4.6"
+version = "0.4.7"
 description = "举证级工时合规校验与带 ACL 的制度问答 Agent（合成数据 + 公开法条基准）"
 requires-python = ">=3.12"
 
@@ -37,6 +37,7 @@ packages = ["src"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "src/schema.sql" = "src/schema.sql"
+"data/generator/make_synthetic.py" = "data/generator/make_synthetic.py"
 "config/region_profile.json" = "config/region_profile.json"
 "config/not_covered.json" = "config/not_covered.json"
 "policies/RULE-PACK.md" = "policies/RULE-PACK.md"

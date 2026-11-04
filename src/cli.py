@@ -19,7 +19,7 @@ from .config import Config
 from .db import (DatabaseIdentityMismatch, DatabaseUnavailable, connect, count, get_meta,
                  init_db, set_meta)
 from .evidence import export_package, input_fingerprint, verify_chain
-from .ingest import import_csv_file
+from .ingest import _reject_unreconstructable_path, import_csv_file
 from .kb import build_kb, citation_ids_missing
 from .rules.citations import ALL_CITATIONS
 from .rules.holidays import HolidayCalendar
@@ -109,10 +109,22 @@ def cmd_gen(args) -> int:
 
 
 def cmd_ingest(args) -> int:
+    root = Path(args.dir)
+    # A13：先于任何数据库/文件副作用校验路径契约，失败即非零退出。
+    try:
+        _reject_unreconstructable_path(args.dir)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    try:
+        root_rel = root.resolve().relative_to(Path.cwd().resolve())
+    except ValueError:
+        print(f"导入目录必须位于当前工作目录内（否则包内无法按 rel_path 还原）：{root}；"
+              "请 cd 到数据根目录后再导入", file=sys.stderr)
+        return 2
     cfg = _cfg(args)
     conn = connect(cfg)
     init_db(conn)
-    root = Path(args.dir)
     if not root.is_dir():
         print(f"目录不存在：{root}（先跑 python -m src.cli gen）", file=sys.stderr)
         return 2
@@ -124,7 +136,9 @@ def cmd_ingest(args) -> int:
         for name, path in files.items():
             if KIND_BY_FILE.get(name) != kind:
                 continue
-            res = import_csv_file(conn, cfg, path, kind=kind, created_at=args.imported_at)
+            rel = (root_rel / name).as_posix()
+            res = import_csv_file(conn, cfg, path, kind=kind, created_at=args.imported_at,
+                                  rel_path=rel)
             mode_note = res.write_mode
             if res.degraded_from:
                 mode_note += f"(请求 {res.degraded_from}，已降级)"

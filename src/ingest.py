@@ -207,6 +207,9 @@ def import_csv_file(conn: Connection, cfg: Config, path: Path | str, *,
     但输入指纹按原始 `rel_path` 计算，不复现就比不回来。默认仍按当前工作目录推导。
     """
     p = Path(path)
+    if rel_path is None:
+        # 先做纯字符串校验，避免 UNC/网络路径在 is_file() 阶段触发系统调用。
+        _reject_unreconstructable_path(p)
     if not p.is_file():
         raise FileNotFoundError(f"待导入文件不存在: {p}")
     rel = rel_path if rel_path else _rel_path(p, cfg)
@@ -300,11 +303,36 @@ def _guess_kind(rel: str) -> str:
     raise ValueError(f"无法从文件名推断数据类型：{rel}；请显式传 kind={KINDS}")
 
 
+def _reject_unreconstructable_path(raw: object) -> None:
+    """导入期契约：必须能按 `rel_path` 原样还原到包内。
+
+    含 `..`、绝对路径、盘符、UNC 的路径会丢失目录信息，一律中文报错，
+    不做静默压平（第九轮 A13）。
+    """
+    text = str(raw).replace("\\", "/")
+    if text.startswith("//"):
+        raise ValueError(
+            f"导入路径不允许 UNC/网络路径（无法在包内还原）：{raw}；"
+            "请先把文件复制到当前工作目录下再导入")
+    if text.startswith("/") or (len(text) > 1 and text[1] == ":"):
+        raise ValueError(
+            f"导入路径不允许绝对路径（无法在包内还原）：{raw}；"
+            "请使用当前工作目录内的相对路径，或 cd 到数据根目录后再导入")
+    parts = [part for part in text.split("/") if part not in ("", ".")]
+    if ".." in parts:
+        raise ValueError(
+            f"导入路径不允许包含 ..（无法在包内还原）：{raw}；"
+            "请把文件放在当前工作目录内，用相对路径导入")
+
+
 def _rel_path(p: Path, cfg: Config) -> str:
+    _reject_unreconstructable_path(p)
     try:
-        return p.resolve().relative_to(Path.cwd()).as_posix()
-    except ValueError:
-        return p.name
+        return p.resolve().relative_to(Path.cwd().resolve()).as_posix()
+    except ValueError as exc:
+        raise ValueError(
+            f"导入文件必须位于当前工作目录内（否则包内无法按 rel_path 还原）：{p}；"
+            "请 cd 到数据根目录，或把文件放入工作目录下的 data/raw") from exc
 
 
 def _acquire_import_lock(conn: Connection, rel: str, digest: str) -> None:

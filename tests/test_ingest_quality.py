@@ -388,7 +388,7 @@ def test_unknown_employee_is_rejected(conn, cfg):
 def test_missing_column_rejects_whole_file(conn, cfg, tmp_path):
     bad = tmp_path / "punch.csv"
     bad.write_text("emp_id,event_ts\nT-STD,2025-09-01T09:00:00+08:00\n", encoding="utf-8")
-    res = import_csv_file(conn, cfg, bad, kind="punch")
+    res = import_csv_file(conn, cfg, bad, kind="punch", rel_path="punch.csv")
     assert any(i.rule_id == "QUAL-HDR" for i in res.issues)
     assert conn.execute("SELECT COUNT(*) AS c FROM punch").fetchone()["c"] == 0
 

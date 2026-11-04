@@ -6,10 +6,34 @@
 """
 from __future__ import annotations
 
+import json
+import re
 from collections.abc import Iterable, Mapping
 
 INPUTS_DIRNAME = "inputs"
 INLINE_SCHEME = "inline://"
+
+_RELATED_FILE_IDS_RX = re.compile(r"[;；]?\s*related_file_ids\s*=\s*[^;；\n]*")
+
+
+def redact_issue_detail(value: object) -> str:
+    """展示/导出前去掉 DB 主键线索；`来源: rel_path:line_no` 保留。
+
+    DB 的 `ingest_issue.detail` 仍保留 `related_file_ids` 供输入选择；
+    这里只处理对外字符串，不修改库内数据。
+    """
+    text = str(value or "")
+    if not text:
+        return ""
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        data = None
+    if isinstance(data, dict):
+        cleaned = {k: v for k, v in data.items() if k != "related_file_ids"}
+        return json.dumps(cleaned, ensure_ascii=False, separators=(",", ":"))
+    text = _RELATED_FILE_IDS_RX.sub("", text)
+    return text.strip(" ;；\t")
 
 
 def validate_input_rel_path(value: object) -> str:
