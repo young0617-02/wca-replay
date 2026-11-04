@@ -155,7 +155,7 @@ def _readme(version: str, commit: str, wheel: str, build_time: str) -> str:
 - **计数口径**：`manifest.counts` 新增 `findings_total` / `findings_batched` / `issues_total`；
   三处计数（manifest、`policies/CONFIDENCE.md`、`未覆盖清单.md`）必须一致。统计重复类问题时
   不要直接数 `findings.csv` 行数，见 README“如何正确统计重复类问题”。
-- **规则包 v6**：0.4.8 起默认 `rp-2026.11.gd-pilot-standard.v6`（切换日 2026-11-05），
+- **规则包 v6**：0.4.8 起默认 `rp-2026.11.gd-pilot-standard.v6`（切换日 2026-11-04，
   v5/v4 仍可用显式 `WCA_RULE_PACK` 选择与回放；v5 旧包继续配 0.4.7 wheel，v6 新包配 0.4.8 wheel。
 - **跨后端可复算**：同一输入用 SQLite 或 PostgreSQL 18 导出，`conclusion_digest`、
   `evidence_digest`、`inputs_digest`、`input_fingerprint`、`artifacts_digest` 逐字节相同。

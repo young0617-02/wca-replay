@@ -191,9 +191,10 @@ V1 → V1.1 优化的前后对照（含没达成的目标）在 [`reports/优化
 
 ---
 
-## v6 规则包（REG-01 切换覆盖投影；2026-11-05 起为默认）
+## v6 规则包（REG-01 切换覆盖投影；2026-11-04 起为默认）
 
-- 版本串 `rp-2026.11.gd-pilot-standard.v6`；**0.4.8 起默认 v6**（切换日 2026-11-05），
+- 版本串 `rp-2026.11.gd-pilot-standard.v6`；**0.4.8 起默认 v6**（切换日 2026-11-04，
+  与 0.4.8 发行物构建时刻一致；当时无生产 run，属提前生效，详见 `policies/RULE-PACK.md`），
   v5/v4 仍可用显式 `WCA_RULE_PACK` 选择与回放。切换记录（谁/何时/何版本）见
   `policies/RULE-PACK.md`；活动库未在本轮切换，仍由部署配置显式钉住 v5。
 - v6 的 REG-01 改读 `employee_approval_coverage`；旧 `worktime_approval` 在 v6 下**不再参与计算**，只保留 legacy 输入与回放。
