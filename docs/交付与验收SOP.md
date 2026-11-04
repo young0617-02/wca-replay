@@ -40,10 +40,10 @@ python verify.py --public-key <固定公钥文件> --expect-anchor "<四/五段>
 
 - `wca-verify` 期望：`MANIFEST CHECKSUM OK`、`ARTIFACTS OK`、`VERIFY SCRIPT OK`、`FINDINGS DIGEST OK`、`EVIDENCE DIGEST OK`、`COUNTS 发现（未签认）... / 已确认结论 ...`、`CHAIN OK`、`INPUTS DIGEST OK`、`SIGNATURE OK / pinned`、`ANCHOR CHECK OK`、`RESULT OK`。它**不执行包内 `verify.py`**；包内脚本被替换会报 `VERIFY SCRIPT FAIL`。
 - `wca replay` 期望：`工件逐文件：OK`、`发现摘要：一致`、`EVIDENCE DIGEST OK`、三元组逐项 `=`、`发现（未签认）` 条数一致、`RESULT OK`；裁剪包会显示 `≠ input_fingerprint`，这是预期。
-- **证据定位摘要（0.4.3）**：`evidence_digest` 覆盖全部 finding 的 `evidence`（tables/window/rules/aggregation，固定字段序、空值 `null`、路径 `/`），不进入 `conclusion_digest`；`wca-verify`/`replay` 从 `findings.csv.evidence_json` 重算。新版本包缺字段或重算不一致 → `EVIDENCE DIGEST FAIL`；无 `producer` 或 `producer.version < 0.4.3` 的旧包输出 `EVIDENCE DIGEST NOT CHECKED`，**即使其余四项外部门禁齐全也不得给 `RESULT OK`**，这是历史兼容分档，不是“检查通过”。签名者作恶或私钥失窃时，必须用包外 `--expect-evidence-digest` 或单包 anchor 文件的 `evidence_digest` 锚定。
-- **两层输入摘要**：`input_fingerprint` 是内容与范围指纹（输入文件内容/引用范围/规则参数）；`inputs_digest` 是包内 `inputs/` 实际文件字节（含 `inputs/manifest.json`，已不含 `run_id` 与 DB `file_id`；文件名由 `rel_path` 推导）。同一批输入跨 run/跨库导包，`inputs_digest` 应完全一致；跨库实测见 `tests/test_evidence_digest.py::test_inputs_manifest_cross_database_stable`。`conclusion_digest` 可能因 `QUAL-01/02` metric 里的 DB `file_id` 不同而不同，不能误读成 inputs 不稳定。
+- **证据定位摘要（0.4.3 起，0.4.4 延续）**：`evidence_digest` 覆盖全部 finding 的 `evidence`（tables/window/rules/aggregation，固定字段序、空值 `null`、路径 `/`），不进入 `conclusion_digest`；`wca-verify`/`replay` 从 `findings.csv.evidence_json` 重算。新版本包缺字段或重算不一致 → `EVIDENCE DIGEST FAIL`；无 `producer` 或 `producer.version < 0.4.3` 的旧包输出 `EVIDENCE DIGEST NOT CHECKED`，**即使其余四项外部门禁齐全也不得给 `RESULT OK`**，这是历史兼容分档，不是“检查通过”。签名者作恶或私钥失窃时，必须用包外 `--expect-evidence-digest` 或单包 anchor 文件的 `evidence_digest` 锚定。
+- **两层输入摘要**：`input_fingerprint` 是内容与范围指纹（输入文件内容/引用范围/规则参数）；`inputs_digest` 是包内 `inputs/` 实际文件字节（含 `inputs/manifest.json`，已不含 `run_id` 与 DB `file_id`；文件名由 `rel_path` 推导）。同一批输入跨 run/跨库导包，`inputs_digest` 应完全一致；跨库实测见 `tests/test_evidence_digest.py::test_inputs_manifest_cross_database_stable`。0.4.4 起 `QUAL-01/02` 的 `line_refs` 与 `OFF-01` 的 `conflicts.sources` 只写 `rel_path+line_no`，`conclusion_digest` 不再因 DB `file_id` 变化；换新库重导与反向导入顺序实测四包均为 `b9cc6fd0…`。旧 0.4.3 的 `01bd4403…` 含 `file_id`，仅属历史包。
 - **没有 `--expect-anchor`**：两个工具都输出 `ANCHOR NOT CHECKED` 与 `RESULT PARTIAL`（exit 2），不能当作验收通过；只传 `--expect-triple` 也只是 legacy 外部比对，仍不给 `RESULT OK`。
-- **五项门禁（0.4.3）**：`RESULT OK` 必须同时满足签名 `pinned`、外部锚点、外部
+- **五项门禁（0.4.3 起，0.4.4 延续）**：`RESULT OK` 必须同时满足签名 `pinned`、外部锚点、外部
   `--expect-package-sha256`、外部 `--expect-artifacts-digest`、外部 `--expect-evidence-digest`；
   缺一项即 `RESULT PARTIAL`（exit 2），任一项不匹配即 `RESULT FAIL`（exit 1）。
   `--anchor-file <单包 anchor.json>` 可一次提供 `anchor`/`package_sha256`/`artifacts_digest`/
@@ -603,4 +603,44 @@ metric `line_refs` 仍含 DB `file_id`（4→3）；**这不是 inputs 不稳定
 不在四段锚点字符串内，必须额外传参数/单包 anchor 文件；跨库 `conclusion_digest` 仍受
 `QUAL-01/02` metric `file_id` 影响；24 条中 17 REVIEW + 1 DEFENSIBLE 不是已定性违规；
 法律实体性仍需外部审查；无可复现构建/第三方时间戳。
+
+## 13. 0.4.4 第六轮整改：DB 自增 ID 退出结论摘要（2026-11-04）
+
+发行物：`dist/wca-replay-0.4.4/`，7 文件 **359,232 字节**；commit
+`f00b33c11fcf1c1ca6643fd96f5bc870c6216765`；wheel 313,126 字节，sha256
+`440d6531daec79335b5e0365f7968d00c0079e7cb531177760b50b022ec33666`。干净 venv
+（`%TEMP%\wca-handoff-044-final\venv`）实测 `SHA256SUMS SIGNATURE OK` 与 5/5 文件哈希。
+
+**改动**：`QUAL-01/02` 的 `metric.line_refs` 与 `OFF-01` 的 `metric.conflicts.sources`
+只写 `rel_path+line_no`；`_employee_scope` 质量问题排序由 `ORDER BY file_id` 改为
+`ORDER BY rel_path,line_no`；`_unattributed_findings` 去掉 `MIN(file_id)` 选代表行。
+`source_refs` 仍保留 DB `file_id`，只用于行级反查，不进入 `Finding.canonical()`。
+
+**摘要值**：同一批 CSV、同一规则包 v5，换新库重导与反向导入顺序（punch/schedule 互换）
+四包四联值实测全部相同：
+
+| 包 | 字节 | SHA-256 | 发现/已确认 | `conclusion_digest` | `evidence_digest` | `inputs_digest` | `input_fingerprint` |
+|---|---|---|---|---|---|---|---|
+| engine-only | 72,972 | `f68acea0…` | 116 / 0 | `b9cc6fd0…` | `01cb5aeb…` | `aad527d1…` | `8b3b54a0…` |
+| confirmed | 73,787 | `0e3aec26…` | 116 / 2 | `b9cc6fd0…` | `01cb5aeb…` | `aad527d1…` | `8b3b54a0…` |
+| cross-db | 72,975 | `1664f96d…` | 116 / 0 | `b9cc6fd0…` | `01cb5aeb…` | `aad527d1…` | `8b3b54a0…` |
+| reverse-order | 72,929 | `1ecd9724…` | 116 / 0 | `b9cc6fd0…` | `01cb5aeb…` | `aad527d1…` | `8b3b54a0…` |
+
+**注意**：旧 0.4.3 的 `01bd4403…` 含 `QUAL line_refs.file_id=4`；移除 DB ID 后
+不可能再复现 `01bd4403…`，只能得到新的稳定值 `b9cc6fd0ef4e60126e33afe36878f33c30291bf4fd87965b26525b98a68f4328`。
+这是算术必然，不是口径解释。旧包不回改。
+
+**交接包**：`handoff/20261104-第六轮整改/`，22 个文件 / **693,071 字节**
+（`交付清单.txt` 覆盖 21 个非自身文件 / 690,918 字节）。四包在仓库外干净 venv 用
+0.4.4 wheel 的 `wca-verify`/`wca replay` 均 `RESULT OK`，五项外部门禁齐全才完整通过。
+**交付方自测，不构成采信结论**。
+
+**测试**：离线 **545 passed / 8 skipped / 1 deselected**；带 PG **568 passed /
+1 skipped / 1 deselected**（相对第五轮 543/566 各 +2）。新增
+`test_quality_line_refs_use_relative_paths_only` 与
+`test_full_v5_cross_database_and_reverse_order_stable`。
+
+**仍未闭合**：多文件 punch 内容重叠时，`QUAL-DUP` 归属文件仍随导入顺序变化（代码路径
+推断，本轮交付输入只有一个 punch.csv，未触发）；`source_refs` 仍含 DB `file_id`（非 canonical）；
+旧包摘要不回改；公钥来源、第三方时间戳、法律实体性、可复现构建仍未闭合。
 
