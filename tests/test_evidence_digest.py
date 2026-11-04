@@ -23,6 +23,7 @@ import pytest
 
 from conftest import EMPLOYEES, ORGS, load_full_facts, punch, schedule
 from src import signing
+from src.anomaly import decide_review, review_queue
 from src.config import Config
 from src.db import connect, init_db
 from src.engine import run_check
@@ -267,6 +268,35 @@ def test_not_covered_lists_all_24_evidence_findings(full_v5):
         assert finding.rule_id in text
         assert finding.emp_id in text
         assert (finding.period_key or finding.work_date or "") in text
+
+
+def test_same_run_reexport_artifacts_digest_stable(small_runs):
+    """同一 run 连续导出两次：artifacts_digest 与逐文件哈希必须稳定。
+
+    responsibility.json / conclusions_final.csv 的 confirmed_at 是 DB 中已落盘的
+    真实确认时间，不会因再次导出而改变；变的是签名的 created_at，不影响 artifacts。
+    """
+    conn, cfg, key, first, first_manifest, _second, _second_manifest = small_runs
+    again = export_package(conn, cfg, first.run_id, signing_key=key)
+    assert again["artifacts_digest"] == first_manifest["artifacts_digest"]
+    assert again["artifact_sha256"] == first_manifest["artifact_sha256"]
+
+
+def test_repeated_confirmation_does_not_change_artifacts_digest(small_runs):
+    """同一 review 重复确认必须被拒绝，拒绝后重导 artifacts_digest 不变。"""
+    conn, cfg, key, first, _first_manifest, _second, _second_manifest = small_runs
+    queue = review_queue(conn, run_id=first.run_id, only_open=True)
+    assert queue, "夹具应有可复核项"
+    item = queue[0]
+    decide_review(conn, cfg, int(item["review_id"]), "auditor", "APPROVED",
+                  "第一次确认；重复确认测试")
+    confirmed_export = export_package(conn, cfg, first.run_id, signing_key=key)
+    digest = confirmed_export["artifacts_digest"]
+    with pytest.raises(ValueError, match="已有复核结论"):
+        decide_review(conn, cfg, int(item["review_id"]), "auditor", "APPROVED",
+                      "第二次确认；应被拒绝")
+    again = export_package(conn, cfg, first.run_id, signing_key=key)
+    assert again["artifacts_digest"] == digest
 
 
 def test_inputs_digest_stable_across_runs_same_inputs(small_runs):

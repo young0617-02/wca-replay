@@ -684,9 +684,11 @@ QUAL-01 `line_refs` 均为 `punch-a.csv:2`。
 0.4.5 wheel 的 `wca-verify`/`wca replay` 均 `RESULT OK`，五项外部门禁齐全才完整通过。
 第六轮交接包 `handoff/20261104-第六轮整改/` 未改动。
 
-**测试**：离线 **547 passed / 8 skipped / 1 deselected**；带 PG **570 passed /
-1 skipped / 1 deselected**（相对第六轮 545/568 各 +2）。新增
-`tests/test_cross_file_duplicates.py` 2 项（单重复行、25 行触发汇总），修前红、修后绿。
+**测试**：离线 **549 passed / 8 skipped / 1 deselected**；带 PG **572 passed /
+1 skipped / 1 deselected**（相对第六轮 545/568 各 +4）。新增
+`tests/test_cross_file_duplicates.py` 2 项（单重复行、25 行触发汇总，修前红修后绿）与
+`tests/test_evidence_digest.py` 2 项（同 run 两次导出 artifacts 稳定、重复确认被拒绝后
+artifacts 稳定）。
 
 **`source_refs` 评估（本轮未改）**：实测 0.4.4/0.4.5 `findings.csv` **不含**
 `source_refs`，只有 `source_rel_path/source_line_no`；DB/API/Web 模板仍显示 `file_id`。
