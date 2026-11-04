@@ -122,7 +122,11 @@ def _readme(version: str, commit: str, wheel: str, build_time: str) -> str:
   导出时缺输入直接失败关闭（非零退出）且不留下半成品包。
 - **包内不带 DB 主键**：0.4.7 起包内所有 CSV 的**数据值**不含 `file_id`/
   `related_file_ids`/`run_id`/`segment_id`；跨文件多来源只写
-  `来源: rel_path:line_no`。这些列仅保留在数据库中用于输入选择，不进入任何导出工件。
+  `来源: rel_path:line_no`。这些列仅保留在数据库中用于输入选择，不进入任何 CSV 数据值。
+- **`manifest.json` 顶层的 1 个 `run_id`**：它只用于把包回指到库内 run 与审计段，
+  便于定位交付事件；它**不参与** `conclusion_digest`、`evidence_digest`、`inputs_digest`、
+  `input_fingerprint`、`artifacts_digest` 的计算，四联值本身不含它。旧表述
+  “不进入任何导出工件”容易与这一事实冲突，已按本条改写。
 - **导出包唯一命名**：0.4.7 起导出文件名为 `<run_id>-<时间戳>-<短随机>.zip`；
   目标已存在时拒绝覆盖，不静默改写旧包。
 - **审批台账规范化披露**：0.4.7 起包内审批台账是数据库重导出（UTF-8 无 BOM、LF），

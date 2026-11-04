@@ -114,10 +114,12 @@ citations, explanation` 九个规范字段；`source_rel_path`、`source_line_no
 `input_fingerprint` 的任何计算，四联值本身不含 `run_id`（第十轮复测的表述冲突已按此改写）。
 0.4.4 起 `QUAL-01/02` 的 `metric.line_refs` 与 `OFF-01` 的 `conflicts.sources` 只写
 `rel_path+line_no`，不再写 DB `file_id`；换新库重导与反向导入顺序（punch/schedule 互换）
-`conclusion_digest` 都必须相同，实测四包均为 `b9cc6fd0…`。旧 0.4.3 包的 `01bd4403…`
+`conclusion_digest` 都必须相同，0.4.8 实测四包均为 `5dc46558…`。旧 0.4.3 包的 `01bd4403…`
 含 `file_id=4`，移除后不可能复现；不要把旧值当成本轮目标。0.4.5 起同一打卡内容出现在
 多个 punch CSV 时，`QUAL-DUP` 行引用按 `rel_path` 字典序确定，全部来源纳入包内输入；
-单 `punch.csv` 场景四联值保持 `b9cc6fd0… / 01cb5aeb… / aad527d1… / 8b3b54a0…` 不变。
+单 `punch.csv` 场景在 0.4.5–0.4.7 曾保持 `b9cc6fd0… / 01cb5aeb… / aad527d1… / 8b3b54a0…`；
+0.4.8 批次语义后 `conclusion_digest` 统一为 `5dc46558…`、`evidence_digest` 为 `4654a3c7…`，
+`inputs_digest` 与 `input_fingerprint` 仍为 `aad527d1… / 8b3b54a0…`（旧包值只作历史对照）。
 
 ### 跨数据库后端可复算（0.4.8）
 
