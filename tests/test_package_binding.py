@@ -229,7 +229,8 @@ def test_b_input_timestamp_change_fails_both(conn, cfg, tmp_path):
     out, reason = _assert_both_fail(pkg, pub, _anchor(manifest))
     assert "INPUTS" in out or "INPUT" in out
     assert "INPUTS" in reason or "INPUT" in reason
-    assert _unexpected_fail_lines(out, ("INPUTS DIGEST FAIL", "RESULT FAIL")) == [], out
+    assert _unexpected_fail_lines(
+        out, ("INPUTS COMPLETENESS FAIL", "INPUTS DIGEST FAIL", "RESULT FAIL")) == [], out
 
 
 def test_c_extra_confirmed_conclusion_fails_both(conn, cfg, tmp_path):

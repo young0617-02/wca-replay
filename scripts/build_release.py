@@ -108,6 +108,15 @@ def _readme(version: str, commit: str, wheel: str, build_time: str) -> str:
   的行级引用按 `rel_path` 字典序确定唯一 canonical 引用，全部来源写入 detail 并纳入
   包内输入；两种导入顺序的 `conclusion_digest`/`evidence_digest`/`inputs_digest`/
   `input_fingerprint` 必须相同。单 `punch.csv` 场景的四联值保持 0.4.4 不变。
+- **嵌套输入路径**：0.4.6 起导出按 `rel_path` 建父目录，包内保留层级（如
+  `inputs/data/raw/*.csv`、`inputs/2025-09/门店A/punch.csv`）；目录名含空格/中文、
+  不同目录同名文件均支持且互不覆盖。`inputs/` 暂存目录每次整体重建，重跑可自愈。
+- **输入完整性对账**：0.4.6 起 `wca-verify` 新增 `INPUTS COMPLETENESS` 检查，把
+  `input_files.csv` 声明的输入与包内 `inputs/manifest.json` 及实际文件双向对账；
+  失败先于 `INPUTS DIGEST` 报出 `INPUTS COMPLETENESS FAIL`，并明确列出“清单 N 个、
+  包内缺 M 个”及缺失 `rel_path`。
+- **导入边界**：`rel_path` 含 `..`、绝对路径、盘符路径在导入期即拒绝（中文错误）；
+  导出时缺输入直接失败关闭（非零退出）且不留下半成品包。
 - **证据定位摘要**：`evidence_digest` 单独覆盖全部 finding 的 `evidence` 块
   （`tables/window/rules/aggregation`，固定字段序、空值 `null`、路径 `/`），**不进入**
   `conclusion_digest`。0.4.3 起（0.4.4 延续）新包必须有该字段；旧包缺失按 `NOT CHECKED` 分档，
@@ -170,7 +179,7 @@ py -3.12 -m venv .venv-clean
 
 期望：`MANIFEST CHECKSUM OK`、`ARTIFACTS OK`、`VERIFY SCRIPT OK`、`FINDINGS DIGEST OK`、
 `EVIDENCE DIGEST OK`、`COUNTS 发现（未签认）... / 已确认结论 ...`、`CHAIN OK`、
-`INPUTS DIGEST OK`、`SIGNATURE OK / pinned`、`ANCHOR CHECK OK`、`RESULT OK`。
+`INPUTS COMPLETENESS OK`、`INPUTS DIGEST OK`、`SIGNATURE OK / pinned`、`ANCHOR CHECK OK`、`RESULT OK`。
 它证明包字节、工件绑定、发现反算摘要、证据定位摘要、输入摘要、签名与外部锚点一致；
 **不证明结论正确**。
 

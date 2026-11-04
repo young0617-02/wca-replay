@@ -14,6 +14,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+from collections import Counter
 from pathlib import Path
 
 from . import producer, signing
@@ -242,6 +243,74 @@ def conclusion_digest_from_findings(path: Path) -> tuple[str, int, dict[str, int
     for r in rows:
         versions[r["rule_version"]] = versions.get(r["rule_version"], 0) + 1
     return digest_of(rows), len(rows), versions
+
+
+def check_inputs_completeness(root: Path, manifest: dict, schema_ver: int) -> dict:
+    """对账 `input_files.csv`（input_fingerprint 覆盖的引用集合）与 `inputs/` 实际成员。
+
+    旧包（schema < 3）没有 inputs_digest 契约，记 NOT CHECKED；新包必须逐项齐全，
+    否则属于“静默残缺”：verify 不能只看摘要命中就报 OK。
+    """
+    if schema_ver < 3:
+        return {"ok": True, "status": "NOT CHECKED",
+                "reason": "INPUTS COMPLETENESS NOT CHECKED 旧包（schema < 3）"}
+    manifest_path = root / INPUTS_DIRNAME / "manifest.json"
+    if not manifest_path.is_file():
+        return {"ok": False, "status": "FAIL",
+                "reason": "INPUTS COMPLETENESS FAIL 包内缺少 inputs/manifest.json"}
+    try:
+        doc = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {"ok": False, "status": "FAIL",
+                "reason": f"INPUTS COMPLETENESS FAIL 无法解析 inputs/manifest.json："
+                          f"{type(exc).__name__}: {exc}"}
+    entries = doc.get("entries") if isinstance(doc, dict) else None
+    if not isinstance(entries, list):
+        return {"ok": False, "status": "FAIL",
+                "reason": "INPUTS COMPLETENESS FAIL inputs/manifest.json 缺少 entries"}
+    declared = Counter((str(e.get("rel_path")), str(e.get("sha256")), str(e.get("kind")))
+                       for e in entries if isinstance(e, dict))
+    path = root / "input_files.csv"
+    if not path.is_file():
+        return {"ok": False, "status": "FAIL",
+                "reason": "INPUTS COMPLETENESS FAIL 包内缺少 input_files.csv"}
+    expected = Counter()
+    total = 0
+    with path.open(encoding="utf-8", newline="") as fh:
+        for row in csv.DictReader(fh):
+            rel = csv_unescape_cell(row.get("rel_path") or "")
+            if rel.startswith("inline://"):
+                continue
+            total += 1
+            expected[(rel, str(row.get("sha256") or "").lower(),
+                      csv_unescape_cell(row.get("kind") or ""))] += 1
+    missing = list((expected - declared).elements())
+    extra = list((declared - expected).elements())
+    absent_files: list[str] = []
+    try:
+        arcs = input_arcnames(entries)
+    except ValueError as exc:
+        return {"ok": False, "status": "FAIL",
+                "reason": f"INPUTS COMPLETENESS FAIL 包内输入路径非法：{exc}"}
+    for entry, arc in zip(entries, arcs):
+        target = root / arc
+        if not target.is_file():
+            absent_files.append(f"{entry.get('rel_path')}（包内缺少 {arc}）")
+            continue
+        actual = _sha256_file(target)
+        if actual != str(entry.get("sha256") or "").lower():
+            absent_files.append(f"{entry.get('rel_path')}（包内字节与声明 sha256 不一致）")
+    problems = [f"{rel}:{kind}" for rel, _sha, kind in missing] + \
+               [f"{rel}:{kind}（声明多出）" for rel, _sha, kind in extra] + absent_files
+    if problems:
+        return {"ok": False, "status": "FAIL",
+                "expected": total, "missing": len(missing) + len(absent_files),
+                "extra": len(extra), "problems": problems,
+                "reason": (f"INPUTS COMPLETENESS FAIL 输入清单列了 {total} 个，"
+                           f"包内 inputs 缺少 {len(missing) + len(absent_files)} 个："
+                           + "；".join(problems[:8]))}
+    return {"ok": True, "status": "OK", "expected": total, "missing": 0, "extra": 0,
+            "reason": f"INPUTS COMPLETENESS OK 输入清单 {total} 个与包内 inputs/ 一致"}
 
 
 def check_findings(root: Path, manifest: dict) -> dict:
@@ -483,8 +552,8 @@ def verify_package(package: Path | str, *, public_keys: list[str] | tuple[str, .
     p = Path(package)
     check_names = ("manifest", "producer", "artifacts", "verify_script",
                    "artifacts_digest_internal", "extras", "findings", "evidence", "chain",
-                   "inputs", "signature", "signature_pinned", "anchor", "package_sha",
-                   "artifacts_digest_external", "evidence_digest_external")
+                   "inputs_completeness", "inputs", "signature", "signature_pinned", "anchor",
+                   "package_sha", "artifacts_digest_external", "evidence_digest_external")
     result = {
         "package": str(p), "schema": "", "manifest_schema_version": None, "run_id": "",
         "producer": {}, "producer_ok": True, "producer_reason": "",
@@ -647,6 +716,12 @@ def verify_package(package: Path | str, *, public_keys: list[str] | tuple[str, .
             if declared_head and str(declared_head) != chain["head_hash"]:
                 result["reason"] = "CHAIN FAIL manifest.chain_verification.head_hash 与重算链头不一致"
                 return result
+            completeness = check_inputs_completeness(root, manifest, schema_ver)
+            result["inputs_completeness"] = completeness
+            checks["inputs_completeness"] = completeness["status"]
+            if not completeness["ok"]:
+                result["reason"] = completeness["reason"]
+                return result
             try:
                 actual_inputs = signing.compute_inputs_digest_from_dir(root)
             except Exception as exc:
@@ -702,7 +777,10 @@ def verify_package(package: Path | str, *, public_keys: list[str] | tuple[str, .
                 return result
             internal_checks = ("manifest", "producer", "artifacts", "verify_script",
                                "artifacts_digest_internal", "extras", "findings", "evidence",
-                               "chain", "inputs")
+                               "chain", "inputs_completeness", "inputs")
+            if schema_ver < 3:
+                internal_checks = tuple(name for name in internal_checks
+                                        if name != "inputs_completeness")
             if result.get("evidence_legacy"):
                 # 旧包没有 evidence_digest：按既有分档保留可验证性，但不把 NOT CHECKED
                 # 写成“检查通过”，也不让它参与 RESULT OK 门禁。

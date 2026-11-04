@@ -199,8 +199,10 @@ def register_web_routes(app: Any, cfg: Config, get_conn) -> None:
         run_id = get_meta(conn, "last_run_id")
         anomalies = build_anomalies(conn, run_id) if run_id else []
         issues = conn.execute(
-            "SELECT rule_id, severity, field_name, line_no, detail, emp_id, file_id "
-            "FROM ingest_issue ORDER BY issue_id DESC LIMIT 40").fetchall()
+            "SELECT i.rule_id, i.severity, i.field_name, i.line_no, i.detail, i.emp_id, "
+            "f.rel_path "
+            "FROM ingest_issue i LEFT JOIN raw_file f ON f.file_id = i.file_id "
+            "ORDER BY i.issue_id DESC LIMIT 40").fetchall()
         return page(request, "index.html", {
             "me": _user_view(user), "run_id": run_id,
             "anomalies": anomalies[:120], "rollup": severity_rollup(anomalies),
@@ -594,7 +596,7 @@ def _decorate_review_row(row: dict) -> dict:
         elif out.get(target) is None:
             out[target] = []
     refs = out.get("refs") or []
-    out["line_refs"] = " · ".join(f"{r.get('file_id', '?')}:{r.get('line_no', '?')}"
+    out["line_refs"] = " · ".join(f"{r.get('rel_path') or '?'}:{r.get('line_no', '?')}"
                                  for r in refs[:3]) or ""
     if not out.get("citations"):
         out["citations"] = []

@@ -9,6 +9,26 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 
 INPUTS_DIRNAME = "inputs"
+INLINE_SCHEME = "inline://"
+
+
+def validate_input_rel_path(value: object) -> str:
+    """导入入口校验：只接受项目内相对路径；`inline://` 保持既有临时输入契约。"""
+    text = str(value).replace("\\", "/").strip()
+    if text.startswith(INLINE_SCHEME):
+        return text
+    if not text:
+        raise ValueError("输入文件 rel_path 不能为空")
+    if text.startswith("/") or text.startswith("//") or (
+            len(text) > 1 and text[1] == ":"):
+        raise ValueError(f"输入文件 rel_path 必须是项目内相对路径（拒绝绝对路径）：{value!r}")
+    parts = [part for part in text.split("/") if part not in ("", ".")]
+    if not parts:
+        raise ValueError("输入文件 rel_path 不能为空")
+    if any(part == ".." for part in parts):
+        raise ValueError(f"输入文件 rel_path 不允许包含 ..：{value!r}")
+    return "/".join(parts)
+
 
 
 def normalize_rel_path(value: object) -> str:

@@ -908,7 +908,7 @@ def _resolve_input_path(rel_path: str, cfg: Config) -> Path | None:
         return None
     p = Path(rel_path)
     candidates = [p if p.is_absolute() else PROJECT_ROOT / p, Path.cwd() / p,
-                  cfg.data_dir / p.name]
+                  cfg.data_dir / p, cfg.data_dir / p.name]
     for c in candidates:
         if c.is_file():
             return c
@@ -969,8 +969,13 @@ def export_package(conn: Connection, cfg: Config, run_id: str, *,
     omit = projection.normalize_omit_fields(omit_fields)
     cfg.ensure_dirs()
     with _export_run_lock(conn, cfg, run_id):
-        return _export_package_locked(conn, cfg, run_id, include_inputs=include_inputs,
-                                      signing_key=signing_key, omit_fields=omit)
+        try:
+            return _export_package_locked(conn, cfg, run_id, include_inputs=include_inputs,
+                                          signing_key=signing_key, omit_fields=omit)
+        except Exception:
+            # 失败关闭：不把半成品暂存目录留给下一次导出。
+            shutil.rmtree(cfg.packages_dir / run_id, ignore_errors=True)
+            raise
 
 
 def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
@@ -1003,6 +1008,10 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
 
     cfg.ensure_dirs()
     work = cfg.packages_dir / run_id
+    # 每次导出都从干净暂存目录重建：上次失败留下的半成品（含 inputs/ 子目录）
+    # 必须先整体清掉，否则 rerun 会卡在旧目录上。
+    if work.exists():
+        shutil.rmtree(work)
     work.mkdir(parents=True, exist_ok=True)
     policy_source = PROJECT_ROOT / "policies"
     policy_files = sorted(policy_source.glob("*.md")) if policy_source.is_dir() else []
@@ -1011,7 +1020,12 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
     policies_dir = work / "policies"
     policies_dir.mkdir(parents=True, exist_ok=True)
     for policy in policy_files:
-        shutil.copy2(policy, policies_dir / policy.name)
+        if policy.name == "CONFIDENCE.md":
+            text = policy.read_text(encoding="utf-8").replace(
+                "{{ENGINE_VERSION}}", ENGINE_VERSION)
+            (policies_dir / policy.name).write_text(text, encoding="utf-8")
+        else:
+            shutil.copy2(policy, policies_dir / policy.name)
 
     findings = conn.execute(
         "SELECT * FROM finding WHERE run_id = ? ORDER BY emp_id, work_date, rule_id", (run_id,)
@@ -1111,11 +1125,13 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
     # 8) 输入自含（US-EX-01）：把本次结论真正依赖的原始 CSV 一起打包，让重放不需要另外索要数据
     inputs_dir = work / INPUTS_DIRNAME
     inputs_dir.mkdir(exist_ok=True)
-    for stale in inputs_dir.glob("*"):
-        if stale.name != "manifest.json":
-            stale.unlink()
     if include_inputs:
         collected = collect_package_inputs(conn, cfg, run_id, file_ids=input_ids)
+        fatal = [m for m in collected["missing"] if not str(m).startswith("inline://")]
+        if fatal:
+            raise ValueError(
+                f"导出失败：本 run 引用 {len(input_ids)} 个输入，其中 {len(fatal)} 个无法按 "
+                f"rel_path 定位：{'; '.join(fatal)}；拒绝生成残缺包")
         if approval_meta is not None:
             collected["entries"].append({
                 "file_id": 0, "rel_path": "approval_ledger.csv", "kind": "approval",
@@ -1187,7 +1203,9 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
     for e in collected["entries"]:
         if e.get("trimmed"):
             continue
-        shutil.copyfile(e["source"], work / e["arcname"])
+        target = work / e["arcname"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(e["source"], target)
 
     # 工件逐文件哈希：把包根 CSV/JSON/MD 与 README/verify 依赖绑定到 manifest。
     # 这些字段会被 manifest_checksum 覆盖；新签名包还会把它们放进签名载荷。

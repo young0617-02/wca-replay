@@ -24,6 +24,7 @@ from typing import Any, Iterable, Mapping
 from .config import Config
 from .db import DB_BACKEND_POSTGRES, Connection, transaction
 from .evidence import append_audit
+from .package_inputs import validate_input_rel_path
 from .rules.dayfacts import _anchor_day
 from .util import CN_TZ, parse_date, parse_timestamp, sha256_hex, iso_minute
 
@@ -209,6 +210,7 @@ def import_csv_file(conn: Connection, cfg: Config, path: Path | str, *,
     if not p.is_file():
         raise FileNotFoundError(f"待导入文件不存在: {p}")
     rel = rel_path if rel_path else _rel_path(p, cfg)
+    rel = validate_input_rel_path(rel)
     kind = kind or _guess_kind(rel)
     if kind not in KINDS:
         raise ValueError(f"未知数据类型 kind={kind!r}，可选 {KINDS}")
@@ -266,6 +268,7 @@ def import_rows(conn: Connection, cfg: Config, kind: str, rows: Iterable[Mapping
     """程序化入口（测试与 API 走这里）。与 CSV 入口共用同一套门禁，不额外放宽。"""
     if kind not in KINDS:
         raise ValueError(f"未知数据类型 kind={kind!r}")
+    rel_path = validate_input_rel_path(rel_path)
     seq = list(rows)
     digest = sha256_hex(_safe_repr(seq))
     created_at = created_at or datetime.now(CN_TZ).strftime("%Y-%m-%dT%H:%M:%S+08:00")

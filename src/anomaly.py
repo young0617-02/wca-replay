@@ -103,7 +103,7 @@ def _with_rel_path(conn: Connection, refs: list[dict]) -> list[dict]:
         if fid is not None:
             row = conn.execute("SELECT rel_path FROM raw_file WHERE file_id = ?", (fid,)).fetchone()
             rel = row["rel_path"] if row else ""
-        out.append({"file_id": fid, "line_no": ref.get("line_no"), "rel_path": rel})
+        out.append({"rel_path": rel, "line_no": ref.get("line_no")})
     return out
 
 

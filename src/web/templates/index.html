@@ -54,7 +54,7 @@
         <td>{{ a.citations|join(', ') }}</td>
         <td>
           {% for ref in a.source_refs[:4] %}
-            <span title="{{ ref.rel_path or '' }}">{{ ref.file_id }}:{{ ref.line_no }}</span>{% if not loop.last %} · {% endif %}
+            <span title="{{ ref.rel_path or '' }}">{{ ref.rel_path or '' }}:{{ ref.line_no }}</span>{% if not loop.last %} · {% endif %}
           {% endfor %}
           {% if a.source_refs|length > 4 %}…共 {{ a.source_refs|length }} 处{% endif %}
         </td>
@@ -74,7 +74,7 @@
     <tbody>
     {% for i in issues %}
       <tr><td>{{ i.rule_id }}</td><td>{{ i.severity }}</td><td>{{ i.field_name }}</td>
-          <td>{{ i.line_no }}</td><td>{{ i.file_id }}</td>
+          <td>{{ i.line_no }}</td><td>{{ i.rel_path or '' }}</td>
           <td>{{ i.detail|truncate(120) }}</td></tr>
     {% else %}<tr><td colspan="6">无质量问题</td></tr>{% endfor %}
     </tbody>

@@ -123,6 +123,9 @@ def _print_result(result: dict) -> None:
     chain = result.get("chain") or {}
     line("CHAIN", st("chain"), "chain",
          f"events={chain.get('length', 0)}" if chain.get("checked") else "")
+    completeness = result.get("inputs_completeness") or {}
+    line("INPUTS COMPLETENESS", st("inputs_completeness"), "inputs_completeness",
+         str(completeness.get("reason") or ""))
     line("INPUTS DIGEST", st("inputs"), "inputs", str(result.get("inputs_digest") or ""))
 
     sig_status = st("signature")
