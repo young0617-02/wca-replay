@@ -11,9 +11,11 @@ from pathlib import Path
 
 # 只扫文档类文件；package/*.zip 与 release/*.whl 是二进制，不在此列。
 TEXT_SUFFIXES = (".md", ".txt")
-PREFIXES = ("docs", "scripts", "tests", "src", "data", "var")
+# C1：前缀必须覆盖仓库里所有会被文档引用的目录，否则“全表”不成立。
+PREFIXES = ("docs", "scripts", "tests", "src", "data", "var", "reports",
+            "rules", "tools", "dist", "handoff")
 REF_RE = re.compile(
-    r"(?<![\w./-])(?:docs|scripts|tests|src|data|var)/[A-Za-z0-9_./\-\u4e00-\u9fff]+")
+    r"(?<![\w./-])(?:" + "|".join(PREFIXES) + r")/[A-Za-z0-9_./\-\u4e00-\u9fff]+")
 UNSHIPPED = "未随交付清单.md"
 
 
@@ -42,6 +44,10 @@ def check_refs(root: Path) -> list[str]:
     """返回错误清单；空列表表示所有仓库路径都已交付或已列明未交付。"""
     listed = unshipped_paths(root)
     errors: list[str] = []
+    # 清单本身不得撒谎：列在“未交付”的路径如果实际存在，同样判失败。
+    for ref in sorted(listed):
+        if (root / ref).exists():
+            errors.append(f"{UNSHIPPED} 把已交付的路径写成了未交付：{ref}")
     seen: set[tuple[str, str]] = set()
     for path in text_files(root):
         rel = path.relative_to(root).as_posix()

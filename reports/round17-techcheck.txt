@@ -1,0 +1,22 @@
+第十七轮（0.4.15）技术核对日志（唯一计数口径）
+================================================================
+
+离线全量：uv run pytest -q -m "not llm"
+离线全量 → 待最终运行填入
+
+PostgreSQL 18 全量（同一条命令，仅多环境变量）：
+  $env:WCA_TEST_POSTGRES_URL="postgresql://root:<本地口令>@127.0.0.1:5927/postgres"
+  uv run pytest -q -m "not llm"
+PostgreSQL 18 全量 → 待最终运行填入
+
+干净 venv（仅 0.4.15 wheel + 锁定依赖）八包 × (verify + replay)：
+干净 venv 八包 → 待最终运行填入
+
+旧包（0.4.10 / 0.4.11 / 0.4.13 / 0.4.14）配各自 wheel 的 verify：
+旧包 verify → 待最终运行填入
+
+同版本七类篡改回归：
+七类篡改 → 待最终运行填入
+
+schema v3 缺 inputs_digest / schema v2 缺字段：
+缺字段 → 待最终运行填入

@@ -1,0 +1,33 @@
+﻿F                                                                        [100%]
+================================== FAILURES ===================================
+_______________ test_commands_claiming_ok_carry_all_five_gates ________________
+
+    def test_commands_claiming_ok_carry_all_five_gates() -> None:
+        """静态红线：写 `RESULT OK`/rc=0 的命令必须给全五项外部门禁（或完整 anchor 文件）。"""
+        missing: list[str] = []
+        for doc in _doc_paths():
+            for item in _commands(doc.read_text(encoding="utf-8")):
+                if "OK" not in item["expected"] and "rc=0" not in item["expected"]:
+                    continue
+                if "--anchor-file" in item["command"]:
+                    continue
+                absent = [gate for gate in REQUIRED_GATES if gate not in item["command"]]
+                if absent:
+                    missing.append(f"{doc}: 缺 {absent}\n  {item['command']}")
+>       assert not missing, "文档示例命令声称通过但缺门禁参数：\n" + "\n".join(missing)
+E       AssertionError: 文档示例命令声称通过但缺门禁参数：
+E         handoff\20261104-第十六轮整改\docs\安全与证据链现状.md: 缺 ['--expect-evidence-digest']
+E           wca-verify <包>.zip --public-key <包外固定公钥> --expect-anchor "<四/五段>" --expect-package-sha256 <包SHA256> --expect-artifacts-digest <artifacts_digest> --require-signature
+E         handoff\20261104-第十六轮整改\docs\安全与证据链现状.md: 缺 ['--expect-package-sha256', '--expect-artifacts-digest', '--expect-evidence-digest']
+E           wca replay <包>.zip --public-key <包外固定公钥> --expect-anchor "<四/五段>" --require-signature
+E       assert not ['handoff\\20261104-第十六轮整改\\docs\\安全与证据链现状.md: 缺 [\'--expect-evidence-digest\']\n  wca-verify <包>.zip --public-key <包外...'--expect-evidence-digest\']\n  wca replay <包>.zip --public-key <包外固定公钥> --expect-anchor "<四/五段>" --require-signature']
+
+tests\test_doc_commands.py:217: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/test_doc_commands.py::test_commands_claiming_ok_carry_all_five_gates - AssertionError: 文档示例命令声称通过但缺门禁参数：
+  handoff\20261104-第十六轮整改\docs\安全与证据链现状.md: 缺 ['--expect-evidence-digest']
+    wca-verify <包>.zip --public-key <包外固定公钥> --expect-anchor "<四/五段>" --expect-package-sha256 <包SHA256> --expect-artifacts-digest <artifacts_digest> --require-signature
+  handoff\20261104-第十六轮整改\docs\安全与证据链现状.md: 缺 ['--expect-package-sha256', '--expect-artifacts-digest', '--expect-evidence-digest']
+    wca replay <包>.zip --public-key <包外固定公钥> --expect-anchor "<四/五段>" --require-signature
+assert not ['handoff\\20261104-第十六轮整改\\docs\\安全与证据链现状.md: 缺 [\'--expect-evidence-digest\']\n  wca-verify <包>.zip --public-key <包外...'--expect-evidence-digest\']\n  wca replay <包>.zip --public-key <包外固定公钥> --expect-anchor "<四/五段>" --require-signature']
+1 failed in 0.17s

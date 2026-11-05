@@ -27,7 +27,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "scripts"))
 
+from docfacts import generated_block, release_facts, table  # noqa: E402
 from src import ENGINE_VERSION  # noqa: E402
 from src import signing  # noqa: E402
 from src.rules.rulepack import (RULE_PACK_V4, RULE_PACK_V5, RULE_PACK_V6,  # noqa: E402
@@ -87,7 +89,43 @@ def _require_clean_tree() -> str:
     return commit
 
 
-def _readme(version: str, commit: str, wheel: str, build_time: str) -> str:
+def _render_release_facts(facts: dict) -> str:
+    """机制 1：发行物事实由产物计算，人不得手写（生成区有标记，测试会复核）。"""
+    rows: list[list[str]] = []
+    for item in facts["files"]:
+        if item["name"] == facts["self_reference"]:
+            rows.append([f"`{item['name']}`（本文件）", "自引用（见下）",
+                         "见同目录 `SHA256SUMS` 对应行"])
+        else:
+            rows.append([f"`{item['name']}`", f"{item['bytes']:,}",
+                         f"`{item['sha256']}`"])
+    covered = "、".join(f"`{item['name']}`" for item in facts["covered"])
+    body = "\n".join([
+        "## 0. 发行物实物（构建时生成，禁止人工编辑）",
+        "",
+        "本区由 `scripts/build_release.py` 读取实际产物后填入；任何数字、哈希、路径都"
+        "不是手写的，护栏测试 `tests/test_doc_facts_guard.py` 会逐条与实物比对。",
+        "",
+        f"- 版本：`{facts['version']}`；构建时间：`{facts['build_time']}`；"
+        f"git commit：`{facts['git_commit']}`",
+        f"- wheel：`{facts['wheel']}`；Python 要求：`{facts['python_requires']}`",
+        f"- 支持规则包：{', '.join('`' + p + '`' for p in facts['supported_rule_pack_versions'])}",
+        f"- 证据包 schema：{', '.join('`' + s + '`' for s in facts['evidence_schema_versions'])}",
+        f"- 受签名覆盖的顶层文件：**{facts['file_count']} 个**；"
+        f"`SHA256SUMS` 共 **{facts['covered_count']} 行**，逐行对应：{covered}",
+        f"- 除本文件外的 {facts['file_count'] - 1} 个文件，合计 "
+        f"**{facts['others_bytes_total']:,} 字节**",
+        "",
+        table(["文件", "字节", "SHA-256"], rows),
+        "",
+        "自引用说明：`README-验收.md` 的字节与 SHA-256 无法写进自身（写入即改变自身哈希），"
+        "故表中不重复，统一由 `SHA256SUMS` 对应行给出；护栏测试用它反向核对本文件"
+        "**实际**字节与哈希。这正是“哈希覆盖自身”时唯一自洽的写法。",
+    ])
+    return generated_block("release-facts", body)
+
+
+def _readme(version: str, commit: str, wheel: str, build_time: str, facts: dict) -> str:
     return f"""# wca-replay {version} 验算发行物（验收一页）
 
 本目录用于**不拿源码仓库**的第三方复核：装 wheel + 锁定依赖，再对你手上的举证包
@@ -101,16 +139,18 @@ def _readme(version: str, commit: str, wheel: str, build_time: str) -> str:
 
 ## 对外演示注意（销售/演示者必读）
 
-对外演示“删输入被拦截”**必须用带外部锚点的 v3 包**（本目录 `package/` 下 8 个包，
-配 `anchor-<版本>-<role>.json` 与固定公钥）。默认 `wca all` 在不提供签名钥时导出的是
+对外演示“删输入被拦截”**必须用带外部锚点的 v3 包**。证据包**不在本发行物目录**：本目录只含 wheel、锁定依赖、校验清单与说明文件。当本 README 随交接目录交付、位于其 `release/` 子目录时，证据包在**相对本文件**的 `../package/`（该目录实际有几个包，由交接 README 的生成区给出，本文件不猜）；单包锚点文件在相对本文件的 `../` 根目录。默认 `wca all` 在不提供签名钥时导出的是
+
 **v2 无签名包**：它没有输入契约，验算最多得到 `RESULT PARTIAL`（exit 2），删掉输入后
 也**不会**变成 `FAIL`。用它演示会给人“删了也没事”的错觉。
 
-- 版本：`{version}`；构建时间：`{build_time}`；git commit：`{commit}`
-- wheel：`{wheel}`
-- Python 要求：`>=3.12`（本项目在 3.12.8 上构建与实测）
-- 支持规则包：{", ".join("`" + p + "`" for p in SUPPORTED_RULE_PACKS)}
-- 证据包 schema：{", ".join("`" + s + "`" for s in SCHEMA_VERSIONS)}
+{_render_release_facts(facts)}
+
+
+
+
+
+
 - **摘要边界**：`conclusion_digest` 只覆盖 `rule_id, rule_version, emp_id, work_date,
   period_key, severity, metric, citations, explanation` 九个规范字段；`source_rel_path`、
   `source_line_no`、`severity_label` 由 `artifact_sha256["findings.csv"]` 负责。
@@ -385,7 +425,10 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("requirements.lock.txt 不含哈希；拒绝生成发行物")
 
     readme = release_dir / "README-验收.md"
-    readme.write_text(_readme(version, commit, wheel_name, build_time), encoding="utf-8")
+    # 先占位：README 必须晚于 RELEASE.json/VERIFY-SIGNATURE.txt 才能读取实物事实，
+    # 又必须先于 SHA256SUMS 写出（否则自引用成环）。占位不写内容，只占文件名，
+    # 使“顶层文件数”从真实目录得到 5，而不是靠记忆。
+    readme.touch()
 
     release = {
         "release": release_dir.name,
@@ -458,6 +501,9 @@ def main(argv: list[str] | None = None) -> int:
             "才能说来源身份已核验。本签名不证明构建可复现，也不证明 wheel 未被替换——\n"
             "SHA256SUMS.sig 只签 SHA256SUMS，SHA256SUMS 不包含自身与 .sig。\n",
             encoding="utf-8")
+    facts = release_facts(release_dir)
+    readme.write_text(_readme(version, commit, wheel_name, build_time, facts),
+                      encoding="utf-8")
     sums = release_dir / "SHA256SUMS"
     lines = []
     for path in sorted(release_dir.iterdir(), key=lambda p: p.name):
