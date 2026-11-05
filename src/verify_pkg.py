@@ -40,6 +40,10 @@ def _note(name: str, status: str, result: dict, checks: dict, early: bool) -> st
         return "（早退，尚未走到验签）" if early else "（未验签）"
     if name == "signature_pinned":
         return "（早退，尚未走到验签）" if early else "（未提供外部公钥或 pin 未命中）"
+    if name == "inputs":
+        if result.get("inputs_digest_legacy"):
+            return "（v2 契约无 inputs_digest；属版本缺失，不是缺失/篡改）"
+        return "（早退，尚未走到输入摘要）" if early else "（未走到输入摘要）"
     return "（早退，尚未走到该检查）" if early else "（未走到该检查）"
 
 

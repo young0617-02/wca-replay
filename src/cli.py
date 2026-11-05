@@ -256,7 +256,8 @@ def cmd_export(args) -> int:
         print(f"  Ed25519 签名 key_id={signature.get('key_id', '')}（包内公钥只证明自洽；"
               "来源身份需复核方用 --public-key 固定公钥并通过独立渠道核验 key_id）")
     else:
-        print("  未签名（v2）；如需签名：--signing-key <私钥文件> 或 WCA_SIGNING_KEY_FILE")
+        print("  未签名（v2）：wca-verify 最多给 RESULT PARTIAL（exit 2），不能作为完整验收；"
+              "如需完整形态：--signing-key <私钥文件> 或 WCA_SIGNING_KEY_FILE（导出 v3）")
     print("  复核方：用发行 wheel 的 wca-verify（不执行包内 verify.py）做字节层/工件绑定，"
           "再用 wca replay 把输入喂回引擎比三元组；包内 verify.py 只是便利脚本，不是信任依据")
     return 0
@@ -877,7 +878,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="不打包原始输入 CSV（包会因此无法离线重放）")
     p.add_argument("--signing-key", dest="signing_key", default=None,
                    help="Ed25519 私钥文件（单行 Base64 seed）；不传则读 "
-                        "WCA_SIGNING_KEY_FILE / WCA_SIGNING_KEY_B64，仍无则导出 v2 无签名包")
+                        "WCA_SIGNING_KEY_FILE / WCA_SIGNING_KEY_B64，有钥自动导出 v3；"
+                        "仍无钥则导出 v2 无签名包（验算最多 RESULT PARTIAL，exit 2）")
     p.add_argument("--omit-fields", dest="omit_fields", default="",
                    help="受控裁剪非投影列，逗号分隔 kind:field；当前仅支持 leave:paid；默认不裁剪")
     p.set_defaults(fn=cmd_export)

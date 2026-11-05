@@ -195,7 +195,10 @@ Get-Content RELEASE.json -Encoding UTF8 | ConvertFrom-Json
 
 `RELEASE.json` 至少要核对：`version`、`build_time`、`git_commit`、
 `python_requires`、`supported_rule_pack_versions`、`evidence_schema_versions`。
-`SHA256SUMS` 覆盖本目录内除自身与 `SHA256SUMS.sig` 外的全部文件。
+`SHA256SUMS` 只覆盖构建时的 **5 个顶层文件**：`{wheel}`、`requirements.lock.txt`、
+`README-验收.md`、`RELEASE.json`、`VERIFY-SIGNATURE.txt`。`old-wheels/`、
+`old-packages/` 与签发后追加的文件（如后续补入的覆盖范围说明）**不在 `SHA256SUMS.sig`
+保护范围内**；旧 wheel/旧包须另行核对它们各自的 `旧发行物-SHA256清单.md`。
 
 ## 2. 建干净 venv 并安装（不要复用项目 .venv）
 
@@ -227,6 +230,12 @@ py -3.12 -m venv .venv-clean
 任一项不匹配 → `RESULT FAIL`（exit 1）。`--anchor-file <单包 anchor.json>` 可一次提供
 `anchor`/`package_sha256`/`artifacts_digest`/`evidence_digest`，**显式参数优先 > 环境变量 >
 文件兜底**；证据摘要环境变量为 `WCA_EXPECT_EVIDENCE_DIGEST`。
+
+**无签名 v2 包**：未提供 `--signing-key`/`WCA_SIGNING_KEY_FILE`/`WCA_SIGNING_KEY_B64` 时
+导出的是 v2 无签名包；`wca-verify` 对其最多输出 `RESULT PARTIAL`（exit 2），
+**不能作为完整验收**；只有显式 `--require-signature` 才 `RESULT FAIL`（exit 1）。
+v2 本无 `inputs_digest`，验算输出 `INPUTS DIGEST NOT CHECKED`（版本缺失，不是篡改）；
+schema v3 缺该字段才是 `INPUTS FAIL`。
 
 **跨版本可比性（0.4.9）**：摘要只在同 `rule_pack_version` + 同 evidence schema 下可比。
 外部包 SHA / evidence / artifacts 门禁**先于可比性判定**：
@@ -408,7 +417,10 @@ def main(argv: list[str] | None = None) -> int:
             "key_id": key_id,
             "public_key_b64": public_b64,
             "signed_file": "SHA256SUMS",
-            "scope": "SHA256SUMS 覆盖除 SHA256SUMS.sig 与自身外的发行文件",
+            "scope": ("SHA256SUMS 仅覆盖构建时的 5 个顶层发行文件"
+                      "（wheel/requirements.lock.txt/README-验收.md/RELEASE.json/"
+                      "VERIFY-SIGNATURE.txt）；old-wheels/、old-packages/ 及签发后追加"
+                      "文件不在保护范围"),
             "note": "签名只证明 SHA256SUMS 与私钥匹配；来源身份需独立核验 key_id",
         }
         if args.allow_key_rotation:

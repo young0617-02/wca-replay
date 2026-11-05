@@ -672,7 +672,7 @@ def verify_package(package: Path | str, *, public_keys: list[str] | tuple[str, .
         "manifest_checksum": "missing", "chain": {"ok": False, "reason": "未校验", "length": 0,
                                                    "head_hash": "", "checked": False},
         "artifact": {}, "findings": {}, "evidence": {}, "evidence_legacy": False,
-        "inputs_digest": "", "inputs_digest_ok": False,
+        "inputs_digest": "", "inputs_digest_ok": False, "inputs_digest_legacy": False,
         "signature_present": False, "signature_ok": False, "signature_trust": "none",
         "signature_key_id": "", "signature_reason": "", "signature_checked": False,
         "anchor_checked": False, "anchor_expected": bool(
@@ -842,16 +842,23 @@ def verify_package(package: Path | str, *, public_keys: list[str] | tuple[str, .
                 return result
             declared_inputs = manifest.get("inputs_digest")
             if not isinstance(declared_inputs, str) or not declared_inputs:
-                checks["inputs"] = "FAIL"
-                result["reason"] = "INPUTS FAIL 缺少 manifest.inputs_digest"
-                return result
-            result["inputs_digest"] = declared_inputs
-            if actual_inputs != declared_inputs:
-                checks["inputs"] = "FAIL"
-                result["reason"] = "INPUTS FAIL 输入摘要与 manifest.inputs_digest 不一致"
-                return result
-            result["inputs_digest_ok"] = True
-            checks["inputs"] = "OK"
+                if schema_ver >= 3:
+                    # v3 契约要求该字段：缺失是真违约，必须失败关闭。
+                    checks["inputs"] = "FAIL"
+                    result["reason"] = "INPUTS FAIL 缺少 manifest.inputs_digest"
+                    return result
+                # v2 契约从未包含 inputs_digest：这是版本缺失，不是不一致/篡改。
+                # 记 NOT CHECKED，并排除出 RESULT OK 门禁，最多得到 PARTIAL。
+                result["inputs_digest_legacy"] = True
+                checks["inputs"] = "NOT CHECKED"
+            else:
+                result["inputs_digest"] = declared_inputs
+                if actual_inputs != declared_inputs:
+                    checks["inputs"] = "FAIL"
+                    result["reason"] = "INPUTS FAIL 输入摘要与 manifest.inputs_digest 不一致"
+                    return result
+                result["inputs_digest_ok"] = True
+                checks["inputs"] = "OK"
             pinned = signing.load_public_keys(public_keys)
             signature = signing.verify_signature(manifest, chain["head_hash"], pinned)
             result["signature_checked"] = True
@@ -896,8 +903,10 @@ def verify_package(package: Path | str, *, public_keys: list[str] | tuple[str, .
                                "artifacts_digest_internal", "extras", "findings", "evidence",
                                "chain", "inputs_completeness", "inputs")
             if schema_ver < 3:
+                # 旧契约没有 inputs_digest/inputs_completeness：NOT CHECKED 不参与
+                # 门禁，但也不会被写成“通过”；content_ok 仍可为真，结果只能是 PARTIAL。
                 internal_checks = tuple(name for name in internal_checks
-                                        if name != "inputs_completeness")
+                                        if name not in ("inputs_completeness", "inputs"))
             if result.get("evidence_legacy"):
                 # 旧包没有 evidence_digest：按既有分档保留可验证性，但不把 NOT CHECKED
                 # 写成“检查通过”，也不让它参与 RESULT OK 门禁。

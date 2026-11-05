@@ -274,7 +274,9 @@ UTF-8 字节序排序，用换行符连接，取 SHA-256 十六进制小写摘�
    即使同步重算工件哈希/checksum 并重签，`FINDINGS DIGEST FAIL` 仍会因 findings 反算摘要不一致而拦下。
    **包内自带公钥只能打印 `package self-check` (NOT source trust)**；只有包外固定公钥 pin 才打印
    `SIGNATURE OK (pinned ...)`。签名不证明结论正确，也不能防私钥持有人作恶；结论正确性仍要靠
-   `wca replay` 证明。未配置私钥时仍导出 v2 无签名包，行为不变。
+   `wca replay` 证明。未配置私钥时仍导出 v2 无签名包；`wca-verify` 对它的结果最多是
+   `RESULT PARTIAL`（exit 2），**不能作为完整验收**；配钥（`--signing-key` /
+   `WCA_SIGNING_KEY_FILE`）则自动导出 v3。
    交付时请把**四元组**另行记录在包外：`schema_version,rule_pack_version,input_fingerprint,
    conclusion_digest`，并记录签名 `key_id`、包 SHA-256、`artifacts_digest` 与
    `evidence_digest`（0.4.3 起为第五项外部门禁，0.4.5 延续）；事后用
@@ -294,7 +296,7 @@ UTF-8 字节序排序，用换行符连接，取 SHA-256 十六进制小写摘�
 | --- | --- | --- | --- |
 | 0 | `RESULT OK` | 包体、工件、审计链、输入、签名、外部锚点与摘要全部一致 | 可通过 |
 | 1 | `RESULT FAIL` | 同版本同 schema 下内容/摘要/签名/工件真实不符，或锚点文件自相矛盾 | **阻断**，按篡改/损坏调查 |
-| 2 | `RESULT PARTIAL` | 外部门禁缺失（如未传 artifacts_digest / evidence_digest） | **不得当通过**；补齐门禁后重跑 |
+| 2 | `RESULT PARTIAL` | 外部门禁缺失（如未传 artifacts_digest / evidence_digest），或包为 v2 无签名；旧包缺 `inputs_digest` 也归此档 | **不得当通过**；补齐门禁/改用 v3 后重跑 |
 | 3 | `RESULT INCOMPARABLE` | 可比性判定发现跨 `rule_pack_version`/schema（仅显式锚点串，或外部包 SHA/evidence/artifacts 已通过时），或锚点文件缺 `comparability_scope` | **不得当通过，也不得当篡改**；转人工核对版本，改用对应版本锚点与 wheel |
 
    **跨版本锚点的门禁先后（0.4.11 更正）**：用**完整单包锚点文件**（含 `package_sha256`/
@@ -305,6 +307,14 @@ UTF-8 字节序排序，用换行符连接，取 SHA-256 十六进制小写摘�
    **旧 wheel 的 scope 边界（0.4.11）**：0.4.4–0.4.8 旧 wheel 不做 `comparability_scope` 判定，
    其 `RESULT OK` 仅表示旧口径通过，**不表示可比性已核验**；0.4.9 起才有该判定。旧包必须配
    对应版本旧 wheel（清单见交接包 `OLD-WHEELS.md`）。
+   **wheel diff 复核（0.4.13，外部人可自证“无规则语义变更”）**：不解包也能逐文件比对两版 wheel：
+   ```powershell
+   python -c "import zipfile,hashlib,sys; a,b=sys.argv[1:]; ha={n:hashlib.sha256(zipfile.ZipFile(a).read(n)).hexdigest() for n in zipfile.ZipFile(a).namelist()}; hb={n:hashlib.sha256(zipfile.ZipFile(b).read(n)).hexdigest() for n in zipfile.ZipFile(b).namelist()}; print('changed:', sorted(n for n in set(ha)&set(hb) if ha[n]!=hb[n])); print('added:', sorted(set(hb)-set(ha))); print('removed:', sorted(set(ha)-set(hb)))" old.whl new.whl
+   ```
+   实测 0.4.11→0.4.12：`changed` 只有 `policies/RULE-PACK.md`、`src/__init__.py`（版本号）、
+   `src/_release_info.py`（版本号/BUILD_COMMIT）；`added`/`removed` 只是 `dist-info` 目录名随版本变化。
+   `src/` 其余模块逐字节相同，可据此独立确认“仅文档与版本号变更，无规则语义变更”，
+   不需要信任本 README 的结论。
 
    **锚点文件缺 `comparability_scope`（0.4.10）**：只要传了带 `anchor` 串的锚点文件却缺
    `comparability_scope`，输出 `RESULT INCOMPARABLE`（exit 3），**不静默按可比处理**；
