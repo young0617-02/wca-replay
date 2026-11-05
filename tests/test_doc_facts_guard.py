@@ -7,22 +7,31 @@
 - 所有 64 位哈希都能在交付目录里找到出处（文件字节哈希 / 包内摘要 / 锚点字段）；
 - `SHA256SUMS` 行数与文档写的“N 行/N 个文件”一致；
 - 每份文档的 `## X、` 章节号唯一且连续（D1）；
-- 文档相对路径全部存在或已登记（调用 `check_handoff_refs`）；
-- 文档里出现的其余数字必须属于“从产物算出的值”或显式登记的非产物常量。
+- **所有形如路径/文件名的字符串（含反引号内）必须存在或列入 `未随交付清单.md`**；
+- **所有计数声明（N 个 wheel/锁/包/锚点、N 条 v4/v5）必须与实物逐一相等，含中文数词**；
+- 文档里出现的其余数字必须属于“从产物算出的值”或 `docs/护栏豁免表.md` 登记的常量。
 
-任何一条不符即失败。
+任何一条不符即失败。历史归档报告（`reports/` 内旧轮次文件）记录的是当时产物，
+计数与哈希按历史记录处理；路径/文件名仍按本目录实物核对。
 """
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
+import os
 import re
+import sys
+import zipfile
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-HANDOFF = ROOT / "handoff" / "20261104-第十七轮整改"
+# 红灯阶段可用 WCA_HANDOFF_DIR 指向上一个交付目录（0.4.15），绿阶段默认本轮的第十八轮。
+HANDOFF = Path(os.environ.get(
+    "WCA_HANDOFF_DIR", ROOT / "handoff" / "20261104-第十八轮整改"))
 
 SHA_RE = re.compile(r"[0-9a-f]{64}")
 MANIFEST_LINE_RE = re.compile(
@@ -32,30 +41,17 @@ PACKAGE_ROW_RE = re.compile(
 SUMS_COUNT_RE = re.compile(r"SHA256SUMS[^|\n]{0,40}?(?:共|实有|只有|保护)\s*[*`]*\s*(\d+)")
 SECTION_RE = re.compile(r"(?m)^## ([零一二三四五六七八九十]+)、")
 
-# 非产物常量：退出码、年份、逻辑分档。每一项都必须有“为什么不是实物事实”的理由。
-NON_ARTIFACT_NUMBERS = {
-    "0": "退出码 OK", "1": "退出码 FAIL", "2": "退出码 PARTIAL", "3": "退出码 INCOMPARABLE",
-    "2026": "年份（构建时间/日期）", "2025": "年份",
-    "4": "四项未闭合 / 0.4.x 版本串", "6": "0.4.6 历史版本号", "8": "0.4.8 历史版本号",
-    "9": "0.4.9 历史版本号", "16": "八包 × verify/replay = 16 次",
-    "115": "第四轮盲验 findings 总数（包内 manifest）",
-    "31": "变异测试用例数（测试代码常量，不随交付）",
-    "7": "七类篡改（用例类别数）",
-    "14": "第四轮盲验查出的问题条数（报告口径，非产物）",
-    "25": "0.4.1 时代测试用例数（历史测试名称的一部分）",
-    "639": "第十六轮 PG 全量历史计数（归档日志，非现行口径）",
-    "615": "第十六轮离线全量历史计数（归档日志，非现行口径）",
-    "549": "0.4.5 历史计数（归档日志）",
-    "572": "0.4.5 PG 历史计数（归档日志）",
-    "13": "包内 CONFIDENCE.md 的 13 项存疑（历史口径，非本轮产物）",
-    "18": "PostgreSQL 版本号（环境要求，非产物事实）",
-    "27": "M-07 上一轮 pip-audit 锁定包计数（外部工具历史结果）",
-    "30": "M-07 本轮 pip-audit JSON 列出的包数（外部工具结果）",
-    "31": "M-07 本轮导出的锁定包条数（外部工具结果）",
-    "8601": "ISO 8601 标准编号",
-    "0600": "POSIX 文件权限模式",
-    "40": "完整 git commit 的十六进制长度（协议常量）",
-}
+CN_DIGITS = {ch: i for i, ch in enumerate("零一二三四五六七八九")}
+NUM_TOKEN = r"(?:\d+(?:,\d{3})*|[零一二三四五六七八九十百两]+)"
+
+sys.path.insert(0, str(ROOT / "scripts"))
+import fact_exemptions  # noqa: E402
+import check_handoff_refs  # noqa: E402
+import docfacts  # noqa: E402
+
+# 非产物常量：唯一来源是 `scripts/fact_exemptions.py`，并随交付生成
+# `docs/护栏豁免表.md` 供客户逐条审阅。这里不再维护第二份名单。
+NON_ARTIFACT_NUMBERS = fact_exemptions.NUMBER_EXEMPTIONS
 
 
 def _require_handoff() -> Path:
@@ -69,10 +65,39 @@ def _texts(base: Path) -> list[Path]:
             if p.is_file() and p.suffix.lower() in (".md", ".txt")]
 
 
+def _to_int(token: str) -> int | None:
+    token = token.replace(",", "").strip()
+    if token.isdigit():
+        return int(token)
+    if not token:
+        return None
+    token = token.replace("两", "二")
+    total = 0
+    if "百" in token:
+        head, _, tail = token.partition("百")
+        total += (CN_DIGITS.get(head, 1) if head else 1) * 100
+        token = tail
+    if "十" in token:
+        head, _, tail = token.partition("十")
+        total += (CN_DIGITS.get(head, 1) if head else 1) * 10
+        token = tail
+    if token:
+        if token not in CN_DIGITS:
+            return None
+        total += CN_DIGITS[token]
+    return total
+
+
+def _package_manifest(path: Path) -> dict:
+    with zipfile.ZipFile(path) as zf:
+        return json.loads(zf.read("manifest.json").decode("utf-8"))
+
+
 def test_generated_blocks_are_marked_and_paired() -> None:
     base = _require_handoff()
     names = ["README-验收.md", "READ-ME-FIRST.txt", "OLD-WHEELS.md", "OLD-ANCHORS.md",
-             "release/SHA256SUMS-覆盖范围.md"]
+             "release/SHA256SUMS-覆盖范围.md", "reports/round17-diff.md",
+             "docs/护栏豁免表.md"]
     for name in names:
         text = (base / name).read_text(encoding="utf-8")
         starts = text.count("<!-- GENERATED:START")
@@ -91,7 +116,6 @@ def test_package_table_matches_actual_zips() -> None:
         assert path.is_file(), f"包表引用了不存在的包：{name}"
         assert int(byte_text.replace(",", "")) == path.stat().st_size, \
             f"{name} 字节与实物不符：文档 {byte_text}，实物 {path.stat().st_size}"
-        import hashlib
         actual = hashlib.sha256(path.read_bytes()).hexdigest()
         assert sha == actual, f"{name} SHA-256 与实物不符"
 
@@ -101,7 +125,6 @@ def test_manifest_lines_match_actual_files() -> None:
     text = (base / "交付清单.txt").read_text(encoding="utf-8")
     rows = MANIFEST_LINE_RE.findall(text)
     assert len(rows) >= 100, f"交付清单明细行过少（{len(rows)}），疑似漏列文件"
-    import hashlib
     for rel, byte_text, sha in rows:
         path = base / rel
         assert path.is_file(), f"交付清单列了不存在的文件：{rel}"
@@ -114,8 +137,6 @@ def test_every_hash_has_a_source_in_delivery() -> None:
     而不是“文档里抄了一遍就算有出处”。"""
     base = _require_handoff()
     known: set[str] = set()
-    import hashlib
-    import zipfile
 
     def collect(value) -> None:
         if isinstance(value, dict):
@@ -132,7 +153,6 @@ def test_every_hash_has_a_source_in_delivery() -> None:
                 known.add(value)
 
     # 公钥文件的指纹 = sha256(公钥字节)；这是文档里发行钥/包钥 key_id 的出处。
-    import base64
     for pub in base.rglob("*.pub"):
         raw = pub.read_text(encoding="utf-8").strip()
         try:
@@ -212,17 +232,245 @@ def test_section_numbers_are_unique_and_sequential() -> None:
 
 def test_relative_paths_resolve() -> None:
     base = _require_handoff()
-    sys_path = str(ROOT / "scripts")
-    import sys
-    if sys_path not in sys.path:
-        sys.path.insert(0, sys_path)
-    import check_handoff_refs
     errors = check_handoff_refs.check_refs(base)
     assert not errors, "\n".join(errors[:10])
 
 
+# ---------------------------------------------------------------------------
+# 路径断言：反引号内不再是豁免区
+# ---------------------------------------------------------------------------
+
+PATHISH_RE = re.compile(
+    r"(?<![A-Za-z0-9_./\\-])"
+    r"((?:[A-Za-z0-9_.\-\u4e00-\u9fff]+/)+[A-Za-z0-9_.\-\u4e00-\u9fff]+)")
+BARE_FILE_RE = re.compile(
+    r"(?<![A-Za-z0-9_.\-\u4e00-\u9fff])([A-Za-z0-9_][A-Za-z0-9_.-]*\."
+    r"(?:whl|zip|md|txt|json|jsonl|csv|py|pub|sig|toml|lock))(?![A-Za-z0-9_.\-])")
+SKIP_TOKEN_CHARS = ("<", ">", "*", "{", "}", "://", "=", "|", '"', "'")
+ARTIFACT_SUFFIXES = (".whl", ".zip", ".lock")
+PREFIX_HEADS = check_handoff_refs.PREFIXES
+# `release/`、`package/` 是交付内部命名空间：这些路径**必须真实存在**，
+# 不允许靠 `未随交付清单.md` 自动登记“洗白”（否则错误路径会被自动登记成通过）。
+DELIVERY_INTERNAL_HEADS = ("release", "package")
+_REPO_NAMES_CACHE: set[str] | None = None
+
+
+def _repo_names() -> set[str]:
+    """仓库内实际存在的文件名（源码/报告等不随交付，但文档会引用）。"""
+    global _REPO_NAMES_CACHE
+    if _REPO_NAMES_CACHE is None:
+        _REPO_NAMES_CACHE = {
+            path.name for path in ROOT.rglob("*")
+            if path.is_file() and ".git" not in path.parts and "node_modules" not in path.parts
+        }
+    return _REPO_NAMES_CACHE
+
+
+def _physical_names(base: Path) -> set[str]:
+    """交付目录内“真实存在”的路径与包内成员名（不含未随交付清单的自登记）。"""
+    names: set[str] = set()
+    for path in base.rglob("*"):
+        rel = path.relative_to(base).as_posix()
+        names.add(rel)
+        names.add(path.name)
+    for zip_path in base.rglob("*.zip"):
+        with zipfile.ZipFile(zip_path) as zf:
+            for member in zf.namelist():
+                names.add(member)
+                names.add(Path(member).name)
+    return names
+
+
+def _exists(base: Path, doc: Path, token: str) -> bool:
+    token = token.strip().rstrip("，。、；：")
+    if token.startswith("../"):
+        return (doc.parent / token).exists()
+    return (base / token).exists() or (doc.parent / token).exists()
+
+
+def _path_like(token: str) -> bool:
+    """只把“像文件路径”的 token 纳入断言，避免把 `OK/FAIL`、`v1/v2` 之类当路径。"""
+    token = token.rstrip("，。、；：")
+    if token.endswith(("-", ".", "/")):
+        return False
+    head = token.split("/", 1)[0]
+    suffix = Path(token).suffix.lower()
+    if "/" in token:
+        return head in PREFIX_HEADS or suffix in (
+            ".whl", ".zip", ".md", ".txt", ".json", ".jsonl", ".csv", ".py",
+            ".pub", ".sig", ".toml", ".lock")
+    return bool(Path(token).suffix.lower() in (
+        ".whl", ".zip", ".md", ".txt", ".json", ".jsonl", ".csv", ".py",
+        ".pub", ".sig", ".toml", ".lock"))
+
+
+def _historical_doc(path: Path, base: Path) -> bool:
+    """历史归档文档：其中路径/文件名指当时产物，允许以仓库内实际存在为准。"""
+    if path.name == "旧发行物-SHA256清单.md":
+        return True
+    return path.relative_to(base).parts[0] == "reports"
+
+
+def test_every_path_like_string_exists_or_registered() -> None:
+    """M1 的根因：旧护栏把反引号内容整体剥离，错误路径因此被豁免。
+
+    本断言**不再区分是否在反引号内**：任何形如 `a/b` 的路径或 `x.whl` 的文件名，
+    必须在交付目录内存在（含包内成员），或列入 `未随交付清单.md`；二者皆无即失败。
+    但 `release/`、`package/` 是交付内部命名空间，**不接受“未随交付清单”登记**——
+    未随交付清单是自动生成的，若允许它登记内部路径，错误路径会被自动洗白。
+    """
+    base = _require_handoff()
+    physical = _physical_names(base)
+    unshipped = check_handoff_refs.unshipped_paths(base)
+    tasks = []
+    for path in _texts(base):
+        if "lock.txt" in path.name:
+            # pip 锁文件是工具生成的依赖清单，不是叙述性文档。
+            continue
+        if path.name in ("未随交付清单.md", "旧发行物-SHA256清单.md"):
+            # 这两份本身就是“未随交付/历史发行物”的登记表，条目是历史路径记录。
+            continue
+        if _historical_doc(path, base):
+            # 历史归档报告记录当时产物（run 包、临时样例等早已清理），本目录不可自证；
+            # 已在 `已知残留与未闭合项.md` 明示。现行口径文档仍逐条核对。
+            continue
+        text = path.read_text(encoding="utf-8")
+        rel = path.relative_to(base).as_posix()
+        candidates = [m.group(1) for m in PATHISH_RE.finditer(text)]
+        candidates += [m.group(1) for m in BARE_FILE_RE.finditer(text)]
+        for token in candidates:
+            token = token.strip().rstrip("，。、；：")
+            if any(mark in token for mark in SKIP_TOKEN_CHARS):
+                continue
+            if token.startswith(("http", "www", "mailto")):
+                continue
+            if not _path_like(token):
+                continue
+            if _exists(base, path, token):
+                continue
+            if token in physical or Path(token).name in physical:
+                continue
+            head = token.split("/", 1)[0]
+            if head not in DELIVERY_INTERNAL_HEADS and token in unshipped:
+                continue
+            suffix = Path(token).suffix.lower()
+            # 源码/文档/报告类：仓库内实际存在即可（这些文件不随交付）。
+            if suffix not in ARTIFACT_SUFFIXES and (
+                    (ROOT / token).exists() or Path(token).name in _repo_names()):
+                continue
+            # 历史归档文档：路径指当时产物，仓库内仍有实物即可。
+            if _historical_doc(path, base) and Path(token).name in _repo_names():
+                continue
+            tasks.append(f"{rel} 提到既不存在也未登记的路径/文件名：{token}")
+    assert not tasks, (
+        "以下路径/文件名在交付目录内不存在，也未列入 `未随交付清单.md`：\n"
+        + "\n".join(sorted(set(tasks))[:30]))
+
+
+# ---------------------------------------------------------------------------
+# 计数断言：阿拉伯数字与中文数词都要与实物逐一相等
+# ---------------------------------------------------------------------------
+
+def _count_facts(base: Path) -> dict[str, int]:
+    old = docfacts.old_assets(base / "release")
+    anchors = docfacts.old_anchor_facts(base)
+    packages = sorted((base / "package").glob("*.zip"))
+    manifests = [_package_manifest(p) for p in packages]
+    rule_versions: dict[str, int] = {}
+    for manifest in manifests:
+        rule_versions.update(manifest["counts"].get("rule_versions", {}))
+    v4 = sum(n for label, n in rule_versions.items() if label.endswith(".v4"))
+    v5 = sum(n for label, n in rule_versions.items() if label.endswith(".v5"))
+    rel = docfacts.release_facts(base / "release")
+    return {
+        "wheels": len(old["wheels"]),
+        "wheels_old_wheels": sum(1 for w in old["wheels"] if "old-wheels" in w["dirs"]),
+        "wheels_old_packages": sum(1 for w in old["wheels"] if "old-packages" in w["dirs"]),
+        "locks": len(old["locks"]),
+        "locks_old_wheels": sum(1 for x in old["locks"] if "old-wheels" in x["dirs"]),
+        "locks_old_packages": sum(1 for x in old["locks"] if "old-packages" in x["dirs"]),
+        "packages": len(packages),
+        "old_packages": len(old["packages"]),
+        "singles": len(anchors["singles"]),
+        "combined": len(anchors["combined"]),
+        "covered": rel["covered_count"],
+        "rule_v4": v4,
+        "rule_v5": v5,
+    }
+
+
+CLAIM_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (re.compile(rf"({NUM_TOKEN})\s*个唯一\s*wheel"), "wheels"),
+    (re.compile(rf"旧 wheel[^\n]{{0,4}}?\*\*({NUM_TOKEN})\s*个\*\*"), "wheels"),
+    (re.compile(rf"唯一计\s*\n?\s*\*\*({NUM_TOKEN})\s*个\*\*"), "wheels"),
+    (re.compile(rf"`release/old-wheels/`\s*实有\s*\*\*({NUM_TOKEN})\s*个\*\*"),
+     "wheels_old_wheels"),
+    (re.compile(rf"另有\s*\*\*({NUM_TOKEN})\s*个\*\*同名副本"), "wheels_old_packages"),
+    (re.compile(rf"合计\s*\*\*({NUM_TOKEN})\s*个\*\*唯一锁"), "locks"),
+    (re.compile(rf"({NUM_TOKEN})\s*个(?:唯一|依赖)?\s*锁(?!定)"), "locks"),
+    (re.compile(rf"`release/old-wheels/`\s*\n?\s*\*\*({NUM_TOKEN})\s*个\*\*（"),
+     "locks_old_wheels"),
+    (re.compile(rf"`release/old-packages/`\s*\n?\s*\*\*({NUM_TOKEN})\s*个\*\*（"),
+     "locks_old_packages"),
+    (re.compile(rf"旧包\s*\*\*({NUM_TOKEN})\s*个\*\*"), "old_packages"),
+    (re.compile(rf"({NUM_TOKEN})\s*个\s*zip"), "old_packages"),
+    (re.compile(rf"(?<!旧)包\s*\*\*({NUM_TOKEN})\s*个\*\*"), "packages"),
+    (re.compile(rf"根目录单包锚点\s*\*\*({NUM_TOKEN})\s*个\*\*"), "singles"),
+    (re.compile(rf"单包锚点\s*\*\*({NUM_TOKEN})\s*个\*\*"), "singles"),
+    (re.compile(rf"组合记录\s*\*\*({NUM_TOKEN})\s*个\*\*"), "combined"),
+    (re.compile(rf"({NUM_TOKEN})\s*个锚点"), "singles"),
+    (re.compile(rf"({NUM_TOKEN})\s*条 v4"), "rule_v4"),
+    (re.compile(rf"({NUM_TOKEN})\s*条 v5"), "rule_v5"),
+    (re.compile(rf"v4 规则\s*({NUM_TOKEN})\s*条"), "rule_v4"),
+    (re.compile(rf"v5 规则\s*({NUM_TOKEN})\s*条"), "rule_v5"),
+]
+
+
+def test_declared_counts_match_actual() -> None:
+    """反向断言：文档声称的计数必须与实物逐一相等（中文数词同样覆盖）。"""
+    base = _require_handoff()
+    facts = _count_facts(base)
+    bad: list[str] = []
+    for path in _living_docs(base):
+        text = path.read_text(encoding="utf-8")
+        for pattern, key in CLAIM_PATTERNS:
+            for match in pattern.finditer(text):
+                value = _to_int(match.group(1))
+                if value is None:
+                    continue
+                if value != facts[key]:
+                    bad.append(f"{path.relative_to(base).as_posix()}：{match.group(0)!r} "
+                               f"→ 文档 {value}，实物 {facts[key]}（{key}）")
+    assert not bad, "文档计数与实物不符：\n" + "\n".join(bad[:20])
+
+
+def test_repo_docs_rule_version_counts_match_actual() -> None:
+    """仓库文档同样不得把 99 条 v4 写成 100 条（本轮盲验数字类问题）。"""
+    packages = sorted((ROOT / "handoff" / "20261104-第十七轮整改" / "package").glob("*.zip"))
+    if not packages:
+        pytest.skip("缺少 0.4.15 举证包，无法取得 rule_versions 实物")
+    manifest = _package_manifest(packages[1])
+    versions = manifest["counts"]["rule_versions"]
+    v4 = sum(n for label, n in versions.items() if label.endswith(".v4"))
+    v5 = sum(n for label, n in versions.items() if label.endswith(".v5"))
+    docs = [ROOT / "README.md", ROOT / "docs" / "签名方案.md",
+            ROOT / "docs" / "交付与验收SOP.md", ROOT / "policies" / "口径声明-对外版.md"]
+    bad: list[str] = []
+    for path in docs:
+        text = path.read_text(encoding="utf-8")
+        for match in re.finditer(rf"({NUM_TOKEN})\s*条 v4", text):
+            value = _to_int(match.group(1))
+            if value is not None and value != v4:
+                bad.append(f"{path.name}：v4 规则写 {value} 条，实物 {v4} 条")
+        for match in re.finditer(rf"({NUM_TOKEN})\s*条 v5", text):
+            value = _to_int(match.group(1))
+            if value is not None and value != v5:
+                bad.append(f"{path.name}：v5 规则写 {value} 条，实物 {v5} 条")
+    assert not bad, "\n".join(bad)
+
+
 def _living_docs(base: Path) -> list[Path]:
-    """数字审计只扫“现行口径”文档；历史报告是归档记录，其数字属于当时产物。"""
+    """数字/哈希/计数审计只扫“现行口径”文档；历史报告是归档记录，其数字属于当时产物。"""
     names = ["README-验收.md", "READ-ME-FIRST.txt", "OLD-WHEELS.md", "OLD-ANCHORS.md",
              "未随交付清单.md", "交付清单.txt", "release/README-验收.md",
              "release/SHA256SUMS-覆盖范围.md", "release/旧发行物-SHA256清单.md"]
@@ -237,13 +485,14 @@ def test_numbers_are_artifact_facts_or_declared_constants() -> None:
     packages = sorted((base / "package").glob("*.zip"))
     reports = sorted(p for p in (base / "reports").iterdir() if p.is_file())
     old_packages = sorted((base / "release" / "old-packages").glob("*.zip"))
-    old_wheels = sorted((base / "release" / "old-wheels").glob("*.whl"))
+    old = docfacts.old_assets(base / "release")
     anchors = sorted(base.glob("anchor-0.4.*.json"))
     sums_lines = [line for line in (base / "release" / "SHA256SUMS")
                   .read_text(encoding="utf-8").splitlines() if line.strip()]
     actual = {
         str(len(packages)), str(len(reports)), str(len(old_packages)),
-        str(len(old_wheels)), str(len(anchors)), str(len(sums_lines)),
+        str(len(old["wheels"])), str(len(old["locks"])),
+        str(len(anchors)), str(len(sums_lines)),
         str(len([p for p in base.rglob('*') if p.is_file()])),
     }
     for path in base.rglob("*"):
@@ -257,27 +506,26 @@ def test_numbers_are_artifact_facts_or_declared_constants() -> None:
             if path.is_file():
                 actual.add(str(path.stat().st_size))
                 actual.add(f"{path.stat().st_size:,}")
-    import sys
-    if str(ROOT / "scripts") not in sys.path:
-        sys.path.insert(0, str(ROOT / "scripts"))
-    import docfacts
-    for rel_dir in (base / "release", ROOT / "dist" / "wca-replay-0.4.15"):
-        rel = docfacts.release_facts(rel_dir)
+    for dist_dir in sorted((ROOT / "dist").glob("wca-replay-*")):
+        if not (dist_dir / "RELEASE.json").is_file():
+            continue
+        rel = docfacts.release_facts(dist_dir)
         actual.add(str(rel["others_bytes_total"]))
         actual.add(f"{rel['others_bytes_total']:,}")
         actual.add(str(rel["file_count"]))
         actual.add(str(rel["covered_count"]))
     for pkg in packages:
-        with __import__("zipfile").ZipFile(pkg) as zf:
-            manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
+        manifest = _package_manifest(pkg)
         for value in manifest["counts"].values():
+            if isinstance(value, int):
+                actual.add(str(value))
+        for value in manifest["counts"].get("rule_versions", {}).values():
             actual.add(str(value))
     actual.update(NON_ARTIFACT_NUMBERS)
     # 旧物与旧锚点的计数由同一扫描器给出（与 README 生成区同源）。
-    old = docfacts.old_assets(base / "release")
     actual.add(str(len(old["wheels"])))
-    actual.add(str(len(old["packages"])))
     actual.add(str(len(old["locks"])))
+    actual.add(str(len(old["packages"])))
     anchor_facts = docfacts.old_anchor_facts(base)
     actual.add(str(len(anchor_facts["singles"])))
     actual.add(str(len(anchor_facts["combined"])))
@@ -288,7 +536,6 @@ def test_numbers_are_artifact_facts_or_declared_constants() -> None:
     for cell in re.findall(r"\| (\d+) \|", diff_md):
         actual.add(cell)
     # `未随交付清单.md` 的每个前缀条数由扫描器重算。
-    import check_handoff_refs
     missing: dict[str, set[str]] = {}
     for path in check_handoff_refs.text_files(base):
         for ref in check_handoff_refs.refs(path.read_text(encoding="utf-8")):
@@ -299,7 +546,12 @@ def test_numbers_are_artifact_facts_or_declared_constants() -> None:
         actual.update({count, count + " 条", count + "条"})
 
     bad: list[str] = []
+    known_names = _physical_names(base)
     for path in _living_docs(base):
+        if path.name in ("未随交付清单.md", "旧发行物-SHA256清单.md"):
+            # 该文件本身是“仓库内未随交付路径 / 历史发行物”的登记表，内容是路径清单；
+            # 其路径存在性由 `test_relative_paths_resolve` 与生成器负责。
+            continue
         text = path.read_text(encoding="utf-8")
         # 先把“不是数字事实”的标识符整体替换掉，避免把 256/版本号/提交号拆成数字。
         text = re.sub(r"(?i)sha-?256", "SHA", text)
@@ -318,9 +570,14 @@ def test_numbers_are_artifact_facts_or_declared_constants() -> None:
         text = re.sub(r"\bv\d+\b", "<VER>", text)
         text = re.sub(r"\d{4}-\d{2}-\d{2}", "<DATE>", text)
         text = re.sub(r"\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:[+-]\d{2}:\d{2}|Z)?", "<TIME>", text)
-        # 反引号里的路径本身由 `check_handoff_refs` 校验存在性；路径内的数字是标识符，
-        # 不是“文档声明的事实数字”，不应在这里逐个追溯。
-        text = re.sub(r"`[^`\n]*[/\\][^`\n]*`", "<PATH>", text)
+        # 反引号内若含数字，只在**该路径/文件名确实存在**时才剥离；不存在的路径由
+        # `test_every_path_like_string_exists_or_registered` 直接判失败。这里不再“一律豁免”。
+        text = re.sub(r"`([^`\n]+)`", lambda m: (
+            "<PATH>" if (_exists(base, path, m.group(1).strip())
+                          or Path(m.group(1).strip()).name in known_names
+                          or (ROOT / m.group(1).strip()).exists()
+                          or Path(m.group(1).strip()).name in _repo_names())
+            else m.group(0)), text)
         text = text.replace(" 条", "")
         for token in re.findall(r"\d+(?:,\d{3})*", text):
             if token in actual:

@@ -1,0 +1,185 @@
+﻿F.....FFFF.                                                              [100%]
+================================== FAILURES ===================================
+_________________ test_generated_blocks_are_marked_and_paired _________________
+
+    def test_generated_blocks_are_marked_and_paired() -> None:
+        base = _require_handoff()
+        names = ["README-验收.md", "READ-ME-FIRST.txt", "OLD-WHEELS.md", "OLD-ANCHORS.md",
+                 "release/SHA256SUMS-覆盖范围.md", "reports/round17-diff.md",
+                 "docs/护栏豁免表.md"]
+        for name in names:
+            text = (base / name).read_text(encoding="utf-8")
+            starts = text.count("<!-- GENERATED:START")
+            ends = text.count("<!-- GENERATED:END")
+>           assert starts >= 1 and ends >= 1, f"{name} 缺少生成区标记"
+E           AssertionError: reports/round17-diff.md 缺少生成区标记
+E           assert (0 >= 1)
+
+tests\test_doc_facts_guard.py:105: AssertionError
+_________________________ test_relative_paths_resolve _________________________
+
+    def test_relative_paths_resolve() -> None:
+        base = _require_handoff()
+        errors = check_handoff_refs.check_refs(base)
+>       assert not errors, "\n".join(errors[:10])
+E       AssertionError: docs/冻结版本说明.md 引用了既未交付也未列明的仓库路径：policies/CONFIDENCE.md
+E         docs/冻结版本说明.md 引用了既未交付也未列明的仓库路径：policies/RULE-PACK.md
+E         docs/安全与证据链现状.md 引用了既未交付也未列明的仓库路径：policies/口径声明-对外版.md
+E         READ-ME-FIRST.txt 引用了既未交付也未列明的仓库路径：policies/CONFIDENCE.md
+E         READ-ME-FIRST.txt 引用了既未交付也未列明的仓库路径：policies/RULE-PACK.md
+E         README-验收.md 引用了既未交付也未列明的仓库路径：policies/CONFIDENCE.md
+E         README-验收.md 引用了既未交付也未列明的仓库路径：policies/LAW-REFERENCES.md
+E         README-验收.md 引用了既未交付也未列明的仓库路径：policies/RULE-PACK.md
+E         README-验收.md 引用了既未交付也未列明的仓库路径：policies/口径声明-对外版.md
+E         README-验收.md 引用了既未交付也未列明的仓库路径：policies/字段口径与条文依据-对外版.md
+E       assert not ['docs/冻结版本说明.md 引用了既未交付也未列明的仓库路径：policies/CONFIDENCE.md', 'docs/冻结版本说明.md 引用了既未交付也未列明的仓库路径：policies/RULE-PACK.md', 'd...READ-ME-FIRST.txt 引用了既未交付也未列明的仓库路径：policies/RULE-PACK.md', 'README-验收.md 引用了既未交付也未列明的仓库路径：policies/CONFIDENCE.md', ...]
+
+tests\test_doc_facts_guard.py:236: AssertionError
+______________ test_every_path_like_string_exists_or_registered _______________
+
+    def test_every_path_like_string_exists_or_registered() -> None:
+        """M1 的根因：旧护栏把反引号内容整体剥离，错误路径因此被豁免。
+    
+        本断言**不再区分是否在反引号内**：任何形如 `a/b` 的路径或 `x.whl` 的文件名，
+        必须在交付目录内存在（含包内成员），或列入 `未随交付清单.md`；二者皆无即失败。
+        但 `release/`、`package/` 是交付内部命名空间，**不接受“未随交付清单”登记**——
+        未随交付清单是自动生成的，若允许它登记内部路径，错误路径会被自动洗白。
+        """
+        base = _require_handoff()
+        physical = _physical_names(base)
+        unshipped = check_handoff_refs.unshipped_paths(base)
+        tasks = []
+        for path in _texts(base):
+            if "lock.txt" in path.name:
+                # pip 锁文件是工具生成的依赖清单，不是叙述性文档。
+                continue
+            if path.name in ("未随交付清单.md", "旧发行物-SHA256清单.md"):
+                # 这两份本身就是“未随交付/历史发行物”的登记表，条目是历史路径记录。
+                continue
+            if _historical_doc(path, base):
+                # 历史归档报告记录当时产物（run 包、临时样例等早已清理），本目录不可自证；
+                # 已在 `已知残留与未闭合项.md` 明示。现行口径文档仍逐条核对。
+                continue
+            text = path.read_text(encoding="utf-8")
+            rel = path.relative_to(base).as_posix()
+            candidates = [m.group(1) for m in PATHISH_RE.finditer(text)]
+            candidates += [m.group(1) for m in BARE_FILE_RE.finditer(text)]
+            for token in candidates:
+                token = token.strip().rstrip("，。、；：")
+                if any(mark in token for mark in SKIP_TOKEN_CHARS):
+                    continue
+                if token.startswith(("http", "www", "mailto")):
+                    continue
+                if not _path_like(token):
+                    continue
+                if _exists(base, path, token):
+                    continue
+                if token in physical or Path(token).name in physical:
+                    continue
+                head = token.split("/", 1)[0]
+                if head not in DELIVERY_INTERNAL_HEADS and token in unshipped:
+                    continue
+                suffix = Path(token).suffix.lower()
+                # 源码/文档/报告类：仓库内实际存在即可（这些文件不随交付）。
+                if suffix not in ARTIFACT_SUFFIXES and (
+                        (ROOT / token).exists() or Path(token).name in _repo_names()):
+                    continue
+                # 历史归档文档：路径指当时产物，仓库内仍有实物即可。
+                if _historical_doc(path, base) and Path(token).name in _repo_names():
+                    continue
+                tasks.append(f"{rel} 提到既不存在也未登记的路径/文件名：{token}")
+>       assert not tasks, (
+            "以下路径/文件名在交付目录内不存在，也未列入 `未随交付清单.md`：\n"
+            + "\n".join(sorted(set(tasks))[:30]))
+E       AssertionError: 以下路径/文件名在交付目录内不存在，也未列入 `未随交付清单.md`：
+E         OLD-ANCHORS.md 提到既不存在也未登记的路径/文件名：anchor-0.4.1x.json
+E         docs/签名方案.md 提到既不存在也未登记的路径/文件名：foo.csv
+E       assert not ['docs/签名方案.md 提到既不存在也未登记的路径/文件名：foo.csv', 'OLD-ANCHORS.md 提到既不存在也未登记的路径/文件名：anchor-0.4.1x.json']
+
+tests\test_doc_facts_guard.py:365: AssertionError
+______________________ test_declared_counts_match_actual ______________________
+
+    def test_declared_counts_match_actual() -> None:
+        """反向断言：文档声称的计数必须与实物逐一相等（中文数词同样覆盖）。"""
+        base = _require_handoff()
+        facts = _count_facts(base)
+        bad: list[str] = []
+        for path in _living_docs(base):
+            text = path.read_text(encoding="utf-8")
+            for pattern, key in CLAIM_PATTERNS:
+                for match in pattern.finditer(text):
+                    value = _to_int(match.group(1))
+                    if value is None:
+                        continue
+                    if value != facts[key]:
+                        bad.append(f"{path.relative_to(base).as_posix()}：{match.group(0)!r} "
+                                   f"→ 文档 {value}，实物 {facts[key]}（{key}）")
+>       assert not bad, "文档计数与实物不符：\n" + "\n".join(bad[:20])
+E       AssertionError: 文档计数与实物不符：
+E         README-验收.md：'旧 wheel **13 个**' → 文档 13，实物 11（wheels）
+E         README-验收.md：'`release/old-wheels/` 实有 **13 个**' → 文档 13，实物 11（wheels_old_wheels）
+E         docs/签名方案.md：'100 条 v4' → 文档 100，实物 99（rule_v4）
+E       assert not ["README-验收.md：'旧 wheel **13 个**' → 文档 13，实物 11（wheels）", "README-验收.md：'`release/old-wheels/` 实有 **13 个**' → 文档 13，实物 11（wheels_old_wheels）", "docs/签名方案.md：'100 条 v4' → 文档 100，实物 99（rule_v4）"]
+
+tests\test_doc_facts_guard.py:444: AssertionError
+_______________ test_repo_docs_rule_version_counts_match_actual _______________
+
+    def test_repo_docs_rule_version_counts_match_actual() -> None:
+        """仓库文档同样不得把 99 条 v4 写成 100 条（本轮盲验数字类问题）。"""
+        packages = sorted((ROOT / "handoff" / "20261104-第十七轮整改" / "package").glob("*.zip"))
+        if not packages:
+            pytest.skip("缺少 0.4.15 举证包，无法取得 rule_versions 实物")
+        manifest = _package_manifest(packages[1])
+        versions = manifest["counts"]["rule_versions"]
+        v4 = sum(n for label, n in versions.items() if label.endswith(".v4"))
+        v5 = sum(n for label, n in versions.items() if label.endswith(".v5"))
+        docs = [ROOT / "README.md", ROOT / "docs" / "签名方案.md",
+                ROOT / "docs" / "交付与验收SOP.md", ROOT / "policies" / "口径声明-对外版.md"]
+        bad: list[str] = []
+        for path in docs:
+            text = path.read_text(encoding="utf-8")
+            for match in re.finditer(rf"({NUM_TOKEN})\s*条 v4", text):
+                value = _to_int(match.group(1))
+                if value is not None and value != v4:
+                    bad.append(f"{path.name}：v4 规则写 {value} 条，实物 {v4} 条")
+            for match in re.finditer(rf"({NUM_TOKEN})\s*条 v5", text):
+                value = _to_int(match.group(1))
+                if value is not None and value != v5:
+                    bad.append(f"{path.name}：v5 规则写 {value} 条，实物 {v5} 条")
+>       assert not bad, "\n".join(bad)
+E       AssertionError: README.md：v4 规则写 100 条，实物 99 条
+E         签名方案.md：v4 规则写 100 条，实物 99 条
+E         交付与验收SOP.md：v4 规则写 100 条，实物 99 条
+E         口径声明-对外版.md：v4 规则写 100 条，实物 99 条
+E       assert not ['README.md：v4 规则写 100 条，实物 99 条', '签名方案.md：v4 规则写 100 条，实物 99 条', '交付与验收SOP.md：v4 规则写 100 条，实物 99 条', '口径声明-对外版.md：v4 规则写 100 条，实物 99 条']
+
+tests\test_doc_facts_guard.py:469: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/test_doc_facts_guard.py::test_generated_blocks_are_marked_and_paired - AssertionError: reports/round17-diff.md 缺少生成区标记
+assert (0 >= 1)
+FAILED tests/test_doc_facts_guard.py::test_relative_paths_resolve - AssertionError: docs/冻结版本说明.md 引用了既未交付也未列明的仓库路径：policies/CONFIDENCE.md
+  docs/冻结版本说明.md 引用了既未交付也未列明的仓库路径：policies/RULE-PACK.md
+  docs/安全与证据链现状.md 引用了既未交付也未列明的仓库路径：policies/口径声明-对外版.md
+  READ-ME-FIRST.txt 引用了既未交付也未列明的仓库路径：policies/CONFIDENCE.md
+  READ-ME-FIRST.txt 引用了既未交付也未列明的仓库路径：policies/RULE-PACK.md
+  README-验收.md 引用了既未交付也未列明的仓库路径：policies/CONFIDENCE.md
+  README-验收.md 引用了既未交付也未列明的仓库路径：policies/LAW-REFERENCES.md
+  README-验收.md 引用了既未交付也未列明的仓库路径：policies/RULE-PACK.md
+  README-验收.md 引用了既未交付也未列明的仓库路径：policies/口径声明-对外版.md
+  README-验收.md 引用了既未交付也未列明的仓库路径：policies/字段口径与条文依据-对外版.md
+assert not ['docs/冻结版本说明.md 引用了既未交付也未列明的仓库路径：policies/CONFIDENCE.md', 'docs/冻结版本说明.md 引用了既未交付也未列明的仓库路径：policies/RULE-PACK.md', 'd...READ-ME-FIRST.txt 引用了既未交付也未列明的仓库路径：policies/RULE-PACK.md', 'README-验收.md 引用了既未交付也未列明的仓库路径：policies/CONFIDENCE.md', ...]
+FAILED tests/test_doc_facts_guard.py::test_every_path_like_string_exists_or_registered - AssertionError: 以下路径/文件名在交付目录内不存在，也未列入 `未随交付清单.md`：
+  OLD-ANCHORS.md 提到既不存在也未登记的路径/文件名：anchor-0.4.1x.json
+  docs/签名方案.md 提到既不存在也未登记的路径/文件名：foo.csv
+assert not ['docs/签名方案.md 提到既不存在也未登记的路径/文件名：foo.csv', 'OLD-ANCHORS.md 提到既不存在也未登记的路径/文件名：anchor-0.4.1x.json']
+FAILED tests/test_doc_facts_guard.py::test_declared_counts_match_actual - AssertionError: 文档计数与实物不符：
+  README-验收.md：'旧 wheel **13 个**' → 文档 13，实物 11（wheels）
+  README-验收.md：'`release/old-wheels/` 实有 **13 个**' → 文档 13，实物 11（wheels_old_wheels）
+  docs/签名方案.md：'100 条 v4' → 文档 100，实物 99（rule_v4）
+assert not ["README-验收.md：'旧 wheel **13 个**' → 文档 13，实物 11（wheels）", "README-验收.md：'`release/old-wheels/` 实有 **13 个**' → 文档 13，实物 11（wheels_old_wheels）", "docs/签名方案.md：'100 条 v4' → 文档 100，实物 99（rule_v4）"]
+FAILED tests/test_doc_facts_guard.py::test_repo_docs_rule_version_counts_match_actual - AssertionError: README.md：v4 规则写 100 条，实物 99 条
+  签名方案.md：v4 规则写 100 条，实物 99 条
+  交付与验收SOP.md：v4 规则写 100 条，实物 99 条
+  口径声明-对外版.md：v4 规则写 100 条，实物 99 条
+assert not ['README.md：v4 规则写 100 条，实物 99 条', '签名方案.md：v4 规则写 100 条，实物 99 条', '交付与验收SOP.md：v4 规则写 100 条，实物 99 条', '口径声明-对外版.md：v4 规则写 100 条，实物 99 条']
+5 failed, 6 passed in 7.73s

@@ -11,9 +11,10 @@
 
 > **对外演示注意（销售/演示者必读）**：演示“删输入被拦截”**必须用带外部锚点的 v3 包**
 > （交接目录 `package/` 下 8 个包 + `anchor-<版本>-<role>.json` + 固定公钥）。默认
-> `wca all` 不提供签名钥时导出的是 **v2 无签名包**：它没有输入契约，删掉输入后验算
-> 仍只得到 `RESULT PARTIAL`（exit 2），**不会** `FAIL`（实测：删一个输入 CSV 后仍是
-> `ARTIFACTS OK`、`RESULT PARTIAL`）。用它演示会给人“删了也没事”的错觉。
+> `wca all` 不提供签名钥时导出的是 **v2 无签名包**：它没有输入契约，**v2 包不会因缺少 `inputs_digest` 这一项门禁而被判 FAIL**（该门禁记 `NOT CHECKED`）；删掉输入后结果可能仍是
+> `ARTIFACTS OK` / `RESULT PARTIAL`（exit 2）。但**其他任何真实篡改仍判 FAIL**（exit 1），
+> `--require-signature` 下无签名即 `SIGNATURE FAIL`（exit 1）。用它演示会给人
+> “删了也没事”的错觉。
 
 ---
 
@@ -98,7 +99,7 @@ manifest/inputs 新增 `critical_bytes/critical/critical_message`；老包缺这
 按 [`data/raw/README.md`](data/raw/README.md) 的“v5 审批台账”一节执行 `python -m src.cli approval` 最小录入；
 这是输入差异，不是判据差异。
 
-**规则版本标签（v4/v5）**：v5 证据包里常见 `100 条 v4 + 16 条 v5`。这里的 `rule_version` 是**单条规则**的
+**规则版本标签（v4/v5）**：v5 证据包里常见 `99 条 v4 + 16 条 v5`。这里的 `rule_version` 是**单条规则**的
 版本标签，不等于 rule pack 版本；v5 规则包保留未改判据的 v4 规则是预期，不是包版本漂移。分布以
 `manifest.counts.rule_versions` 为准，逐条规则定义/条文/阈值见表内 `policies/RULE-PACK.md`。
 `conclusion_digest` 只覆盖 `rule_id, rule_version, emp_id, work_date, period_key, severity, metric,

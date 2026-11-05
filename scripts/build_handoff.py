@@ -94,6 +94,15 @@ def renumber_sections(text: str) -> tuple[str, list[str]]:
     return "\n".join(lines), titles
 
 
+def _anchor_counts(anchors: dict, version: str) -> tuple[int, int, int, int]:
+    """单包锚点的“本轮/历史”拆分；旧锚点表与 README 共用同一扫描结果。"""
+    current = sum(1 for a in anchors["singles"] if a["version"] == version)
+    history = len(anchors["singles"]) - current
+    current_combined = sum(1 for a in anchors["combined"] if a["version"] == version)
+    history_combined = len(anchors["combined"]) - current_combined
+    return current, history, current_combined, history_combined
+
+
 def build(args: argparse.Namespace) -> int:
     version = args.version
     dist: Path = args.dist
@@ -138,6 +147,9 @@ def build(args: argparse.Namespace) -> int:
     (out / "docs").mkdir()
     for name in ("签名方案.md", "安全与证据链现状.md", "冻结版本说明.md"):
         shutil.copy2(ROOT / "docs" / name, out / "docs" / name)
+    shutil.copy2(ROOT / "docs" / "已知残留与未闭合项.md", out / "已知残留与未闭合项.md")
+    import fact_exemptions
+    _write(out / "docs" / "护栏豁免表.md", fact_exemptions.render_markdown(version))
     shutil.copy2(ROOT / "policies" / "RULE-PACK.md", out / "RULE-PACK.md")
     (out / "reports").mkdir()
     for path in sorted((ROOT / "reports").iterdir()):
@@ -205,7 +217,7 @@ def build(args: argparse.Namespace) -> int:
         "package_key_id": summary["key_id"],
     }
     _write(out / "anchor.json", json.dumps(combined, ensure_ascii=False, indent=2))
-    anchor_txt = [f"# {version} 第十七轮 anchor 速查；四包不变量见首段", ""]
+    anchor_txt = [f"# {version} 本轮 anchor 速查；四包不变量见首段", ""]
     anchor_txt += [f"{k}={v}" for k, v in invariants.items()]
     anchor_txt.append("")
     anchor_txt += [f"{p['file']} sha256={p['sha256']} anchor={p['anchor']}"
@@ -239,26 +251,36 @@ def build(args: argparse.Namespace) -> int:
     # 7) 逐包逐文件差异（机制 3）
     diff_md, diff_detail = diff_packages.build_table(prev / "package", new_pkg_dir)
     _write(out / "reports" / "round17-diff.md",
-           f"# 0.4.14 → {version} 包内工件差异（机制 3，逐包逐文件生成）\n\n"
-           "> 由 `scripts/diff_packages.py` 生成。禁止改写成“仅因版本号”。\n\n" + diff_md)
+           _gen("diff", f"# 0.4.14 → {version} 包内工件差异（机制 3，逐包逐文件生成）\n\n"
+                        "> 由 `scripts/diff_packages.py` 生成。禁止改写成“仅因版本号”。\n\n"
+                        + diff_md))
 
     # 8) 旧物清单（从实物生成）
     old = docfacts.old_assets(out / "release")
-    wheel_rows = [[f"`{w['name']}`", f"{w['bytes']}", f"`{w['sha256']}`"]
+    for item in old["wheels"] + old["locks"]:
+        for d in item["dirs"]:
+            target = out / "release" / d / item["name"]
+            if not target.is_file():
+                raise SystemExit(f"旧物表登记了不存在的路径：{target}")
+    wheel_rows = [[f"`{w['name']}`", f"{w['bytes']}", f"`{w['sha256']}`",
+                   "、".join(f"`release/{d}/`" for d in w["dirs"])]
                   for w in old["wheels"]]
-    lock_rows = [[f"`{x['name']}`", f"{x['bytes']}", f"`{x['sha256']}`"]
+    lock_rows = [[f"`{x['name']}`", f"{x['bytes']}", f"`{x['sha256']}`",
+                  "、".join(f"`release/{d}/`" for d in x["dirs"])]
                  for x in old["locks"]]
     old_wheels_md = "\n".join([
         _gen("old-wheels", "\n".join([
             f"# 旧 wheel 与依赖锁（{version} 交接，由实物生成）",
             "",
-            "本目录 `release/old-wheels/` 实有下列文件；哈希由文件字节计算，非手写。",
+            f"`release/old-wheels/` 与 `release/old-packages/` 实有 **{len(old['wheels'])} 个唯一 wheel**、"
+            f"**{len(old['locks'])} 个依赖锁**；同名文件只列一次，并标出真实所在目录。"
+            "哈希由文件字节计算，非手写。",
             "",
-            docfacts.table(["文件", "字节", "SHA-256"], wheel_rows),
+            docfacts.table(["文件", "字节", "SHA-256", "所在目录"], wheel_rows),
             "",
             "依赖锁：",
             "",
-            docfacts.table(["文件", "字节", "SHA-256"], lock_rows) if lock_rows else "（无）",
+            docfacts.table(["文件", "字节", "SHA-256", "所在目录"], lock_rows) if lock_rows else "（无）",
             "",
             "**0.4.6 签名钥疑点**：该版发行钥 `ed25519:b07741b2…` 是包签名钥的误用；本目录只带",
             "0.4.6 wheel，不带该版 `SHA256SUMS`/`.sig`，因此**目录内不可验证**该版发行签名，",
@@ -270,17 +292,21 @@ def build(args: argparse.Namespace) -> int:
     anchors = docfacts.old_anchor_facts(out)
     anchor_rows = [[f"`{a['name']}`", f"{a['bytes']}", f"`{a['sha256']}`"]
                    for a in anchors["singles"]]
+    current_count, history_count, current_combined, history_combined = \
+        _anchor_counts(anchors, version)
     old_anchors_md = "\n".join([
         _gen("old-anchors", "\n".join([
-            f"# 旧锚点（{version} 交接，由实物生成）",
+            f"# 锚点实物（{version} 交接，由实物生成）",
             "",
-            f"本目录根下实有单包锚点 **{len(anchors['singles'])} 个**、组合记录 "
-            f"**{len(anchors['combined'])} 个**。下表由扫描器逐文件生成；"
+            f"本目录根下实有单包锚点 **{len(anchors['singles'])} 个**（当前 {version} "
+            f"**{current_count} 个**、历史 **{history_count} 个**）、组合记录 "
+            f"**{len(anchors['combined'])} 个**（当前 **{current_combined} 个**、历史 "
+            f"**{history_combined} 个**）。下表由扫描器逐文件生成；"
             "**“没有指向不存在文件的指引”这一结论由扫描器给出**，不是手写声明。",
             "",
             docfacts.table(["文件", "字节", "SHA-256"], anchor_rows),
             "",
-            "组合式 `anchor-0.4.1x.json` / `anchor.json` 只是**汇总值记录**，不在任何签名保护范围，",
+            "组合式 `anchor-0.4.*.json` / `anchor.json` 只是**汇总值记录**，不在任何签名保护范围，",
             "也不能当作单包锚点使用（`--anchor-file` 只接受单包扁平 JSON）。",
             "",
             "**未列出的旧锚点不在本交付**：历史轮次的交付目录未随本目录提供；如需核对，",
@@ -308,11 +334,16 @@ def build(args: argparse.Namespace) -> int:
     _write(out / "未随交付清单.md", unshipped)
 
     # 11) README / READ-ME-FIRST / KEY-NOTE
-    _write(out / "README-验收.md", build_readme(version, release, rel_facts, packages_json,
-                                                old, anchors, diff_md, diff_detail))
+    _write(out / "README-验收.md",
+           build_readme(version, release, rel_facts, packages_json, old, anchors,
+                        diff_md, diff_detail, out.name))
     _write(out / "READ-ME-FIRST.txt",
            build_first(version, packages_json, old, anchors, diff_detail))
     key_note = (prev / "KEY-NOTE.txt").read_text(encoding="utf-8").replace("0.4.14", version)
+    round_label = re.search(r"第([零一二三四五六七八九十]+)轮整改", out.name)
+    old_label = re.search(r"第([零一二三四五六七八九十]+)轮交接", key_note)
+    if round_label and old_label:
+        key_note = key_note.replace(old_label.group(0), f"第{round_label.group(1)}轮交接")
     _write(out / "KEY-NOTE.txt", key_note)
 
     # 12) 交付清单（排除自身）
@@ -354,7 +385,10 @@ def write_unshipped(out: Path) -> str:
 
 
 def build_readme(version: str, release: dict, rel: dict, packages: list[dict],
-                 old: dict, anchors: dict, diff_md: str, diff_detail: list[str]) -> str:
+                 old: dict, anchors: dict, diff_md: str, diff_detail: list[str],
+                 handoff_name: str) -> str:
+    current_count, history_count, current_combined, history_combined = \
+        _anchor_counts(anchors, version)
     rp_unchanged = not any("policies/RULE-PACK.md" in item for item in diff_detail)
     ts_files = sorted({item.split(":", 1)[0].split("/", 1)[1] for item in diff_detail
                        if item.startswith("confirmed/") and "真实时间戳" in item
@@ -373,6 +407,17 @@ def build_readme(version: str, release: dict, rel: dict, packages: list[dict],
     counts = packages[1]["counts"]
     old_versions = sorted({p["version"] for p in old["packages"] if p.get("version")})
     old_versions_text = " / ".join(old_versions)
+    wheels_ow = [w for w in old["wheels"] if "old-wheels" in w["dirs"]]
+    wheels_op = [w for w in old["wheels"] if "old-packages" in w["dirs"]]
+    locks_ow = [x for x in old["locks"] if "old-wheels" in x["dirs"]]
+    locks_op = [x for x in old["locks"] if "old-packages" in x["dirs"]]
+    wheels_ow_count = len(wheels_ow)
+    wheels_op_count = len(wheels_op)
+    locks_ow_count = len(locks_ow)
+    locks_op_count = len(locks_op)
+    wheels_op_text = "、".join(sorted(w["version"] for w in wheels_op)) or "（无）"
+    locks_ow_text = "、".join(sorted(x["version"] for x in locks_ow)) or "（无）"
+    locks_op_text = "、".join(sorted(x["version"] for x in locks_op)) or "（无）"
     header = _gen("handoff-header", "\n".join([
         "本目录实测事实（构建时生成，禁止人工编辑）：",
         "",
@@ -407,8 +452,11 @@ def build_readme(version: str, release: dict, rel: dict, packages: list[dict],
 **不要**用自己现场 `wca all` 生成的默认包来演示，除非显式提供了签名钥。
 
 原因：默认 `wca all` 在不提供签名钥时导出的是 **v2 无签名包**，它没有输入契约（无
-`inputs_digest`）。删掉一个输入后，验算结果仍是 `ARTIFACTS OK`、`RESULT PARTIAL`（exit 2），
-**不会**变成 `FAIL`。用它演示会给人“删了也没事”的错觉。
+`inputs_digest`）。对这类包删掉一个输入，**只有“输入摘要”这一项门禁不适用**（记
+`NOT CHECKED`，不参与判定），所以结果可能仍是 `ARTIFACTS OK`、`RESULT PARTIAL`（exit 2）；
+**包内其他字节一旦被改（清单、工件、发现等），仍会 `RESULT FAIL`（exit 1）**。
+边界：`--require-signature` 下无签名即 `SIGNATURE FAIL`（exit 1），与是否缺
+`inputs_digest` 无关。用它演示会给人“删了也没事”的错觉；演示请用 v3 包。
 
 ## 一、结论先行
 
@@ -466,7 +514,9 @@ py -3.12 -m venv .venv-clean
 
 默认 `wca all` 的产物：不给签名钥 → v2 无签名 → `RESULT PARTIAL` exit 2；
 给签名钥但不给外部项 → `PARTIAL` exit 2；补齐五项外部门禁 → `RESULT OK` exit 0。
-**v2 从无 `inputs_digest` 都不会被判 `RESULT FAIL`。**
+**v2 包不会因缺少 `inputs_digest` 这一项门禁而被判 `FAIL`**：该门禁对 v2 记
+`NOT CHECKED`（版本缺失，不是篡改）；**其他任何真实篡改仍判 `FAIL`（exit 1）**。
+边界：`--require-signature` 下无签名即 `SIGNATURE FAIL`（exit 1）。
 
 ## 四、八个包与逐包逐文件差异
 
@@ -512,11 +562,16 @@ py -3.12 -m venv .venv-clean
 
 - **旧包实物**：`release/old-packages/` 实有 **{len(old['packages'])} 个** zip
   （{old_versions_text} 八个角色），逐文件哈希见 `交付清单.txt`。
-- **旧 wheel**：`release/old-wheels/` 实有 **{len(old['wheels'])} 个** wheel 与
-  **{len(old['locks'])} 个**依赖锁，清单见 `OLD-WHEELS.md`（由实物生成）。
+- **旧 wheel**：`release/old-wheels/` 实有 **{wheels_ow_count} 个**；`release/old-packages/`
+  另有 **{wheels_op_count} 个**同名副本（{wheels_op_text}）。按文件名唯一计
+  **{len(old['wheels'])} 个**，清单见 `OLD-WHEELS.md`（逐行标出真实所在目录）。
+- **依赖锁**：合计 **{len(old['locks'])} 个**唯一锁——`release/old-wheels/`
+  **{locks_ow_count} 个**（{locks_ow_text}），`release/old-packages/`
+  **{locks_op_count} 个**（{locks_op_text}）。`old-wheels/` 里没有 0.4.10/0.4.11
+  的锁，它们在 `old-packages/`；按表找文件即可，不依赖记忆。
 - **旧锚点**：根目录实有单包锚点 **{len(anchors['singles'])} 个**、组合记录
   **{len(anchors['combined'])} 个**，逐文件哈希见 `OLD-ANCHORS.md`（由实物生成）。
-- **0.4.15 新包**：用本目录 `release/` 的 {version} wheel 与
+- **{version} 新包**：用本目录 `release/` 的 {version} wheel 与
   `anchor-{version}-<role>.json`。
 - **0.4.6 签名钥疑点**：该版发行钥 `ed25519:b07741b2…` 是包签名钥的误用；本目录不带该版
   `SHA256SUMS`/`.sig`，因此**目录内不可验证**该版发行签名，原因已写明。
@@ -524,18 +579,19 @@ py -3.12 -m venv .venv-clean
 ## 十、目录结构
 
 ```text
-handoff/20261104-第十七轮整改/
+handoff/{handoff_name}/
   README-验收.md / READ-ME-FIRST.txt / KEY-NOTE.txt / 交付清单.txt
   未随交付清单.md            # 扫描器生成的仓库路径全表（验算不需要）
+  已知残留与未闭合项.md      # 不可自证的历史声明 + 四项流程/法律未闭合
   RULE-PACK.md / OLD-WHEELS.md / OLD-ANCHORS.md
   anchor.json / anchor.txt   # 汇总记录，无签名保护
   anchor-{version}-<role>.json   # {len(packages)} 个新包单包锚点
-  anchor-0.4.10 … 0.4.14-<role>.json   # 旧锚点（实有 {len(anchors['singles'])} 个）
+  anchor-0.4.10 … 0.4.14-<role>.json   # 历史单包锚点（实有 {history_count} 个）
   trusted-public-key.pub / release-public-key.pub
   package/                   # {len(packages)} 个 {version} 包
   release/                   # {version} 发行物 + old-wheels/ + old-packages/
-  docs/                      # 签名方案 / 安全与证据链现状 / 冻结版本说明
-  reports/                   # 历史报告 + round17-techcheck.txt + round17-diff.md
+  docs/                      # 签名方案 / 安全与证据链现状 / 冻结版本说明 / 护栏豁免表
+  reports/                   # 历史报告 + round18-techcheck.txt + round17-diff.md
 ```
 
 ## 十一、运行环境与默认输出路径
@@ -571,12 +627,14 @@ handoff/20261104-第十七轮整改/
 
 机制 1–3 的实现与 14 条问题逐条关闭表见仓库 `reports/0.4.15-文档事实单一来源.md`
 （不随交付）；本交付内可复核的部分：§四差异表由 `reports/round17-diff.md` 原样给出，
-计数只在 `reports/round17-techcheck.txt` 出现一次。
+计数只在 `reports/round18-techcheck.txt` 出现一次。
 """
 
 
 def build_first(version: str, packages: list[dict], old: dict, anchors: dict,
                 diff_detail: list[str]) -> str:
+    current_count, history_count, current_combined, history_combined = \
+        _anchor_counts(anchors, version)
     # 第 4 条完全由差异表的实测结果拼出：未变/时间戳变化都不是手写的。
     rp_unchanged = not any("policies/RULE-PACK.md" in item for item in diff_detail)
     ts_files = sorted({item.split(":", 1)[0].split("/", 1)[1] for item in diff_detail
@@ -595,7 +653,8 @@ def build_first(version: str, packages: list[dict], old: dict, anchors: dict,
         f"2) 包在 package/（{len(packages)} 个），单包锚点 anchor-{version}-<role>.json，",
         "   公钥 trusted-public-key.pub；验算与回放只依赖本目录；",
         f"3) 旧物：old-wheels {len(old['wheels'])}、old-packages {len(old['packages'])}、",
-        f"   旧锚点 {len(anchors['singles'])} 个，均在目录内可复核；",
+        f"   单包锚点 {len(anchors['singles'])} 个（本轮 {current_count} + 历史 {history_count}），"
+        f"均在目录内可复核；",
         "4) artifacts_digest 的变化原因见 README §四（逐包逐文件），不要概括为“仅因版本号”：",
         f"   {rp_text}；confirmed 包 {ts_text} 的时间戳真实变化；",
         "   其余变化为版本号文本、派生哈希与包内文档更新。",

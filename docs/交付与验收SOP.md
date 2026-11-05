@@ -56,9 +56,17 @@ python verify.py --public-key <固定公钥文件> --expect-anchor "<四/五段>
   缺一项即 `RESULT PARTIAL`（exit 2），任一项不匹配即 `RESULT FAIL`（exit 1）。
   `--anchor-file <单包 anchor.json>` 可一次提供 `anchor`/`package_sha256`/`artifacts_digest`/
   `evidence_digest`；**显式参数优先 > 环境变量 > 文件兜底**。
-- **`NOT CHECKED` 含义**：只表示早退时尚未走到该检查，不等于“缺失/不符”。例如
-  `ANCHOR SKIPPED (early exit)` 表示已传锚点、但前序检查先失败，不能据此判锚点缺失或错误；
-  只有真正未传锚点才输出 `ANCHOR NOT CHECKED（未传外部锚点）`。
+- **`NOT CHECKED` 含义**：表示“这项没有形成判定”，**不等于“缺失/不符”，也不只来自早退**。
+  至少有四类来源：
+  1. **早退**：前序检查先失败，尚未走到该检查（`（早退，尚未走到…）`）；已传锚点但前序失败时标
+     `ANCHOR SKIPPED (early exit)`。
+  2. **未提供外部期望值**：未传 `--expect-anchor` / `--expect-package-sha256` /
+     `--expect-artifacts-digest` / `--expect-evidence-digest` 时，对应外部门禁记 `NOT CHECKED`。
+  3. **版本缺失**：v2 契约本无 `inputs_digest`；无 `producer` 或 `producer.version < 0.4.3`
+     的旧包本无 `evidence_digest`。这是历史兼容分档，不是篡改。
+  4. **包内无签名且未要求签名**：`SIGNATURE NOT CHECKED`；加了 `--require-signature` 则
+     `SIGNATURE FAIL`（exit 1）。
+  不论哪一类，`NOT CHECKED` 都**不得**据此给 `RESULT OK`。
 - **anchor 结构与环境变量**：`anchor.json` 的 `packages` 是**数组**（每项含
   `role/file/sha256/anchor/…` 的单包记录），不是 key → 记录的映射；
   `--anchor-file` 只接受单包扁平 JSON，组合式文件会被拒绝。环境变量：`WCA_EXPECT_ANCHOR`
@@ -217,7 +225,7 @@ py -3.12 -m venv .venv-clean
 - **额外文件失败关闭**：包根与 `inputs/` 出现未在 `artifact_sha256` / `inputs/manifest.json` 声明的文件，直接 `EXTRA FILE FAIL`。没有 `--allow-extra-files` 开关；原因是额外文件可能夹带数据或指令，验收器不应替接收方猜测“哪些额外文件无害”。
 - **发现 vs 已确认结论**：`findings.csv` 行数对应 manifest `counts.findings`（未签认）；`conclusions_final.csv` 行数对应 `counts.final_conclusions`（已签认）。`wca-verify` 从 `findings.csv` 按公开规范化算法反算 `conclusion_digest`，输出 `FINDINGS DIGEST OK (9 fields; source_* not covered by digest)`；`wca replay` 也执行同一反算。
 - **摘要覆盖范围**：`conclusion_digest` 只覆盖 `rule_id`、`rule_version`、`emp_id`、`work_date`、`period_key`、`severity`、`metric`、`citations`、`explanation` 九个规范字段。`source_rel_path`、`source_line_no`、`severity_label` 不进摘要，由 `artifact_sha256["findings.csv"]` 负责。**单个 `FINDINGS DIGEST OK` 不等于整张表未变**，必须同时 `ARTIFACTS OK`；`ARTIFACTS FAIL` 行会带具体失败文件名（如 `findings.csv`）。
-- `manifest.counts.rule_versions` 记录单条规则的版本分布（例如 v4 规则 100 条、v5 规则 16 条）。**`rule_version` 是单条规则版本，不等于 rule pack 版本**；v5 包中保留未改判据的 v4 规则是预期，不是包版本漂移。
+- `manifest.counts.rule_versions` 记录单条规则的版本分布（例如 v4 规则 99 条、v5 规则 16 条）。**`rule_version` 是单条规则版本，不等于 rule pack 版本**；v5 包中保留未改判据的 v4 规则是预期，不是包版本漂移。
 - **policies/**：包内 `policies/` 含 `RULE-PACK.md`、`LAW-REFERENCES.md`、`口径声明-对外版.md`、`字段口径与条文依据-对外版.md`（13 项存疑逐条）、`CONFIDENCE.md`；全部进入 `artifact_sha256`/`artifacts_digest`/签名，0.4.1 包 `ARTIFACTS OK checked=14`。
 - **锚点选择：部分通过，而非静默 OK**。`wca-verify` / `wca replay` 未传 `--expect-anchor` 时仍执行字节层检查，但输出 `ANCHOR NOT CHECKED` + `RESULT PARTIAL`（exit 2）；理由是：内部/预检仍需要看字节层结果，但对外验收必须有包外锚点，`PARTIAL` 明确阻断“没有锚点也算通过”。`--expect-triple` 只是 legacy 外部比对，不约束 schema，也不给 `RESULT OK`。
 - 锚点记录可另带 `package_sha256`（zip 字节 SHA-256）与 `artifacts_digest`（包根工件清单摘要）；用 `--expect-package-sha256` / `--expect-artifacts-digest` 传入，不匹配失败关闭。目录包不能比较 `package_sha256`。
@@ -394,7 +402,7 @@ RESULT OK
 `9d37a312…`，原因 `input_files.csv` / `input_fingerprint` 的 `row_count` 从表头列数改为实际数据行数；
 `conclusion_digest` 仍为 `01bd4403…`（判据与输入事实未变）。旧包不回改，旧 `row_count` 口径保留在历史包里。
 
-**P2 对账**：`counts.rule_versions` 显示 100 条 v4 规则 + 16 条 v5 规则；`rule_version` 是单条规则版本，
+**P2 对账**：`counts.rule_versions` 显示 99 条 v4 规则 + 16 条 v5 规则；`rule_version` 是单条规则版本，
 不是 rule pack 版本，v5 包里保留未改判据的 v4 规则是预期。`未覆盖清单.md` 已去掉历史“101 条结论”
 口径，改为按本轮实际 `发现（未签认）116 / 已确认结论 0` 生成。
 

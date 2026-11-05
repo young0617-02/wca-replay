@@ -1,4 +1,4 @@
-version = 1
+﻿version = 1
 revision = 3
 requires-python = ">=3.12"
 
@@ -678,7 +678,7 @@ wheels = [
 
 [[package]]
 name = "worktime-compliance-agent"
-version = "0.4.15"
+version = "0.4.16"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },

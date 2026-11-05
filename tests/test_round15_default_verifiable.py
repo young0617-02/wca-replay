@@ -4,6 +4,9 @@
 "缺少 manifest.inputs_digest" 判 `INPUTS FAIL`、exit 1。v2 契约从未包含该字段，
 属于“字段因版本缺失”，只能是 NOT CHECKED / PARTIAL（exit 2）；
 schema v3 缺字段才是真违约，必须继续 FAIL（exit 1）。
+
+**限定语义（0.4.16）**：v2 只是“不会因缺 `inputs_digest` 这一项门禁而 FAIL”；
+包内其他字节被改仍 `RESULT FAIL`（exit 1），`--require-signature` 下无签名也 FAIL。
 """
 
 from __future__ import annotations
@@ -90,6 +93,36 @@ def test_unsigned_package_exit_code_is_2(unsigned_package):
     assert verify_pkg.main([str(path)]) == 2
 
 
+def test_v2_tampered_artifact_still_fail(unsigned_package, tmp_path):
+    """M2 的反向实测：v2 缺字段不 FAIL，**不等于** v2 不会失败。
+
+    真实篡改（findings.csv 字节变化）必须 `RESULT FAIL`（exit 1），证明文档的
+    “不会因缺 inputs_digest 这一项而 FAIL”是限定语义，不是绝对化断言。
+    """
+    src, _manifest = unsigned_package
+
+    def mutate(files):
+        files["findings.csv"] = files["findings.csv"] + b"\nTAMPER,1\n"
+        return files
+
+    mutated = _rezip(src, tmp_path / "v2-tampered.zip", mutate)
+    result = verify_package(mutated)
+    assert result["ok"] is False, result
+    assert result["partial"] is False, result
+    assert "ARTIFACT" in result["reason"], result["reason"]
+    assert verify_pkg.main([str(mutated)]) == 1
+
+
+def test_v2_require_signature_fails_without_signature(unsigned_package):
+    """`--require-signature` 下无签名即 `SIGNATURE FAIL`（exit 1）。"""
+    path, _manifest = unsigned_package
+    result = verify_package(path, require_signature=True)
+    assert result["ok"] is False, result
+    assert result["partial"] is False, result
+    assert "SIGNATURE FAIL" in result["reason"], result["reason"]
+    assert verify_pkg.main([str(path), "--require-signature"]) == 1
+
+
 def test_v3_missing_inputs_digest_still_fail(signed_package, tmp_path):
     """新版本（schema v3）缺 inputs_digest 仍是真违约，必须 FAIL exit 1。"""
     src, _manifest, _key = signed_package
@@ -134,10 +167,14 @@ def test_docs_and_verifier_agree_on_unsigned_package():
     assert "文档写“无签名仍通过”" not in template
     # 0.4.14：模板 §6 不得再写“除自身与 .sig 之外”的绝对化表述。
     assert "覆盖除自身与" not in template
-    # 演示指引必须在显眼位置出现，且说明默认 v2 删输入不会 FAIL。
+    # 演示指引必须在显眼位置出现，并写明“仅缺 inputs_digest 这一项不判 FAIL”，
+    # 同时明确其他真实篡改与 --require-signature 仍 FAIL（M2）。
     assert "对外演示注意" in template
     assert "对外演示注意" in readme
-    assert "不会" in readme and "RESULT PARTIAL" in readme
+    assert "不会因缺少 `inputs_digest` 这一项门禁" in readme
+    assert "RESULT PARTIAL" in readme
+    assert "其他任何真实篡改仍判 FAIL" in readme or "仍会 `RESULT FAIL`" in readme
+    assert "--require-signature" in readme
 
 
 def test_handoff_docs_round15():

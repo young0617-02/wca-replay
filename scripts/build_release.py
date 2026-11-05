@@ -282,9 +282,11 @@ py -3.12 -m venv .venv-clean
 
 **无签名 v2 包**：未提供 `--signing-key`/`WCA_SIGNING_KEY_FILE`/`WCA_SIGNING_KEY_B64` 时
 导出的是 v2 无签名包；`wca-verify` 对其最多输出 `RESULT PARTIAL`（exit 2），
-**不能作为完整验收**；只有显式 `--require-signature` 才 `RESULT FAIL`（exit 1）。
-v2 本无 `inputs_digest`，验算输出 `INPUTS DIGEST NOT CHECKED`（版本缺失，不是篡改）；
-schema v3 缺该字段才是 `INPUTS FAIL`。
+**不能作为完整验收**。
+v2 包**不会因缺少 `inputs_digest` 这一项门禁**而被判 `RESULT FAIL`：该门禁对 v2 记
+`INPUTS DIGEST NOT CHECKED`（版本缺失，不是篡改）；schema v3 缺该字段才是 `INPUTS FAIL`。
+**这只是限定语义，不是“v2 不会失败”**：包内其他字节一旦被改（清单、工件、发现等），
+仍会 `RESULT FAIL`（exit 1）；`--require-signature` 下无签名即 `SIGNATURE FAIL`（exit 1）。
 
 **跨版本可比性（0.4.9）**：摘要只在同 `rule_pack_version` + 同 evidence schema 下可比。
 外部包 SHA / evidence / artifacts 门禁**先于可比性判定**：

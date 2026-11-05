@@ -13,7 +13,7 @@ from pathlib import Path
 TEXT_SUFFIXES = (".md", ".txt")
 # C1：前缀必须覆盖仓库里所有会被文档引用的目录，否则“全表”不成立。
 PREFIXES = ("docs", "scripts", "tests", "src", "data", "var", "reports",
-            "rules", "tools", "dist", "handoff")
+            "rules", "tools", "dist", "handoff", "policies")
 # 0.4.12–0.4.14 及更早的交接只扫描下面这个旧前缀集；为遵守“不改已交付交接”，
 # 旧目录继续按旧口径校验，只有带生成标记的新清单才按全前缀校验。
 LEGACY_PREFIXES = ("docs", "scripts", "tests", "src", "data", "var")

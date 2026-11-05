@@ -140,10 +140,12 @@ def old_assets(release_dir: Path) -> dict:
         for path in sorted(wheel_dir.iterdir()):
             if path.suffix == ".whl":
                 out["wheels"].append({**file_fact(path, name=path.name),
-                                      "version": _version_from_name(path.name)})
+                                      "version": _version_from_name(path.name),
+                                      "dir": "old-wheels"})
             elif path.suffix == ".txt":
                 out["locks"].append({**file_fact(path, name=path.name),
-                                     "version": _version_from_name(path.name)})
+                                     "version": _version_from_name(path.name),
+                                     "dir": "old-wheels"})
     pkg_dir = release_dir / "old-packages"
     if pkg_dir.is_dir():
         for path in sorted(pkg_dir.iterdir()):
@@ -159,6 +161,17 @@ def old_assets(release_dir: Path) -> dict:
                 out["locks"].append({**file_fact(path, name=path.name),
                                      "version": _version_from_name(path.name),
                                      "dir": "old-packages"})
+    # 同一个 wheel/锁可能在 old-wheels 与 old-packages 各有一份；按文件名唯一化，
+    # 并标出它真实所在的全部目录，避免“同一文件列两次、客户按表找不到”的误导。
+    for key in ("wheels", "locks"):
+        merged: dict[str, dict] = {}
+        for item in out[key]:
+            name = item["name"]
+            if name in merged:
+                merged[name]["dirs"].append(item["dir"])
+            else:
+                merged[name] = {**item, "dirs": [item["dir"]]}
+        out[key] = sorted(merged.values(), key=lambda x: x["name"])
     return out
 
 
