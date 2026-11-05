@@ -122,7 +122,7 @@ citations, explanation` 九个规范字段；`source_rel_path`、`source_line_no
 含 `file_id=4`，移除后不可能复现；不要把旧值当成本轮目标。0.4.5 起同一打卡内容出现在
 多个 punch CSV 时，`QUAL-DUP` 行引用按 `rel_path` 字典序确定，全部来源纳入包内输入；
 单 `punch.csv` 场景在 0.4.5–0.4.7 曾保持 `b9cc6fd0… / 01cb5aeb… / aad527d1… / 8b3b54a0…`；
-0.4.8 批次语义后 `conclusion_digest` 统一为 `5dc46558…`、`evidence_digest` 为 `4654a3c7…`；
+0.4.8 批次语义后四主包 `conclusion_digest` 统一为 `5dc46558…`、`evidence_digest` 为 `4654a3c7…`；
 0.4.9 起批次 finding 增加 `evidence.retained_refs`，四主包 `evidence_digest` 为 `ed3b3f1b…`，
 `conclusion_digest` 仍 `5dc46558…`；0.4.10 只改锚点校验与文档，`conclusion_digest` /
 `evidence_digest` / `inputs_digest` / `input_fingerprint` 均与 0.4.9 相同。`inputs_digest` 与
@@ -295,7 +295,16 @@ UTF-8 字节序排序，用换行符连接，取 SHA-256 十六进制小写摘�
 | 0 | `RESULT OK` | 包体、工件、审计链、输入、签名、外部锚点与摘要全部一致 | 可通过 |
 | 1 | `RESULT FAIL` | 同版本同 schema 下内容/摘要/签名/工件真实不符，或锚点文件自相矛盾 | **阻断**，按篡改/损坏调查 |
 | 2 | `RESULT PARTIAL` | 外部门禁缺失（如未传 artifacts_digest / evidence_digest） | **不得当通过**；补齐门禁后重跑 |
-| 3 | `RESULT INCOMPARABLE` | 锚点与包跨 `rule_pack_version`/schema，或锚点文件缺 `comparability_scope` | **不得当通过，也不得当篡改**；转人工核对版本，改用对应版本锚点与 wheel |
+| 3 | `RESULT INCOMPARABLE` | 可比性判定发现跨 `rule_pack_version`/schema（仅显式锚点串，或外部包 SHA/evidence/artifacts 已通过时），或锚点文件缺 `comparability_scope` | **不得当通过，也不得当篡改**；转人工核对版本，改用对应版本锚点与 wheel |
+
+   **跨版本锚点的门禁先后（0.4.11 更正）**：用**完整单包锚点文件**（含 `package_sha256`/
+   `evidence_digest`/`artifacts_digest`）验跨版本包时，外部包 SHA/摘要门禁**先于**可比性判定，
+   任一不匹配即 `RESULT FAIL`（exit 1）；例如用 v6 包的完整锚点文件验 v5 包会先报
+   `PACKAGE SHA256 FAIL`，不是 exit 3。只有仅传显式 `--expect-anchor` 串（无外部 SHA/摘要）时，
+   才会因版本/schema 不同输出 `RESULT INCOMPARABLE`（exit 3）。两种路径都失败关闭，不把真失败降级。
+   **旧 wheel 的 scope 边界（0.4.11）**：0.4.4–0.4.8 旧 wheel 不做 `comparability_scope` 判定，
+   其 `RESULT OK` 仅表示旧口径通过，**不表示可比性已核验**；0.4.9 起才有该判定。旧包必须配
+   对应版本旧 wheel（清单见交接包 `OLD-WHEELS.md`）。
 
    **锚点文件缺 `comparability_scope`（0.4.10）**：只要传了带 `anchor` 串的锚点文件却缺
    `comparability_scope`，输出 `RESULT INCOMPARABLE`（exit 3），**不静默按可比处理**；

@@ -221,11 +221,23 @@ py -3.12 -m venv .venv-clean
 文件兜底**；证据摘要环境变量为 `WCA_EXPECT_EVIDENCE_DIGEST`。
 
 **跨版本可比性（0.4.9）**：摘要只在同 `rule_pack_version` + 同 evidence schema 下可比。
-跨版本/跨 schema 的锚点输出 `RESULT INCOMPARABLE`（**exit 3**），不是 `FAIL`；同版本同 schema
-摘要不符仍 `FAIL`（exit 1），缺字段/缺签名仍失败关闭。锚点文件带 `comparability_scope`
-（`rule_pack_version` + `schema`），旧锚点按版本命名（`anchor-<version>-<role>.json`）、不覆盖。
-退出码：0 OK / 1 FAIL / 2 PARTIAL / 3 INCOMPARABLE。**`PRODUCER FAIL` ≠ 篡改**：新版 wheel
-验旧包会先报 `PRODUCER FAIL` 并早退签名检查，应改用对应版本旧 wheel。
+外部包 SHA / evidence / artifacts 门禁**先于可比性判定**：
+- 只传显式 `--expect-anchor`（或 `--expect-triple`）串时，版本/schema 不同 →
+  `RESULT INCOMPARABLE`（**exit 3**）；
+- 传**完整单包锚点文件**时，文件里的 `package_sha256` / `evidence_digest` /
+  `artifacts_digest` 先比对，任一不匹配 → `RESULT FAIL`（**exit 1**），不会走到可比性判定。
+  例：用 v6 包的完整锚点文件验 v5 包，先报 `PACKAGE SHA256 FAIL`（exit 1），不是 exit 3。
+
+同版本同 schema 摘要不符仍 `FAIL`（exit 1），缺字段/缺签名仍失败关闭。锚点文件带
+`comparability_scope`（`rule_pack_version` + `schema`），旧锚点按版本命名
+（`anchor-<version>-<role>.json`）、不覆盖。退出码：0 OK / 1 FAIL / 2 PARTIAL / 3 INCOMPARABLE。
+**`PRODUCER FAIL` ≠ 篡改**：新版 wheel 验旧包会先报 `PRODUCER FAIL` 并早退签名检查，应改用
+对应版本旧 wheel。
+
+**旧 wheel 不做 scope 判定（0.4.11）**：0.4.4–0.4.8 的 wheel 不识别 `comparability_scope`，
+其 `RESULT OK` **仅表示旧口径（签名/锚点/包 SHA/工件摘要）通过**，**不表示可比性已核验**；
+0.4.9 起才有该判定。旧包必须配对应版本旧 wheel（清单见交接包 `OLD-WHEELS.md`）；用新 wheel
+验旧包会先报 `PRODUCER FAIL`，不是篡改。
 
 **`NOT CHECKED` / `SKIPPED` 含义**：`NOT CHECKED` 只表示早退时尚未走到该检查，
 **不等于“缺失/不符”**；已传入锚点但前序失败时输出 `ANCHOR SKIPPED (early exit)`，与
@@ -237,12 +249,14 @@ py -3.12 -m venv .venv-clean
 `input_fingerprint` 与 `inputs_digest` 的分工见上；`inputs_digest` 不含 `run_id`/DB `file_id`，
 同一批输入跨 run/跨库稳定。
 
-**anchor 文件与环境变量**：`anchor.json` 的 `packages` 是**对象**（key → 单包记录），不是数组；
+**anchor 文件与环境变量**：组合式 `anchor.json` 的 `packages` 是**数组**，元素为包对象
+（每个元素是含 `role/file/bytes/sha256/anchor/…` 的单包记录），不是 `key → 记录` 的映射。
+**数量口径**：数组长度等于该批交付的举证包数量，与每个元素的 `role` 一一对应；本批次为
+8 个元素（4 个主包 + default-flow + dup 两个 + clean-wheel），不是目录数或 run 数。
 `--anchor-file` 只接受单包扁平 JSON（`anchor`/`package_sha256`/`artifacts_digest`/
-`evidence_digest`），组合式
-`anchor.json` 会被拒绝。环境变量入口：`WCA_EXPECT_ANCHOR`（锚点）与
-`WCA_EXPECT_EVIDENCE_DIGEST`（证据定位摘要）；包 SHA 与 `artifacts_digest` 只能走显式参数或
-单包 anchor 文件。优先级：显式参数 > 环境变量 > anchor 文件。
+`evidence_digest`），组合式 `anchor.json` 会被拒绝（避免把 A 包哈希套到 B 包）。环境变量入口：
+`WCA_EXPECT_ANCHOR`（锚点）与 `WCA_EXPECT_EVIDENCE_DIGEST`（证据定位摘要）；包 SHA 与
+`artifacts_digest` 只能走显式参数或单包 anchor 文件。优先级：显式参数 > 环境变量 > anchor 文件。
 
 ## 4. 字段层：同版本 `replay`
 
