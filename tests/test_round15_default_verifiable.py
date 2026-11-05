@@ -25,6 +25,7 @@ from src.util import canonical_json, manifest_checksum
 
 ROOT = Path(__file__).resolve().parent.parent
 HANDOFF = ROOT / "handoff" / "20261104-第十五轮整改"
+HANDOFF_V16 = ROOT / "handoff" / "20261104-第十六轮整改"
 
 
 def _rezip(src: Path, dst: Path, mutate) -> Path:
@@ -131,6 +132,12 @@ def test_docs_and_verifier_agree_on_unsigned_package():
     assert "old-wheels/" in template and "old-packages/" in template
     assert "全部发行文件" not in template
     assert "文档写“无签名仍通过”" not in template
+    # 0.4.14：模板 §6 不得再写“除自身与 .sig 之外”的绝对化表述。
+    assert "覆盖除自身与" not in template
+    # 演示指引必须在显眼位置出现，且说明默认 v2 删输入不会 FAIL。
+    assert "对外演示注意" in template
+    assert "对外演示注意" in readme
+    assert "不会" in readme and "RESULT PARTIAL" in readme
 
 
 def test_handoff_docs_round15():
@@ -145,3 +152,21 @@ def test_handoff_docs_round15():
     assert "不可验证" in old_wheels
     assert "0.4.13" in freeze
     assert "0.4.12" in freeze and "未对外" in freeze
+
+
+def test_handoff_docs_round16():
+    """0.4.14 文档收尾：口径不再绝对化、演示指引显眼、dist 出处引用已登记。"""
+    if not HANDOFF_V16.is_dir():
+        pytest.skip("第十六轮交接目录尚未生成")
+    unshipped = (HANDOFF_V16 / "未随交付清单.md").read_text(encoding="utf-8")
+    readme = (HANDOFF_V16 / "README-验收.md").read_text(encoding="utf-8")
+    old_wheels = (HANDOFF_V16 / "OLD-WHEELS.md").read_text(encoding="utf-8")
+    freeze = (ROOT / "docs" / "冻结版本说明.md").read_text(encoding="utf-8")
+
+    assert "出处引用" in unshipped and "dist/" in unshipped
+    assert "全部仓库路径已汇总" not in readme
+    assert "对外演示注意" in readme
+    assert "5 个顶层文件" in readme
+    assert "覆盖除自身与" not in readme
+    assert "0.4.13" in old_wheels and "0.4.14" in old_wheels
+    assert "0.4.14" in freeze

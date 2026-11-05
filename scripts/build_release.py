@@ -99,6 +99,13 @@ def _readme(version: str, commit: str, wheel: str, build_time: str) -> str:
 对外精简版，不替代律师判断）、**数据合规**（未做真实个人信息处理评估）。详见
 `docs/安全与证据链现状.md` 第 3 节。
 
+## 对外演示注意（销售/演示者必读）
+
+对外演示“删输入被拦截”**必须用带外部锚点的 v3 包**（本目录 `package/` 下 8 个包，
+配 `anchor-<版本>-<role>.json` 与固定公钥）。默认 `wca all` 在不提供签名钥时导出的是
+**v2 无签名包**：它没有输入契约，验算最多得到 `RESULT PARTIAL`（exit 2），删掉输入后
+也**不会**变成 `FAIL`。用它演示会给人“删了也没事”的错觉。
+
 - 版本：`{version}`；构建时间：`{build_time}`；git commit：`{commit}`
 - wheel：`{wheel}`
 - Python 要求：`>=3.12`（本项目在 3.12.8 上构建与实测）
@@ -307,8 +314,10 @@ schema v3 缺该字段才是 `INPUTS FAIL`。
 
 - `SHA256SUMS.sig` 是对 `SHA256SUMS` 原始字节的 Ed25519 签名；`VERIFY-SIGNATURE.txt`
   给出 key_id、公钥副本与一段可执行的验证代码。
-- `SHA256SUMS` 覆盖除自身与 `SHA256SUMS.sig` 之外的发行文件；`.sig` 是 detached，
-  不会被自身覆盖。
+- `SHA256SUMS` 只覆盖构建时的 **5 个顶层文件**（与 §1 一致）：`{wheel}`、
+  `requirements.lock.txt`、`README-验收.md`、`RELEASE.json`、`VERIFY-SIGNATURE.txt`。
+  `SHA256SUMS.sig` 是 detached 签名，既不覆盖自身，也不覆盖 `.sig`；
+  `old-wheels/`、`old-packages/` 与签发后追加的文件**都不在保护范围**。
 - 该签名只证明“SHA256SUMS 与私钥匹配”；**pinned 不等于来源身份已核验**，仍须双方通过
   独立渠道核验 key_id。
 - 本发行物只说明构建方法，**未实现/未验证可复现构建**；不声称 wheel 可逐字节重建。

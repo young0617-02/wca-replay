@@ -131,7 +131,7 @@ RESULT FAIL
 |---|---|
 | `worktime_compliance_agent-<版本>-py3-none-any.whl` | 验算代码；含 `wca` / `wca-replay` / `wca-verify` 入口与 `src/schema.sql`、`config/region_profile.json` |
 | `requirements.lock.txt` | `uv export --frozen --all-groups --format requirements.txt --no-emit-project` 的完整锁定清单，**逐包带 `--hash=sha256:`**；含 dev group（pytest），验算不需要它，但保留完整闭包 |
-| `SHA256SUMS` | 对目录内除自身与 `SHA256SUMS.sig` 外每个文件的 SHA-256 |
+| `SHA256SUMS` | 对**构建时的 5 个顶层文件**（wheel、`requirements.lock.txt`、`README-验收.md`、`RELEASE.json`、`VERIFY-SIGNATURE.txt`）的 SHA-256；`old-wheels/`、`old-packages/` 与签发后追加文件不覆盖 |
 | `SHA256SUMS.sig` | 对 `SHA256SUMS` 原始字节的 Ed25519 detached 签名（Base64；0.4.1 起） |
 | `VERIFY-SIGNATURE.txt` | key_id、公钥副本与 `SHA256SUMS.sig` 验证片段（0.4.1 起） |
 | `RELEASE.json` | 版本、构建时间、`git_commit`、Python 要求、支持规则包、证据包 schema 版本、`release_signature`（0.4.1 起） |
@@ -452,7 +452,8 @@ wca replay package/<包>.zip --public-key trusted-public-key.pub `
 sha256 `25ad007314b54a46f83afcda8c0905d8aaf796472d6c872f7cef5159daf996f1`。
 发行物增加 `SHA256SUMS.sig`（Ed25519，key_id
 `ed25519:5e797e1842cf49c7043ba238f2a085b08c87d0a49663440f989cdc7df9ee5bb6`）与
-`VERIFY-SIGNATURE.txt`；`SHA256SUMS` 覆盖除自身与 `.sig` 外的发行文件，签名已实测
+`VERIFY-SIGNATURE.txt`；`SHA256SUMS` 只覆盖构建时的 5 个顶层文件（`old-wheels/`、
+`old-packages/` 与签发后追加文件不在保护范围），签名已实测
 `SHA256SUMS SIGNATURE OK`。**这不是可复现构建证明**，只是发行物文件签名。
 
 **RESULT OK 门禁**：`wca-verify` / `wca replay` 只有同时满足“签名 pin 命中 + 外部锚点通过 +
