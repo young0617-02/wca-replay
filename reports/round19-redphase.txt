@@ -1,0 +1,435 @@
+﻿.FFF...F..............                                                   [100%]
+================================== FAILURES ===================================
+______________ test_anchor_json_filename_version_matches_content ______________
+
+    def test_anchor_json_filename_version_matches_content() -> None:
+        """X1：锚点文件名必须由内容里的 `version` 派生，禁止“文件名写 0.4.14、内容是 0.4.15”。"""
+        base = _require_handoff()
+        release_version = _load_json(base / "release" / "RELEASE.json")["version"]
+        bad: list[str] = []
+        for path in _anchor_paths(base):
+            doc = _load_json(path)
+            version = str(doc.get("version") or "")
+            assert version, f"{path.name} 缺少 version 字段"
+            name_version = docfacts.anchor_name_version(path.name)
+            if name_version and name_version != version:
+                bad.append(f"{path.name}：文件名版本 {name_version} != 内容版本 {version}")
+            if path.name == "anchor.json" and version != release_version:
+                bad.append(f"anchor.json 内容版本 {version} != release/RELEASE.json {release_version}")
+>       assert not bad, "锚点文件名与内容版本不一致：\n" + "\n".join(bad)
+E       AssertionError: 锚点文件名与内容版本不一致：
+E         anchor-0.4.14.json：文件名版本 0.4.14 != 内容版本 0.4.15
+E       assert not ['anchor-0.4.14.json：文件名版本 0.4.14 != 内容版本 0.4.15']
+
+tests\test_doc_facts_guard.py:699: AssertionError
+________________ test_anchor_file_fields_resolve_or_are_marked ________________
+
+    def test_anchor_file_fields_resolve_or_are_marked() -> None:
+        """X2：`file` 要么是以该 JSON 自身位置为基准可解析的相对路径，要么显式标注“仅记录、不可解析”。
+    
+        悬空（看起来可解析、实际不存在）一律失败；可解析的还必须与记录的 SHA-256 一致。
+        """
+        base = _require_handoff()
+        records = docfacts.anchor_records(base)
+>       assert records["by_status"]["dangling"] == 0, (
+            "存在悬空 file 指针：\n" + "\n".join(
+                f"{r['name']} → {r['status']}" for r in
+                records["singles"] + records["combined"] if r["status"] == "dangling"))
+E       AssertionError: 存在悬空 file 指针：
+E         anchor-0.4.10-clean-wheel-default-flow.json → dangling
+E         anchor-0.4.10-confirmed.json → dangling
+E         anchor-0.4.10-cross-db.json → dangling
+E         anchor-0.4.10-default-flow.json → dangling
+E         anchor-0.4.10-dup-subdir-a-then-b.json → dangling
+E         anchor-0.4.10-dup-subdir-b-then-a.json → dangling
+E         anchor-0.4.10-engine-only.json → dangling
+E         anchor-0.4.10-reverse-order.json → dangling
+E         anchor-0.4.11-clean-wheel-default-flow.json → dangling
+E         anchor-0.4.11-confirmed.json → dangling
+E         anchor-0.4.11-cross-db.json → dangling
+E         anchor-0.4.11-default-flow.json → dangling
+E         anchor-0.4.11-dup-subdir-a-then-b.json → dangling
+E         anchor-0.4.11-dup-subdir-b-then-a.json → dangling
+E         anchor-0.4.11-engine-only.json → dangling
+E         anchor-0.4.11-reverse-order.json → dangling
+E         anchor-0.4.12-clean-wheel-default-flow.json → dangling
+E         anchor-0.4.12-confirmed.json → dangling
+E         anchor-0.4.12-cross-db.json → dangling
+E         anchor-0.4.12-default-flow.json → dangling
+E         anchor-0.4.12-dup-subdir-a-then-b.json → dangling
+E         anchor-0.4.12-dup-subdir-b-then-a.json → dangling
+E         anchor-0.4.12-engine-only.json → dangling
+E         anchor-0.4.12-reverse-order.json → dangling
+E         anchor-0.4.13-clean-wheel-default-flow.json → dangling
+E         anchor-0.4.13-confirmed.json → dangling
+E         anchor-0.4.13-cross-db.json → dangling
+E         anchor-0.4.13-default-flow.json → dangling
+E         anchor-0.4.13-dup-subdir-a-then-b.json → dangling
+E         anchor-0.4.13-dup-subdir-b-then-a.json → dangling
+E         anchor-0.4.13-engine-only.json → dangling
+E         anchor-0.4.13-reverse-order.json → dangling
+E         anchor-0.4.14-clean-wheel-default-flow.json → dangling
+E         anchor-0.4.14-confirmed.json → dangling
+E         anchor-0.4.14-cross-db.json → dangling
+E         anchor-0.4.14-default-flow.json → dangling
+E         anchor-0.4.14-dup-subdir-a-then-b.json → dangling
+E         anchor-0.4.14-dup-subdir-b-then-a.json → dangling
+E         anchor-0.4.14-engine-only.json → dangling
+E         anchor-0.4.14-reverse-order.json → dangling
+E         anchor-0.4.15-clean-wheel-default-flow.json → dangling
+E         anchor-0.4.15-confirmed.json → dangling
+E         anchor-0.4.15-cross-db.json → dangling
+E         anchor-0.4.15-default-flow.json → dangling
+E         anchor-0.4.15-dup-subdir-a-then-b.json → dangling
+E         anchor-0.4.15-dup-subdir-b-then-a.json → dangling
+E         anchor-0.4.15-engine-only.json → dangling
+E         anchor-0.4.15-reverse-order.json → dangling
+E         anchor-0.4.16-clean-wheel-default-flow.json → dangling
+E         anchor-0.4.16-confirmed.json → dangling
+E         anchor-0.4.16-cross-db.json → dangling
+E         anchor-0.4.16-default-flow.json → dangling
+E         anchor-0.4.16-dup-subdir-a-then-b.json → dangling
+E         anchor-0.4.16-dup-subdir-b-then-a.json → dangling
+E         anchor-0.4.16-engine-only.json → dangling
+E         anchor-0.4.16-reverse-order.json → dangling
+E       assert 56 == 0
+
+tests\test_doc_facts_guard.py:709: AssertionError
+_____________ test_anchor_target_package_producer_version_matches _____________
+
+    def test_anchor_target_package_producer_version_matches() -> None:
+        """三方一致：文件名版本 == 内容版本 == 目标包 producer.version。"""
+        base = _require_handoff()
+        bad: list[str] = []
+        for path in _anchor_paths(base):
+            doc = _load_json(path)
+            version = str(doc.get("version") or "")
+            for entry in docfacts.anchor_file_entries(doc):
+                status = docfacts.anchor_file_status(path, entry.get("file"))
+                if status != "resolvable":
+                    continue
+                facts = docfacts.package_facts(path.parent / str(entry["file"]))
+                if facts["producer_version"] != version:
+                    bad.append(f"{path.name}：目标包 {entry['file']} 的 producer.version="
+                               f"{facts['producer_version']} != 锚点版本 {version}")
+>       assert not bad, "\n".join(bad)
+E       AssertionError: anchor-0.4.10.json：目标包 package/engine-only.zip 的 producer.version=0.4.16 != 锚点版本 0.4.10
+E         anchor-0.4.10.json：目标包 package/confirmed.zip 的 producer.version=0.4.16 != 锚点版本 0.4.10
+E         anchor-0.4.10.json：目标包 package/cross-db.zip 的 producer.version=0.4.16 != 锚点版本 0.4.10
+E         anchor-0.4.10.json：目标包 package/reverse-order.zip 的 producer.version=0.4.16 != 锚点版本 0.4.10
+E         anchor-0.4.10.json：目标包 package/default-flow.zip 的 producer.version=0.4.16 != 锚点版本 0.4.10
+E         anchor-0.4.10.json：目标包 package/dup-subdir-a-then-b.zip 的 producer.version=0.4.16 != 锚点版本 0.4.10
+E         anchor-0.4.10.json：目标包 package/dup-subdir-b-then-a.zip 的 producer.version=0.4.16 != 锚点版本 0.4.10
+E         anchor-0.4.10.json：目标包 package/clean-wheel-default-flow.zip 的 producer.version=0.4.16 != 锚点版本 0.4.10
+E         anchor-0.4.11.json：目标包 package/engine-only.zip 的 producer.version=0.4.16 != 锚点版本 0.4.11
+E         anchor-0.4.11.json：目标包 package/confirmed.zip 的 producer.version=0.4.16 != 锚点版本 0.4.11
+E         anchor-0.4.11.json：目标包 package/cross-db.zip 的 producer.version=0.4.16 != 锚点版本 0.4.11
+E         anchor-0.4.11.json：目标包 package/reverse-order.zip 的 producer.version=0.4.16 != 锚点版本 0.4.11
+E         anchor-0.4.11.json：目标包 package/default-flow.zip 的 producer.version=0.4.16 != 锚点版本 0.4.11
+E         anchor-0.4.11.json：目标包 package/dup-subdir-a-then-b.zip 的 producer.version=0.4.16 != 锚点版本 0.4.11
+E         anchor-0.4.11.json：目标包 package/dup-subdir-b-then-a.zip 的 producer.version=0.4.16 != 锚点版本 0.4.11
+E         anchor-0.4.11.json：目标包 package/clean-wheel-default-flow.zip 的 producer.version=0.4.16 != 锚点版本 0.4.11
+E         anchor-0.4.12.json：目标包 package/engine-only.zip 的 producer.version=0.4.16 != 锚点版本 0.4.12
+E         anchor-0.4.12.json：目标包 package/confirmed.zip 的 producer.version=0.4.16 != 锚点版本 0.4.12
+E         anchor-0.4.12.json：目标包 package/cross-db.zip 的 producer.version=0.4.16 != 锚点版本 0.4.12
+E         anchor-0.4.12.json：目标包 package/reverse-order.zip 的 producer.version=0.4.16 != 锚点版本 0.4.12
+E         anchor-0.4.12.json：目标包 package/default-flow.zip 的 producer.version=0.4.16 != 锚点版本 0.4.12
+E         anchor-0.4.12.json：目标包 package/dup-subdir-a-then-b.zip 的 producer.version=0.4.16 != 锚点版本 0.4.12
+E         anchor-0.4.12.json：目标包 package/dup-subdir-b-then-a.zip 的 producer.version=0.4.16 != 锚点版本 0.4.12
+E         anchor-0.4.12.json：目标包 package/clean-wheel-default-flow.zip 的 producer.version=0.4.16 != 锚点版本 0.4.12
+E         anchor-0.4.13.json：目标包 package/engine-only.zip 的 producer.version=0.4.16 != 锚点版本 0.4.13
+E         anchor-0.4.13.json：目标包 package/confirmed.zip 的 producer.version=0.4.16 != 锚点版本 0.4.13
+E         anchor-0.4.13.json：目标包 package/cross-db.zip 的 producer.version=0.4.16 != 锚点版本 0.4.13
+E         anchor-0.4.13.json：目标包 package/reverse-order.zip 的 producer.version=0.4.16 != 锚点版本 0.4.13
+E         anchor-0.4.13.json：目标包 package/default-flow.zip 的 producer.version=0.4.16 != 锚点版本 0.4.13
+E         anchor-0.4.13.json：目标包 package/dup-subdir-a-then-b.zip 的 producer.version=0.4.16 != 锚点版本 0.4.13
+E         anchor-0.4.13.json：目标包 package/dup-subdir-b-then-a.zip 的 producer.version=0.4.16 != 锚点版本 0.4.13
+E         anchor-0.4.13.json：目标包 package/clean-wheel-default-flow.zip 的 producer.version=0.4.16 != 锚点版本 0.4.13
+E         anchor-0.4.14.json：目标包 package/engine-only.zip 的 producer.version=0.4.16 != 锚点版本 0.4.15
+E         anchor-0.4.14.json：目标包 package/confirmed.zip 的 producer.version=0.4.16 != 锚点版本 0.4.15
+E         anchor-0.4.14.json：目标包 package/cross-db.zip 的 producer.version=0.4.16 != 锚点版本 0.4.15
+E         anchor-0.4.14.json：目标包 package/reverse-order.zip 的 producer.version=0.4.16 != 锚点版本 0.4.15
+E         anchor-0.4.14.json：目标包 package/default-flow.zip 的 producer.version=0.4.16 != 锚点版本 0.4.15
+E         anchor-0.4.14.json：目标包 package/dup-subdir-a-then-b.zip 的 producer.version=0.4.16 != 锚点版本 0.4.15
+E         anchor-0.4.14.json：目标包 package/dup-subdir-b-then-a.zip 的 producer.version=0.4.16 != 锚点版本 0.4.15
+E         anchor-0.4.14.json：目标包 package/clean-wheel-default-flow.zip 的 producer.version=0.4.16 != 锚点版本 0.4.15
+E       assert not ['anchor-0.4.10.json：目标包 package/engine-only.zip 的 producer.version=0.4.16 != 锚点版本 0.4.10', 'anchor-0.4.10.json：目标包 pa...= 锚点版本 0.4.10', 'anchor-0.4.10.json：目标包 package/dup-subdir-a-then-b.zip 的 producer.version=0.4.16 != 锚点版本 0.4.10', ...]
+
+tests\test_doc_facts_guard.py:748: AssertionError
+_________________ test_number_noun_binding_matches_artifacts __________________
+
+    def test_number_noun_binding_matches_artifacts() -> None:
+        """本轮补齐的漏洞 1：数字必须绑到正确名词（`56 个锚点` 改成 `56 个包` 必须失败）。"""
+        base = _require_handoff()
+        actuals = _noun_actuals(base)
+        bad: list[str] = []
+        for path in _living_docs(base):
+            if path.name in ("未随交付清单.md", "旧发行物-SHA256清单.md"):
+                continue
+            for violation in _noun_claim_violations(path.read_text(encoding="utf-8"), actuals):
+                bad.append(f"{path.relative_to(base).as_posix()}：{violation}")
+>       assert not bad, "数字与名词不匹配：\n" + "\n".join(bad[:20])
+E       AssertionError: 数字与名词不匹配：
+E         交付清单.txt：'四包'：包 实物计数不含 4（允许 [2, 8, 40]）
+E       assert not ["交付清单.txt：'四包'：包 实物计数不含 4（允许 [2, 8, 40]）"]
+
+tests\test_doc_facts_guard.py:909: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/test_doc_facts_guard.py::test_anchor_json_filename_version_matches_content - AssertionError: 锚点文件名与内容版本不一致：
+  anchor-0.4.14.json：文件名版本 0.4.14 != 内容版本 0.4.15
+assert not ['anchor-0.4.14.json：文件名版本 0.4.14 != 内容版本 0.4.15']
+FAILED tests/test_doc_facts_guard.py::test_anchor_file_fields_resolve_or_are_marked - AssertionError: 存在悬空 file 指针：
+  anchor-0.4.10-clean-wheel-default-flow.json → dangling
+  anchor-0.4.10-confirmed.json → dangling
+  anchor-0.4.10-cross-db.json → dangling
+  anchor-0.4.10-default-flow.json → dangling
+  anchor-0.4.10-dup-subdir-a-then-b.json → dangling
+  anchor-0.4.10-dup-subdir-b-then-a.json → dangling
+  anchor-0.4.10-engine-only.json → dangling
+  anchor-0.4.10-reverse-order.json → dangling
+  anchor-0.4.11-clean-wheel-default-flow.json → dangling
+  anchor-0.4.11-confirmed.json → dangling
+  anchor-0.4.11-cross-db.json → dangling
+  anchor-0.4.11-default-flow.json → dangling
+  anchor-0.4.11-dup-subdir-a-then-b.json → dangling
+  anchor-0.4.11-dup-subdir-b-then-a.json → dangling
+  anchor-0.4.11-engine-only.json → dangling
+  anchor-0.4.11-reverse-order.json → dangling
+  anchor-0.4.12-clean-wheel-default-flow.json → dangling
+  anchor-0.4.12-confirmed.json → dangling
+  anchor-0.4.12-cross-db.json → dangling
+  anchor-0.4.12-default-flow.json → dangling
+  anchor-0.4.12-dup-subdir-a-then-b.json → dangling
+  anchor-0.4.12-dup-subdir-b-then-a.json → dangling
+  anchor-0.4.12-engine-only.json → dangling
+  anchor-0.4.12-reverse-order.json → dangling
+  anchor-0.4.13-clean-wheel-default-flow.json → dangling
+  anchor-0.4.13-confirmed.json → dangling
+  anchor-0.4.13-cross-db.json → dangling
+  anchor-0.4.13-default-flow.json → dangling
+  anchor-0.4.13-dup-subdir-a-then-b.json → dangling
+  anchor-0.4.13-dup-subdir-b-then-a.json → dangling
+  anchor-0.4.13-engine-only.json → dangling
+  anchor-0.4.13-reverse-order.json → dangling
+  anchor-0.4.14-clean-wheel-default-flow.json → dangling
+  anchor-0.4.14-confirmed.json → dangling
+  anchor-0.4.14-cross-db.json → dangling
+  anchor-0.4.14-default-flow.json → dangling
+  anchor-0.4.14-dup-subdir-a-then-b.json → dangling
+  anchor-0.4.14-dup-subdir-b-then-a.json → dangling
+  anchor-0.4.14-engine-only.json → dangling
+  anchor-0.4.14-reverse-order.json → dangling
+  anchor-0.4.15-clean-wheel-default-flow.json → dangling
+  anchor-0.4.15-confirmed.json → dangling
+  anchor-0.4.15-cross-db.json → dangling
+  anchor-0.4.15-default-flow.json → dangling
+  anchor-0.4.15-dup-subdir-a-then-b.json → dangling
+  anchor-0.4.15-dup-subdir-b-then-a.json → dangling
+  anchor-0.4.15-engine-only.json → dangling
+  anchor-0.4.15-reverse-order.json → dangling
+  anchor-0.4.16-clean-wheel-default-flow.json → dangling
+  anchor-0.4.16-confirmed.json → dangling
+  anchor-0.4.16-cross-db.json → dangling
+  anchor-0.4.16-default-flow.json → dangling
+  anchor-0.4.16-dup-subdir-a-then-b.json → dangling
+  anchor-0.4.16-dup-subdir-b-then-a.json → dangling
+  anchor-0.4.16-engine-only.json → dangling
+  anchor-0.4.16-reverse-order.json → dangling
+assert 56 == 0
+FAILED tests/test_doc_facts_guard.py::test_anchor_target_package_producer_version_matches - AssertionError: anchor-0.4.10.json：目标包 package/engine-only.zip 的 producer.version=0.4.16 != 锚点版本 0.4.10
+  anchor-0.4.10.json：目标包 package/confirmed.zip 的 producer.version=0.4.16 != 锚点版本 0.4.10
+  anchor-0.4.10.json：目标包 package/cross-db.zip 的 producer.version=0.4.16 != 锚点版本 0.4.10
+  anchor-0.4.10.json：目标包 package/reverse-order.zip 的 producer.version=0.4.16 != 锚点版本 0.4.10
+  anchor-0.4.10.json：目标包 package/default-flow.zip 的 producer.version=0.4.16 != 锚点版本 0.4.10
+  anchor-0.4.10.json：目标包 package/dup-subdir-a-then-b.zip 的 producer.version=0.4.16 != 锚点版本 0.4.10
+  anchor-0.4.10.json：目标包 package/dup-subdir-b-then-a.zip 的 producer.version=0.4.16 != 锚点版本 0.4.10
+  anchor-0.4.10.json：目标包 package/clean-wheel-default-flow.zip 的 producer.version=0.4.16 != 锚点版本 0.4.10
+  anchor-0.4.11.json：目标包 package/engine-only.zip 的 producer.version=0.4.16 != 锚点版本 0.4.11
+  anchor-0.4.11.json：目标包 package/confirmed.zip 的 producer.version=0.4.16 != 锚点版本 0.4.11
+  anchor-0.4.11.json：目标包 package/cross-db.zip 的 producer.version=0.4.16 != 锚点版本 0.4.11
+  anchor-0.4.11.json：目标包 package/reverse-order.zip 的 producer.version=0.4.16 != 锚点版本 0.4.11
+  anchor-0.4.11.json：目标包 package/default-flow.zip 的 producer.version=0.4.16 != 锚点版本 0.4.11
+  anchor-0.4.11.json：目标包 package/dup-subdir-a-then-b.zip 的 producer.version=0.4.16 != 锚点版本 0.4.11
+  anchor-0.4.11.json：目标包 package/dup-subdir-b-then-a.zip 的 producer.version=0.4.16 != 锚点版本 0.4.11
+  anchor-0.4.11.json：目标包 package/clean-wheel-default-flow.zip 的 producer.version=0.4.16 != 锚点版本 0.4.11
+  anchor-0.4.12.json：目标包 package/engine-only.zip 的 producer.version=0.4.16 != 锚点版本 0.4.12
+  anchor-0.4.12.json：目标包 package/confirmed.zip 的 producer.version=0.4.16 != 锚点版本 0.4.12
+  anchor-0.4.12.json：目标包 package/cross-db.zip 的 producer.version=0.4.16 != 锚点版本 0.4.12
+  anchor-0.4.12.json：目标包 package/reverse-order.zip 的 producer.version=0.4.16 != 锚点版本 0.4.12
+  anchor-0.4.12.json：目标包 package/default-flow.zip 的 producer.version=0.4.16 != 锚点版本 0.4.12
+  anchor-0.4.12.json：目标包 package/dup-subdir-a-then-b.zip 的 producer.version=0.4.16 != 锚点版本 0.4.12
+  anchor-0.4.12.json：目标包 package/dup-subdir-b-then-a.zip 的 producer.version=0.4.16 != 锚点版本 0.4.12
+  anchor-0.4.12.json：目标包 package/clean-wheel-default-flow.zip 的 producer.version=0.4.16 != 锚点版本 0.4.12
+  anchor-0.4.13.json：目标包 package/engine-only.zip 的 producer.version=0.4.16 != 锚点版本 0.4.13
+  anchor-0.4.13.json：目标包 package/confirmed.zip 的 producer.version=0.4.16 != 锚点版本 0.4.13
+  anchor-0.4.13.json：目标包 package/cross-db.zip 的 producer.version=0.4.16 != 锚点版本 0.4.13
+  anchor-0.4.13.json：目标包 package/reverse-order.zip 的 producer.version=0.4.16 != 锚点版本 0.4.13
+  anchor-0.4.13.json：目标包 package/default-flow.zip 的 producer.version=0.4.16 != 锚点版本 0.4.13
+  anchor-0.4.13.json：目标包 package/dup-subdir-a-then-b.zip 的 producer.version=0.4.16 != 锚点版本 0.4.13
+  anchor-0.4.13.json：目标包 package/dup-subdir-b-then-a.zip 的 producer.version=0.4.16 != 锚点版本 0.4.13
+  anchor-0.4.13.json：目标包 package/clean-wheel-default-flow.zip 的 producer.version=0.4.16 != 锚点版本 0.4.13
+  anchor-0.4.14.json：目标包 package/engine-only.zip 的 producer.version=0.4.16 != 锚点版本 0.4.15
+  anchor-0.4.14.json：目标包 package/confirmed.zip 的 producer.version=0.4.16 != 锚点版本 0.4.15
+  anchor-0.4.14.json：目标包 package/cross-db.zip 的 producer.version=0.4.16 != 锚点版本 0.4.15
+  anchor-0.4.14.json：目标包 package/reverse-order.zip 的 producer.version=0.4.16 != 锚点版本 0.4.15
+  anchor-0.4.14.json：目标包 package/default-flow.zip 的 producer.version=0.4.16 != 锚点版本 0.4.15
+  anchor-0.4.14.json：目标包 package/dup-subdir-a-then-b.zip 的 producer.version=0.4.16 != 锚点版本 0.4.15
+  anchor-0.4.14.json：目标包 package/dup-subdir-b-then-a.zip 的 producer.version=0.4.16 != 锚点版本 0.4.15
+  anchor-0.4.14.json：目标包 package/clean-wheel-default-flow.zip 的 producer.version=0.4.16 != 锚点版本 0.4.15
+assert not ['anchor-0.4.10.json：目标包 package/engine-only.zip 的 producer.version=0.4.16 != 锚点版本 0.4.10', 'anchor-0.4.10.json：目标包 pa...= 锚点版本 0.4.10', 'anchor-0.4.10.json：目标包 package/dup-subdir-a-then-b.zip 的 producer.version=0.4.16 != 锚点版本 0.4.10', ...]
+FAILED tests/test_doc_facts_guard.py::test_number_noun_binding_matches_artifacts - AssertionError: 数字与名词不匹配：
+  交付清单.txt：'四包'：包 实物计数不含 4（允许 [2, 8, 40]）
+assert not ["交付清单.txt：'四包'：包 实物计数不含 4（允许 [2, 8, 40]）"]
+4 failed, 18 passed, 10 deselected in 1.95s
+
+===== 附：0.4.16 目录副本植入上一轮漏网写法（仅用于证明扫描器能抓到） =====
+F.....                                                                   [100%]
+================================== FAILURES ===================================
+______________ test_every_path_like_string_exists_or_registered _______________
+
+    def test_every_path_like_string_exists_or_registered() -> None:
+        """M1 的根因：旧护栏把反引号内容整体剥离，错误路径因此被豁免。
+    
+        本断言**不再区分是否在反引号内**：任何形如 `a/b` 的路径或 `x.whl` 的文件名，
+        必须在交付目录内存在（含包内成员），或列入 `未随交付清单.md`；二者皆无即失败。
+        但 `release/`、`package/` 是交付内部命名空间，**不接受“未随交付清单”登记**——
+        未随交付清单是自动生成的，若允许它登记内部路径，错误路径会被自动洗白。
+        """
+        base = _require_handoff()
+        physical = _physical_names(base)
+        unshipped = check_handoff_refs.unshipped_paths(base)
+        tasks = []
+        for path in _texts(base):
+            if "lock.txt" in path.name:
+                # pip 锁文件是工具生成的依赖清单，不是叙述性文档。
+                continue
+            if path.name in ("未随交付清单.md", "旧发行物-SHA256清单.md"):
+                # 这两份本身就是“未随交付/历史发行物”的登记表，条目是历史路径记录。
+                continue
+            if _historical_doc(path, base):
+                # 历史归档报告记录当时产物（run 包、临时样例等早已清理），本目录不可自证；
+                # 已在 `已知残留与未闭合项.md` 明示。现行口径文档仍逐条核对。
+                continue
+            text = path.read_text(encoding="utf-8")
+            rel = path.relative_to(base).as_posix()
+            candidates = [m.group(1) for m in PATHISH_RE.finditer(text)]
+            candidates += [m.group(1) for m in BARE_FILE_RE.finditer(text)]
+            candidates += [m.group(1) for m in BARE_NAME_CONTEXT_RE.finditer(text)]
+            for token in candidates:
+                token = token.strip().rstrip("，。、；：")
+                if any(mark in token for mark in SKIP_TOKEN_CHARS):
+                    continue
+                if token.startswith(("http", "www", "mailto")):
+                    continue
+                if not _path_like(token):
+                    continue
+                if _exists(base, path, token):
+                    continue
+                # 不含目录的文件名才允许“按文件名匹配”；一旦写成 `a/b` 形式，必须**整条路径**
+                # 存在。否则“文件名对、目录写错”会被另一处的同名文件洗白（M1 的锁表即此类）。
+                if "/" not in token and (token in physical or Path(token).name in physical):
+                    continue
+                head = token.split("/", 1)[0]
+                if head not in DELIVERY_INTERNAL_HEADS and token in unshipped:
+                    continue
+                suffix = Path(token).suffix.lower()
+                # 源码/文档/报告类：仓库内实际存在即可（这些文件不随交付）。
+                if suffix not in ARTIFACT_SUFFIXES and (
+                        (ROOT / token).exists() or Path(token).name in _repo_names()):
+                    continue
+                # 历史归档文档：路径指当时产物，仓库内仍有实物即可。
+                if _historical_doc(path, base) and Path(token).name in _repo_names():
+                    continue
+                tasks.append(f"{rel} 提到既不存在也未登记的路径/文件名：{token}")
+>       assert not tasks, (
+            "以下路径/文件名在交付目录内不存在，也未列入 `未随交付清单.md`：\n"
+            + "\n".join(sorted(set(tasks))[:30]))
+E       AssertionError: 以下路径/文件名在交付目录内不存在，也未列入 `未随交付清单.md`：
+E         README-验收.md 提到既不存在也未登记的路径/文件名：requirements-0.4.10.lock
+E         README-验收.md 提到既不存在也未登记的路径/文件名：x.tar.gz
+E       assert not ['README-验收.md 提到既不存在也未登记的路径/文件名：requirements-0.4.10.lock', 'README-验收.md 提到既不存在也未登记的路径/文件名：x.tar.gz', 'README-验收.md 提到既不存在也未登记的路径/文件名：requirements-0.4.10.lock']
+
+tests\test_doc_facts_guard.py:414: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/test_doc_facts_guard.py::test_every_path_like_string_exists_or_registered - AssertionError: 以下路径/文件名在交付目录内不存在，也未列入 `未随交付清单.md`：
+  README-验收.md 提到既不存在也未登记的路径/文件名：requirements-0.4.10.lock
+  README-验收.md 提到既不存在也未登记的路径/文件名：x.tar.gz
+assert not ['README-验收.md 提到既不存在也未登记的路径/文件名：requirements-0.4.10.lock', 'README-验收.md 提到既不存在也未登记的路径/文件名：x.tar.gz', 'README-验收.md 提到既不存在也未登记的路径/文件名：requirements-0.4.10.lock']
+1 failed, 5 passed, 26 deselected in 1.93s
+
+（补充：见 oo）
+F                                                                        [100%]
+================================== FAILURES ===================================
+______________ test_every_path_like_string_exists_or_registered _______________
+
+    def test_every_path_like_string_exists_or_registered() -> None:
+        """M1 的根因：旧护栏把反引号内容整体剥离，错误路径因此被豁免。
+    
+        本断言**不再区分是否在反引号内**：任何形如 `a/b` 的路径或 `x.whl` 的文件名，
+        必须在交付目录内存在（含包内成员），或列入 `未随交付清单.md`；二者皆无即失败。
+        但 `release/`、`package/` 是交付内部命名空间，**不接受“未随交付清单”登记**——
+        未随交付清单是自动生成的，若允许它登记内部路径，错误路径会被自动洗白。
+        """
+        base = _require_handoff()
+        physical = _physical_names(base)
+        unshipped = check_handoff_refs.unshipped_paths(base)
+        tasks = []
+        for path in _texts(base):
+            if "lock.txt" in path.name:
+                # pip 锁文件是工具生成的依赖清单，不是叙述性文档。
+                continue
+            if path.name in ("未随交付清单.md", "旧发行物-SHA256清单.md"):
+                # 这两份本身就是“未随交付/历史发行物”的登记表，条目是历史路径记录。
+                continue
+            if _historical_doc(path, base):
+                # 历史归档报告记录当时产物（run 包、临时样例等早已清理），本目录不可自证；
+                # 已在 `已知残留与未闭合项.md` 明示。现行口径文档仍逐条核对。
+                continue
+            text = path.read_text(encoding="utf-8")
+            rel = path.relative_to(base).as_posix()
+            candidates = [m.group(1) for m in PATHISH_RE.finditer(text)]
+            candidates += [m.group(1) for m in BARE_FILE_RE.finditer(text)]
+            candidates += [m.group(1) for m in BARE_NAME_CONTEXT_RE.finditer(text)]
+            for token in candidates:
+                token = token.strip().rstrip("，。、；：")
+                if any(mark in token for mark in SKIP_TOKEN_CHARS):
+                    continue
+                if token.startswith(("http", "www", "mailto")):
+                    continue
+                if not _path_like(token):
+                    continue
+                if _exists(base, path, token):
+                    continue
+                # 不含目录的文件名才允许“按文件名匹配”；一旦写成 `a/b` 形式，必须**整条路径**
+                # 存在。否则“文件名对、目录写错”会被另一处的同名文件洗白（M1 的锁表即此类）。
+                if "/" not in token and (token in physical or Path(token).name in physical):
+                    continue
+                head = token.split("/", 1)[0]
+                if head not in DELIVERY_INTERNAL_HEADS and token in unshipped:
+                    continue
+                suffix = Path(token).suffix.lower()
+                # 源码/文档/报告类：仓库内实际存在即可（这些文件不随交付）。
+                if suffix not in ARTIFACT_SUFFIXES and (
+                        (ROOT / token).exists() or Path(token).name in _repo_names()):
+                    continue
+                # 历史归档文档：路径指当时产物，仓库内仍有实物即可。
+                if _historical_doc(path, base) and Path(token).name in _repo_names():
+                    continue
+                tasks.append(f"{rel} 提到既不存在也未登记的路径/文件名：{token}")
+>       assert not tasks, (
+            "以下路径/文件名在交付目录内不存在，也未列入 `未随交付清单.md`：\n"
+            + "\n".join(sorted(set(tasks))[:30]))
+E       AssertionError: 以下路径/文件名在交付目录内不存在，也未列入 `未随交付清单.md`：
+E         README-验收.md 提到既不存在也未登记的路径/文件名：foo
+E         README-验收.md 提到既不存在也未登记的路径/文件名：requirements-0.4.10.lock
+E         README-验收.md 提到既不存在也未登记的路径/文件名：x.tar.gz
+E       assert not ['README-验收.md 提到既不存在也未登记的路径/文件名：requirements-0.4.10.lock', 'README-验收.md 提到既不存在也未登记的路径/文件名：x.tar.gz', 'README-验收.md 提到既不存在也未登记的路径/文件名：requirements-0.4.10.lock', 'README-验收.md 提到既不存在也未登记的路径/文件名：foo']
+
+tests\test_doc_facts_guard.py:414: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/test_doc_facts_guard.py::test_every_path_like_string_exists_or_registered - AssertionError: 以下路径/文件名在交付目录内不存在，也未列入 `未随交付清单.md`：
+  README-验收.md 提到既不存在也未登记的路径/文件名：foo
+  README-验收.md 提到既不存在也未登记的路径/文件名：requirements-0.4.10.lock
+  README-验收.md 提到既不存在也未登记的路径/文件名：x.tar.gz
+assert not ['README-验收.md 提到既不存在也未登记的路径/文件名：requirements-0.4.10.lock', 'README-验收.md 提到既不存在也未登记的路径/文件名：x.tar.gz', 'README-验收.md 提到既不存在也未登记的路径/文件名：requirements-0.4.10.lock', 'README-验收.md 提到既不存在也未登记的路径/文件名：foo']
+1 failed, 31 deselected in 1.17s

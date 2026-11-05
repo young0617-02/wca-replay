@@ -123,11 +123,12 @@ def _handoff_search_dirs(prev: Path, out: Path) -> list[Path]:
     return [prev] + others
 
 
-def _collect_anchor_candidates(prev: Path, out: Path) -> tuple[dict, list[dict]]:
+def _collect_anchor_candidates(prev: Path, out: Path,
+                               allowed_versions: set[str]) -> tuple[dict, list[dict]]:
     """收集历史锚点：同一 (类型, 版本, 角色) 只取第一个来源（prev 优先）。
 
-    返回 (候选表, 来源记录)。来源记录用于在 `OLD-ANCHORS.md` 里如实列出
-    “哪个锚点来自哪个交付目录、源文件名是否与内容版本一致”。
+    只收 **prev 交付过的版本 + 本目录旧包实有版本 + 本轮版本**；更早轮次
+    （0.4.4–0.4.9）的锚点不在本交付范围，避免把“无包可解析”的历史锚点重新带进来。
     """
     chosen: dict[tuple[str, str, str], tuple[Path, dict]] = {}
     sources: list[dict] = []
@@ -139,6 +140,8 @@ def _collect_anchor_candidates(prev: Path, out: Path) -> tuple[dict, list[dict]]
                 continue
             if not anchor_version or kind not in ("single", "combined"):
                 continue
+            if anchor_version not in allowed_versions:
+                continue
             key = (kind, anchor_version, str(doc.get("role") or ""))
             if key in chosen:
                 continue
@@ -147,7 +150,8 @@ def _collect_anchor_candidates(prev: Path, out: Path) -> tuple[dict, list[dict]]
                 "source": path,
                 "version": anchor_version,
                 "kind": kind,
-                "name_version": docfacts.anchor_name_version(path.name),
+                "name_version": (docfacts.anchor_name_version(path.name)
+                                 or path.name),
             })
     return chosen, sources
 
@@ -249,9 +253,9 @@ def _scan_version_mismatches(prev: Path, out: Path) -> dict:
 
 def build(args: argparse.Namespace) -> int:
     version = args.version
-    dist: Path = args.dist
-    out: Path = args.out
-    prev: Path = args.prev
+    dist: Path = Path(args.dist).resolve()
+    out: Path = Path(args.out).resolve()
+    prev: Path = Path(args.prev).resolve()
     summary = json.loads(args.summary.read_text(encoding="utf-8"))
     release = json.loads((dist / "RELEASE.json").read_text(encoding="utf-8"))
     if out.exists():
@@ -283,7 +287,18 @@ def build(args: argparse.Namespace) -> int:
     # 3) 公钥、历史锚点：文件名一律由“内容里的 version”派生，不沿用源文件名。
     for name in ("trusted-public-key.pub", "release-public-key.pub"):
         shutil.copy2(prev / name, out / name)
-    anchor_candidates, anchor_sources = _collect_anchor_candidates(prev, out)
+    allowed_versions = {version}
+    for path in prev.glob("anchor*.json"):
+        try:
+            allowed_versions.add(str(json.loads(path.read_text(
+                encoding="utf-8")).get("version") or ""))
+        except (OSError, ValueError):
+            continue
+    for path in (out / "release" / "old-packages").glob("*.zip"):
+        allowed_versions.add(docfacts._version_from_name(path.name))
+    allowed_versions.discard("")
+    anchor_candidates, anchor_sources = _collect_anchor_candidates(
+        prev, out, allowed_versions)
     historical_versions = sorted({v for (_kind, v, _role) in anchor_candidates
                                   if v != version})
     for anchor_version in historical_versions:
@@ -537,8 +552,9 @@ def build(args: argparse.Namespace) -> int:
             "",
             f"本目录根下实有锚点 **{anchors['anchor_total']} 个**（单包 "
             f"**{len(anchors['singles'])} 个**、组合记录 **{len(anchors['combined'])} 个**）。",
-            f"**扫描器断言**：每个 `file` 字段都以**该 JSON 自身位置**为基准核对——"
-            f"可解析 **{anchors['by_status']['resolvable']} 个**、显式标注“仅记录、不可解析” "
+            f"**扫描器断言**：按锚点计（每个 `file` 字段都以**该 JSON 自身位置**为基准核对，"
+            f"锚点内全部指针可解析才算可解析）——可解析 "
+            f"**{anchors['by_status']['resolvable']} 个**、显式标注“仅记录、不可解析” "
             f"**{anchors['by_status']['marked']} 个**、悬空 **{anchors['by_status']['dangling']} 个**。"
             f"按指针计（组合锚点每包一条）：可解析 **{anchors['pointer_by_status']['resolvable']} 条**、"
             f"标注 **{anchors['pointer_by_status']['marked']} 条**、悬空 "
@@ -879,7 +895,7 @@ py -3.12 -m venv .venv-clean
   的锁，它们在 `old-packages/`；按表找文件即可，不依赖记忆。
 - **旧锚点**：根目录实有锚点 **{anchors['anchor_total']} 个**（单包
   **{len(anchors['singles'])} 个**、组合记录 **{len(anchors['combined'])} 个**）。
-  每个 `file` 字段都以该 JSON 自身位置为基准核对：**可解析
+  按锚点计，每个 `file` 字段都以该 JSON 自身位置为基准核对：**可解析
   {anchors['by_status']['resolvable']} 个**、显式标注“仅记录、不可解析”
   {anchors['by_status']['marked']} 个、**悬空 {anchors['by_status']['dangling']} 个**。
   0.4.12 的 8 个包未随本目录交付，对应锚点已显式标注；获取方式见 `OLD-ANCHORS.md`

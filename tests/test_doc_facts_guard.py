@@ -243,20 +243,32 @@ def test_relative_paths_resolve() -> None:
 PATHISH_RE = re.compile(
     r"(?<![A-Za-z0-9_./\\-])"
     r"((?:[A-Za-z0-9_.\-\u4e00-\u9fff]+/)+[A-Za-z0-9_.\-\u4e00-\u9fff]+)")
-# 文件名识别不再依赖后缀白名单：只要“点 + 字母开头的后缀”就扫（大小写不敏感），
-# 覆盖 `x.tar.gz`、`OLD-WHEELS.MD`、`requirements-0.4.10.lock`（少 `.txt`）等历史漏网写法。
-DOTTED_NAME_RE = re.compile(r"\.[A-Za-z][A-Za-z0-9_-]{0,5}$")
+# 文件名识别不再依赖“旧的白名单后缀”，而是接受一组**宽泛的**常见文件后缀
+# （大小写不敏感）：覆盖 `requirements-0.4.10.lock`（少 `.txt`）、`x.tar.gz`、
+# `OLD-WHEELS.MD` 等历史漏网写法。所有已知压缩/文档/数据/代码后缀都在表内。
+KNOWN_FILE_SUFFIXES = {
+    "md", "markdown", "txt", "text", "rst", "json", "jsonl", "csv", "tsv", "xml",
+    "yaml", "yml", "toml", "ini", "cfg", "conf", "lock", "log", "sum", "sums",
+    "zip", "gz", "bz2", "xz", "tar", "tgz", "whl", "jar", "7z", "rar",
+    "sig", "pub", "pem", "key", "crt", "asc", "b64", "sha", "sha256",
+    "py", "pyi", "sh", "ps1", "bat", "cmd", "js", "ts", "jsx", "tsx",
+    "html", "htm", "css", "sql", "db", "sqlite", "pdf", "docx", "xlsx", "pptx",
+    "png", "jpg", "jpeg", "gif", "svg", "ico", "ttf", "otf", "woff", "woff2",
+}
+# 版本段/通配写法（`0.4.16.json`、`0.4.x`）不是文件名，不当路径断言。
+VERSIONLIKE_RE = re.compile(r"^\d+(?:\.\d+){1,3}(?:\.(?:json|x|md|txt))?$")
 BARE_FILE_RE = re.compile(
     r"(?<![A-Za-z0-9_.\-\u4e00-\u9fff])"
     r"([A-Za-z0-9_][A-Za-z0-9_.-]*\.[A-Za-z][A-Za-z0-9_-]{0,5})"
     r"(?![A-Za-z0-9_.\-])")
-# 无后缀文件名：已知文件名模式（`SHA256SUMS` 等）+ “见/文件/清单/…”后紧跟的裸名字，
-# 后者用于覆盖 `foo` 这类既无目录也无后缀的错误指引。
+# 无后缀文件名：已知文件名模式（`SHA256SUMS` 等）+“见/文件/清单/…”后紧跟的**反引号或引号内**
+# 裸名字。要求引号包裹，避免把 `wheel`、`producer_commit` 这类普通词/字段名当文件名；
+# `foo` 这类既无目录也无后缀的错误指引仍会被抓（文档里通常写成 `见 \`foo\``）。
 KNOWN_BARE_NAMES = {"SHA256SUMS", "Makefile", "Dockerfile", "LICENSE", "CODEOWNERS",
                     "OWNERS", "py.typed"}
 BARE_NAME_CONTEXT_RE = re.compile(
-    r"(?:见|文件|清单|目录|路径|位于|取自|放在|名为|读取|打开)\s*[*`]*"
-    r"([A-Za-z0-9_][A-Za-z0-9_.-]{1,40})")
+    r"(?:见|文件|清单|目录|路径|位于|取自|放在|名为|读取|打开)\s*"
+    r"[`\"']([A-Za-z0-9_][A-Za-z0-9_.-]{1,40})[`\"']")
 SKIP_TOKEN_CHARS = ("<", ">", "*", "{", "}", "://", "=", "|", '"', "'")
 SKIP_BARE_TOKENS = {"e.g", "i.e", "etc", "vs"}
 ARTIFACT_SUFFIXES = (".whl", ".zip", ".lock")
@@ -300,11 +312,25 @@ def _exists(base: Path, doc: Path, token: str) -> bool:
     return (base / token).exists() or (doc.parent / token).exists()
 
 
+def _file_suffix(token: str) -> str:
+    return Path(token).suffix.lower().lstrip(".")
+
+
+def _looks_like_file(token: str) -> bool:
+    """宽泛后缀表 + 排除版本段/通配（`0.4.16.json`、`0.4.x`）。"""
+    if VERSIONLIKE_RE.match(token):
+        return False
+    name = Path(token).name
+    if "." not in name:
+        return False
+    return _file_suffix(token) in KNOWN_FILE_SUFFIXES
+
+
 def _path_like(token: str) -> bool:
     """只把“像文件路径”的 token 纳入断言，避免把 `OK/FAIL`、`v1/v2` 之类当路径。
 
-    后缀不再白名单：任何字母开头的后缀都算文件名（大小写不敏感）；
-    无后缀裸名字只认已知文件名模式，或由 `BARE_NAME_CONTEXT_RE` 明确指出的名字。
+    后缀用宽泛常见后缀表（大小写不敏感）；无后缀裸名字只认已知文件名模式，
+    或由 `BARE_NAME_CONTEXT_RE` 明确指出的引号内名字。
     """
     token = token.rstrip("，。、；：")
     if token.endswith(("-", ".", "/")):
@@ -314,12 +340,14 @@ def _path_like(token: str) -> bool:
     if "/" in token:
         head = token.split("/", 1)[0]
         return (head in PREFIX_HEADS or head in DELIVERY_INTERNAL_HEADS
-                or bool(DOTTED_NAME_RE.search(token)))
-    if DOTTED_NAME_RE.search(token):
+                or _looks_like_file(token))
+    if _looks_like_file(token):
         return True
     if token in KNOWN_BARE_NAMES:
         return True
-    return bool(re.fullmatch(r"[a-z][a-z0-9_-]{1,30}", token))
+    # 无后缀裸名字：只认“文件名味道”的写法（不含下划线），避免把 `evidence_digest`、
+    # `producer_commit` 这类字段标识符当文件名；`foo` 这类错误指引仍会被抓。
+    return bool(re.fullmatch(r"[a-z][a-z0-9-]{1,30}", token))
 
 
 def _historical_doc(path: Path, base: Path) -> bool:
@@ -444,7 +472,7 @@ CLAIM_PATTERNS: list[tuple[re.Pattern, str]] = [
      "locks_old_packages"),
     (re.compile(rf"旧包\s*\*\*({NUM_TOKEN})\s*个\*\*"), "old_packages"),
     (re.compile(rf"({NUM_TOKEN})\s*个\s*zip"), "old_packages"),
-    (re.compile(rf"(?<!旧)包\s*\*\*({NUM_TOKEN})\s*个\*\*"), "packages"),
+    (re.compile(rf"(?<!旧)(?<!单)包\s*\*\*({NUM_TOKEN})\s*个\*\*"), "packages"),
     (re.compile(rf"根目录锚点\s*\*\*({NUM_TOKEN})\s*个\*\*"), "anchor_total"),
     (re.compile(rf"锚点\s*\*\*({NUM_TOKEN})\s*个\*\*"), "anchor_total"),
     (re.compile(rf"单包\s*\*\*({NUM_TOKEN})\s*个\*\*"), "singles"),
@@ -567,6 +595,24 @@ def test_numbers_are_artifact_facts_or_declared_constants() -> None:
     actual.add(str(anchor_facts["anchor_total"]))
     for key in ("resolvable", "marked", "dangling"):
         actual.add(str(anchor_facts["by_status"][key]))
+    # 历史/本轮分类计数（README/OLD-ANCHORS 会写“历史单包 56 个”“历史组合 7 个”等）。
+    release_version = docfacts.release_facts(base / "release")["version"]
+    actual.add(str(sum(1 for a in anchor_facts["singles"]
+                       if a["version"] != release_version)))
+    actual.add(str(sum(1 for a in anchor_facts["combined"]
+                       if a["version"] != release_version)))
+    actual.add(str(sum(1 for a in anchor_facts["singles"]
+                       if a["version"] == release_version)))
+    actual.add(str(sum(1 for a in anchor_facts["combined"]
+                       if a["version"] == release_version)))
+    # 按版本的锚点计数。
+    for anchor_version in {a["version"] for a in anchor_facts["singles"] + anchor_facts["combined"]}:
+        singles_v = [a for a in anchor_facts["singles"] if a["version"] == anchor_version]
+        combined_v = [a for a in anchor_facts["combined"] if a["version"] == anchor_version]
+        actual.add(str(len(singles_v)))
+        actual.add(str(len(combined_v)))
+        actual.add(str(sum(1 for a in singles_v if a["status"] == "marked")))
+        actual.add(str(sum(1 for a in combined_v if a["status"] == "marked")))
     # 机制 3：差异表的“变动文件数”和三类原因计数也必须由同一份 diff 重算。
     import diff_packages
     diff_md, _detail = diff_packages.build_table(base / "release" / "old-packages",

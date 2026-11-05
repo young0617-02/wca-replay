@@ -1,0 +1,388 @@
+0.4.17 仓库外干净 venv（仅装 dist wheel + requirements.lock.txt）verify/replay 原始输出
+
+venv: .tmp-venv-0417；wheel: worktime_compliance_agent-0.4.17-py3-none-any.whl
+
+[clean-wheel-default-flow] verify
+MANIFEST SCHEMA v3
+PRODUCER 0.4.17 83c651aeb0225cf225be213ef5de3eab9fd883d2 python=3.12.8 rule_pack=rp-2026.11.gd-pilot-standard.v6
+MANIFEST CHECKSUM OK
+ARTIFACTS OK checked=14
+VERIFY SCRIPT OK sha256=6721bac5c1580acd0213369e20d6f4ef92a592534d9b0b73cbe56e15d601c435
+ARTIFACTS DIGEST manifest-internal OK / external OK
+EXTRA FILE OK
+FINDINGS DIGEST OK a4e31ef313faefde4533d8b8ae9373c8d11b89eba8620b531a4c71eb13603190 (9 fields; source_* not covered by digest)
+EVIDENCE DIGEST OK 1e6e2bb28a04e0791c6c8b0d35f94acf19412eec78dba45ae00e00be183ebc54 / external=OK
+COUNTS 发现（未签认） 115 条 / 已确认结论 0 条
+RULE VERSIONS {"rp-2026.11.gd-pilot-standard.v6": 115}
+CHAIN OK events=8
+INPUTS COMPLETENESS OK INPUTS COMPLETENESS OK 输入清单 8 个与包内 inputs/ 一致
+INPUTS DIGEST OK 00ab0a3ccf0e7d02a8a714bca9137e3fdca81a1bdfebd50c6a70e660ca98c004
+SIGNATURE OK / pinned (key matches supplied pin; independent key_id verification not done) / key_id=ed25519:b07741b2e0bbcb9a3a37dd09a7348c717497145f7cbbdd580b18e7e80e7a9555
+SIGNATURE PINNED OK
+PACKAGE SHA256 computed=4aaa61b7a648cf665faf9a4463b94a1df2bb5e09834ca363e68a6a318d6d20fc / external=OK
+ANCHOR CHECK OK
+RESULT OK
+  exit_code=0
+
+[clean-wheel-default-flow] replay
+重放举证包 package/clean-wheel-default-flow.zip（run run-20261105T205000-b4a8f9bc）
+  审计链：完整，8 条
+  导出代码：version=0.4.17 commit=83c651aeb0225cf225be213ef5de3eab9fd883d2 python=3.12.8 rule_pack=rp-2026.11.gd-pilot-standard.v6
+  包内输入 8 个
+  输入摘要：与 manifest/签名一致（00ab0a3ccf0e7d02…）
+  钉回口径参数 {"cross_day_cut_hour": 7, "daily_std_minutes": 480, "ot_cap_scope": "weekday_only", "pay_base_source": "contract_normal_wage", "weekly_std_minutes": 2400}
+  包内 scope 未记录的判据参数沿用代码默认值（不读本机 .env）
+  签名：有效 / pinned (key matches supplied pin; independent key_id verification not done) / key_id=ed25519:b07741b2e0bbcb9a3a37dd09a7348c717497145f7cbbdd580b18e7e80e7a9555
+  工件逐文件：OK checked=14
+  VERIFY SCRIPT：OK
+  ARTIFACTS DIGEST manifest-internal OK / external=OK
+  EXTRA FILE：OK
+  发现摘要：一致（findings.csv 115 行，反算 a4e31ef313faefde…）
+  EVIDENCE DIGEST OK 1e6e2bb28a04e0791c6c8b0d35f94acf19412eec78dba45ae00e00be183ebc54 / external=OK
+  PACKAGE SHA256 computed=4aaa61b7a648cf665faf9a4463b94a1df2bb5e09834ca363e68a6a318d6d20fc / external=OK
+  ANCHOR CHECK OK
+  = rule_pack_version: 期望 rp-2026.11.gd-pilot-… 实得 rp-2026.11.gd-pilot-…
+  = input_fingerprint: 期望 3680c4d5c0ed7ef2e4b3… 实得 3680c4d5c0ed7ef2e4b3…
+  = conclusion_digest: 期望 a4e31ef313faefde4533… 实得 a4e31ef313faefde4533…
+  发现（未签认） 期望 115 / 实得 115 分级 {'DEFENSIBLE': 23, 'REVIEW': 85, 'VIOLATION': 7}
+  已确认结论（包内）期望 0 / 实际 0 条（replay 不重建人工确认，只核对包内结论集行数）
+  重放结果：一致 —— 三元组、证据定位摘要与发现（未签认）条数逐项一致
+  RESULT OK
+  exit_code=0
+
+[confirmed] verify
+MANIFEST SCHEMA v3
+PRODUCER 0.4.17 83c651aeb0225cf225be213ef5de3eab9fd883d2 python=3.12.8 rule_pack=rp-2026.11.gd-pilot-standard.v5
+MANIFEST CHECKSUM OK
+ARTIFACTS OK checked=14
+VERIFY SCRIPT OK sha256=6721bac5c1580acd0213369e20d6f4ef92a592534d9b0b73cbe56e15d601c435
+ARTIFACTS DIGEST manifest-internal OK / external OK
+EXTRA FILE OK
+FINDINGS DIGEST OK 5dc46558152089f1c0be7522c7b1c175b387309d1c316eb8445dd81ada1d5b7d (9 fields; source_* not covered by digest)
+EVIDENCE DIGEST OK ed3b3f1b3c1961a22683979750bc12e44a048c9926617ef1a645fdfaa9cddfeb / external=OK
+COUNTS 发现（未签认） 115 条 / 已确认结论 2 条
+RULE VERSIONS {"rp-2026.10.gd-pilot-standard.v4": 99, "rp-2026.11.gd-pilot-standard.v5": 16}
+CHAIN OK events=12
+INPUTS COMPLETENESS OK INPUTS COMPLETENESS OK 输入清单 8 个与包内 inputs/ 一致
+INPUTS DIGEST OK aad527d187dad848924af8be868698a8da5e745ad31af4c3ff83d2d2e1d930a7
+SIGNATURE OK / pinned (key matches supplied pin; independent key_id verification not done) / key_id=ed25519:b07741b2e0bbcb9a3a37dd09a7348c717497145f7cbbdd580b18e7e80e7a9555
+SIGNATURE PINNED OK
+PACKAGE SHA256 computed=1cc68f2dc20b67cf06662b681b70c54c5eed51fa987a5eb2c4fecfd5d7524cd1 / external=OK
+ANCHOR CHECK OK
+RESULT OK
+  exit_code=0
+
+[confirmed] replay
+重放举证包 package/confirmed.zip（run run-20261105T204959-42e5aed8）
+  审计链：完整，12 条
+  导出代码：version=0.4.17 commit=83c651aeb0225cf225be213ef5de3eab9fd883d2 python=3.12.8 rule_pack=rp-2026.11.gd-pilot-standard.v5
+  包内输入 8 个
+  输入摘要：与 manifest/签名一致（aad527d187dad848…）
+  钉回口径参数 {"cross_day_cut_hour": 7, "daily_std_minutes": 480, "ot_cap_scope": "weekday_only", "pay_base_source": "contract_normal_wage", "weekly_std_minutes": 2400}
+  包内 scope 未记录的判据参数沿用代码默认值（不读本机 .env）
+  签名：有效 / pinned (key matches supplied pin; independent key_id verification not done) / key_id=ed25519:b07741b2e0bbcb9a3a37dd09a7348c717497145f7cbbdd580b18e7e80e7a9555
+  工件逐文件：OK checked=14
+  VERIFY SCRIPT：OK
+  ARTIFACTS DIGEST manifest-internal OK / external=OK
+  EXTRA FILE：OK
+  发现摘要：一致（findings.csv 115 行，反算 5dc46558152089f1…）
+  EVIDENCE DIGEST OK ed3b3f1b3c1961a22683979750bc12e44a048c9926617ef1a645fdfaa9cddfeb / external=OK
+  PACKAGE SHA256 computed=1cc68f2dc20b67cf06662b681b70c54c5eed51fa987a5eb2c4fecfd5d7524cd1 / external=OK
+  ANCHOR CHECK OK
+  = rule_pack_version: 期望 rp-2026.11.gd-pilot-… 实得 rp-2026.11.gd-pilot-…
+  = input_fingerprint: 期望 8b3b54a09aa8ede51697… 实得 8b3b54a09aa8ede51697…
+  = conclusion_digest: 期望 5dc46558152089f1c0be… 实得 5dc46558152089f1c0be…
+  发现（未签认） 期望 115 / 实得 115 分级 {'DEFENSIBLE': 23, 'REVIEW': 85, 'VIOLATION': 7}
+  已确认结论（包内）期望 2 / 实际 2 条（replay 不重建人工确认，只核对包内结论集行数）
+  重放结果：一致 —— 三元组、证据定位摘要与发现（未签认）条数逐项一致
+  RESULT OK
+  exit_code=0
+
+[cross-db] verify
+MANIFEST SCHEMA v3
+PRODUCER 0.4.17 83c651aeb0225cf225be213ef5de3eab9fd883d2 python=3.12.8 rule_pack=rp-2026.11.gd-pilot-standard.v5
+MANIFEST CHECKSUM OK
+ARTIFACTS OK checked=14
+VERIFY SCRIPT OK sha256=6721bac5c1580acd0213369e20d6f4ef92a592534d9b0b73cbe56e15d601c435
+ARTIFACTS DIGEST manifest-internal OK / external OK
+EXTRA FILE OK
+FINDINGS DIGEST OK 5dc46558152089f1c0be7522c7b1c175b387309d1c316eb8445dd81ada1d5b7d (9 fields; source_* not covered by digest)
+EVIDENCE DIGEST OK ed3b3f1b3c1961a22683979750bc12e44a048c9926617ef1a645fdfaa9cddfeb / external=OK
+COUNTS 发现（未签认） 115 条 / 已确认结论 0 条
+RULE VERSIONS {"rp-2026.10.gd-pilot-standard.v4": 99, "rp-2026.11.gd-pilot-standard.v5": 16}
+CHAIN OK events=8
+INPUTS COMPLETENESS OK INPUTS COMPLETENESS OK 输入清单 8 个与包内 inputs/ 一致
+INPUTS DIGEST OK aad527d187dad848924af8be868698a8da5e745ad31af4c3ff83d2d2e1d930a7
+SIGNATURE OK / pinned (key matches supplied pin; independent key_id verification not done) / key_id=ed25519:b07741b2e0bbcb9a3a37dd09a7348c717497145f7cbbdd580b18e7e80e7a9555
+SIGNATURE PINNED OK
+PACKAGE SHA256 computed=3004e548649588acb8b726c3a7e72b0d67e41e92bba7ebdaf34e9f581bac7b8c / external=OK
+ANCHOR CHECK OK
+RESULT OK
+  exit_code=0
+
+[cross-db] replay
+重放举证包 package/cross-db.zip（run run-20261105T205001-5d4aabac）
+  审计链：完整，8 条
+  导出代码：version=0.4.17 commit=83c651aeb0225cf225be213ef5de3eab9fd883d2 python=3.12.8 rule_pack=rp-2026.11.gd-pilot-standard.v5
+  包内输入 8 个
+  输入摘要：与 manifest/签名一致（aad527d187dad848…）
+  钉回口径参数 {"cross_day_cut_hour": 7, "daily_std_minutes": 480, "ot_cap_scope": "weekday_only", "pay_base_source": "contract_normal_wage", "weekly_std_minutes": 2400}
+  包内 scope 未记录的判据参数沿用代码默认值（不读本机 .env）
+  签名：有效 / pinned (key matches supplied pin; independent key_id verification not done) / key_id=ed25519:b07741b2e0bbcb9a3a37dd09a7348c717497145f7cbbdd580b18e7e80e7a9555
+  工件逐文件：OK checked=14
+  VERIFY SCRIPT：OK
+  ARTIFACTS DIGEST manifest-internal OK / external=OK
+  EXTRA FILE：OK
+  发现摘要：一致（findings.csv 115 行，反算 5dc46558152089f1…）
+  EVIDENCE DIGEST OK ed3b3f1b3c1961a22683979750bc12e44a048c9926617ef1a645fdfaa9cddfeb / external=OK
+  PACKAGE SHA256 computed=3004e548649588acb8b726c3a7e72b0d67e41e92bba7ebdaf34e9f581bac7b8c / external=OK
+  ANCHOR CHECK OK
+  = rule_pack_version: 期望 rp-2026.11.gd-pilot-… 实得 rp-2026.11.gd-pilot-…
+  = input_fingerprint: 期望 8b3b54a09aa8ede51697… 实得 8b3b54a09aa8ede51697…
+  = conclusion_digest: 期望 5dc46558152089f1c0be… 实得 5dc46558152089f1c0be…
+  发现（未签认） 期望 115 / 实得 115 分级 {'DEFENSIBLE': 23, 'REVIEW': 85, 'VIOLATION': 7}
+  已确认结论（包内）期望 0 / 实际 0 条（replay 不重建人工确认，只核对包内结论集行数）
+  重放结果：一致 —— 三元组、证据定位摘要与发现（未签认）条数逐项一致
+  RESULT OK
+  exit_code=0
+
+[default-flow] verify
+MANIFEST SCHEMA v3
+PRODUCER 0.4.17 83c651aeb0225cf225be213ef5de3eab9fd883d2 python=3.12.8 rule_pack=rp-2026.11.gd-pilot-standard.v5
+MANIFEST CHECKSUM OK
+ARTIFACTS OK checked=14
+VERIFY SCRIPT OK sha256=6721bac5c1580acd0213369e20d6f4ef92a592534d9b0b73cbe56e15d601c435
+ARTIFACTS DIGEST manifest-internal OK / external OK
+EXTRA FILE OK
+FINDINGS DIGEST OK 0ae2cfe90f6ae8dc0d8deb8e420c01c23b7d7f73e2c9743a7637d724d63b8f0e (9 fields; source_* not covered by digest)
+EVIDENCE DIGEST OK 36018b58bd29bd3d4703cc00106fe0b6100045c6c72db038c2248c16fa13b56d / external=OK
+COUNTS 发现（未签认） 115 条 / 已确认结论 0 条
+RULE VERSIONS {"rp-2026.10.gd-pilot-standard.v4": 99, "rp-2026.11.gd-pilot-standard.v5": 16}
+CHAIN OK events=8
+INPUTS COMPLETENESS OK INPUTS COMPLETENESS OK 输入清单 8 个与包内 inputs/ 一致
+INPUTS DIGEST OK 2e40b1196d5bd2c4c5d667082b6ed5493c0110005761d99daf805ec689e36c2e
+SIGNATURE OK / pinned (key matches supplied pin; independent key_id verification not done) / key_id=ed25519:b07741b2e0bbcb9a3a37dd09a7348c717497145f7cbbdd580b18e7e80e7a9555
+SIGNATURE PINNED OK
+PACKAGE SHA256 computed=ebfb1de7d25040861ec5b52d240cebafd7f5d24791d407d4ef261f145ed9bf05 / external=OK
+ANCHOR CHECK OK
+RESULT OK
+  exit_code=0
+
+[default-flow] replay
+重放举证包 package/default-flow.zip（run run-20261105T205004-bbdff985）
+  审计链：完整，8 条
+  导出代码：version=0.4.17 commit=83c651aeb0225cf225be213ef5de3eab9fd883d2 python=3.12.8 rule_pack=rp-2026.11.gd-pilot-standard.v5
+  包内输入 8 个
+  输入摘要：与 manifest/签名一致（2e40b1196d5bd2c4…）
+  钉回口径参数 {"cross_day_cut_hour": 7, "daily_std_minutes": 480, "ot_cap_scope": "weekday_only", "pay_base_source": "contract_normal_wage", "weekly_std_minutes": 2400}
+  包内 scope 未记录的判据参数沿用代码默认值（不读本机 .env）
+  签名：有效 / pinned (key matches supplied pin; independent key_id verification not done) / key_id=ed25519:b07741b2e0bbcb9a3a37dd09a7348c717497145f7cbbdd580b18e7e80e7a9555
+  工件逐文件：OK checked=14
+  VERIFY SCRIPT：OK
+  ARTIFACTS DIGEST manifest-internal OK / external=OK
+  EXTRA FILE：OK
+  发现摘要：一致（findings.csv 115 行，反算 0ae2cfe90f6ae8dc…）
+  EVIDENCE DIGEST OK 36018b58bd29bd3d4703cc00106fe0b6100045c6c72db038c2248c16fa13b56d / external=OK
+  PACKAGE SHA256 computed=ebfb1de7d25040861ec5b52d240cebafd7f5d24791d407d4ef261f145ed9bf05 / external=OK
+  ANCHOR CHECK OK
+  = rule_pack_version: 期望 rp-2026.11.gd-pilot-… 实得 rp-2026.11.gd-pilot-…
+  = input_fingerprint: 期望 b884c337ed7eab358e4a… 实得 b884c337ed7eab358e4a…
+  = conclusion_digest: 期望 0ae2cfe90f6ae8dc0d8d… 实得 0ae2cfe90f6ae8dc0d8d…
+  发现（未签认） 期望 115 / 实得 115 分级 {'DEFENSIBLE': 23, 'REVIEW': 85, 'VIOLATION': 7}
+  已确认结论（包内）期望 0 / 实际 0 条（replay 不重建人工确认，只核对包内结论集行数）
+  重放结果：一致 —— 三元组、证据定位摘要与发现（未签认）条数逐项一致
+  RESULT OK
+  exit_code=0
+
+[dup-subdir-a-then-b] verify
+MANIFEST SCHEMA v3
+PRODUCER 0.4.17 83c651aeb0225cf225be213ef5de3eab9fd883d2 python=3.12.8 rule_pack=rp-2026.11.gd-pilot-standard.v5
+MANIFEST CHECKSUM OK
+ARTIFACTS OK checked=14
+VERIFY SCRIPT OK sha256=6721bac5c1580acd0213369e20d6f4ef92a592534d9b0b73cbe56e15d601c435
+ARTIFACTS DIGEST manifest-internal OK / external OK
+EXTRA FILE OK
+FINDINGS DIGEST OK 924c5e018509b8f7795fe29c89c056f56013535f2133575ee4562736c4b0d6eb (9 fields; source_* not covered by digest)
+EVIDENCE DIGEST OK fb69ec27d4efd84789b2213276cd6c38c558d619d5fb1fb9e446094db854094d / external=OK
+COUNTS 发现（未签认） 1 条 / 已确认结论 0 条
+RULE VERSIONS {"rp-2026.10.gd-pilot-standard.v4": 1}
+CHAIN OK events=6
+INPUTS COMPLETENESS OK INPUTS COMPLETENESS OK 输入清单 6 个与包内 inputs/ 一致
+INPUTS DIGEST OK 0ec9562d96938f56178a1e9dcb61c80065cad4068ad4c57a78dec70eb673c84f
+SIGNATURE OK / pinned (key matches supplied pin; independent key_id verification not done) / key_id=ed25519:b07741b2e0bbcb9a3a37dd09a7348c717497145f7cbbdd580b18e7e80e7a9555
+SIGNATURE PINNED OK
+PACKAGE SHA256 computed=fcdd7e602cf2c86afda4ca82a5c778cac2a6b7f355457bbe3ead1d5d2e8fbbc3 / external=OK
+ANCHOR CHECK OK
+RESULT OK
+  exit_code=0
+
+[dup-subdir-a-then-b] replay
+重放举证包 package/dup-subdir-a-then-b.zip（run run-20261105T205005-93eb5bb4）
+  审计链：完整，6 条
+  导出代码：version=0.4.17 commit=83c651aeb0225cf225be213ef5de3eab9fd883d2 python=3.12.8 rule_pack=rp-2026.11.gd-pilot-standard.v5
+  包内输入 6 个
+  输入摘要：与 manifest/签名一致（0ec9562d96938f56…）
+  钉回口径参数 {"cross_day_cut_hour": 7, "daily_std_minutes": 480, "ot_cap_scope": "weekday_only", "pay_base_source": "contract_normal_wage", "weekly_std_minutes": 2400}
+  包内 scope 未记录的判据参数沿用代码默认值（不读本机 .env）
+  签名：有效 / pinned (key matches supplied pin; independent key_id verification not done) / key_id=ed25519:b07741b2e0bbcb9a3a37dd09a7348c717497145f7cbbdd580b18e7e80e7a9555
+  工件逐文件：OK checked=14
+  VERIFY SCRIPT：OK
+  ARTIFACTS DIGEST manifest-internal OK / external=OK
+  EXTRA FILE：OK
+  发现摘要：一致（findings.csv 1 行，反算 924c5e018509b8f7…）
+  EVIDENCE DIGEST OK fb69ec27d4efd84789b2213276cd6c38c558d619d5fb1fb9e446094db854094d / external=OK
+  PACKAGE SHA256 computed=fcdd7e602cf2c86afda4ca82a5c778cac2a6b7f355457bbe3ead1d5d2e8fbbc3 / external=OK
+  ANCHOR CHECK OK
+  = rule_pack_version: 期望 rp-2026.11.gd-pilot-… 实得 rp-2026.11.gd-pilot-…
+  = input_fingerprint: 期望 a8422f590784c5dcdc65… 实得 a8422f590784c5dcdc65…
+  = conclusion_digest: 期望 924c5e018509b8f7795f… 实得 924c5e018509b8f7795f…
+  发现（未签认） 期望 1 / 实得 1 分级 {'DEFENSIBLE': 1, 'REVIEW': 0, 'VIOLATION': 0}
+  已确认结论（包内）期望 0 / 实际 0 条（replay 不重建人工确认，只核对包内结论集行数）
+  重放结果：一致 —— 三元组、证据定位摘要与发现（未签认）条数逐项一致
+  RESULT OK
+  exit_code=0
+
+[dup-subdir-b-then-a] verify
+MANIFEST SCHEMA v3
+PRODUCER 0.4.17 83c651aeb0225cf225be213ef5de3eab9fd883d2 python=3.12.8 rule_pack=rp-2026.11.gd-pilot-standard.v5
+MANIFEST CHECKSUM OK
+ARTIFACTS OK checked=14
+VERIFY SCRIPT OK sha256=6721bac5c1580acd0213369e20d6f4ef92a592534d9b0b73cbe56e15d601c435
+ARTIFACTS DIGEST manifest-internal OK / external OK
+EXTRA FILE OK
+FINDINGS DIGEST OK 924c5e018509b8f7795fe29c89c056f56013535f2133575ee4562736c4b0d6eb (9 fields; source_* not covered by digest)
+EVIDENCE DIGEST OK fb69ec27d4efd84789b2213276cd6c38c558d619d5fb1fb9e446094db854094d / external=OK
+COUNTS 发现（未签认） 1 条 / 已确认结论 0 条
+RULE VERSIONS {"rp-2026.10.gd-pilot-standard.v4": 1}
+CHAIN OK events=6
+INPUTS COMPLETENESS OK INPUTS COMPLETENESS OK 输入清单 6 个与包内 inputs/ 一致
+INPUTS DIGEST OK 0ec9562d96938f56178a1e9dcb61c80065cad4068ad4c57a78dec70eb673c84f
+SIGNATURE OK / pinned (key matches supplied pin; independent key_id verification not done) / key_id=ed25519:b07741b2e0bbcb9a3a37dd09a7348c717497145f7cbbdd580b18e7e80e7a9555
+SIGNATURE PINNED OK
+PACKAGE SHA256 computed=88a237b5ae780de046cef523b280efbc8fa059e5c264738093eba4800bf876ec / external=OK
+ANCHOR CHECK OK
+RESULT OK
+  exit_code=0
+
+[dup-subdir-b-then-a] replay
+重放举证包 package/dup-subdir-b-then-a.zip（run run-20261105T205005-f39599be）
+  审计链：完整，6 条
+  导出代码：version=0.4.17 commit=83c651aeb0225cf225be213ef5de3eab9fd883d2 python=3.12.8 rule_pack=rp-2026.11.gd-pilot-standard.v5
+  包内输入 6 个
+  输入摘要：与 manifest/签名一致（0ec9562d96938f56…）
+  钉回口径参数 {"cross_day_cut_hour": 7, "daily_std_minutes": 480, "ot_cap_scope": "weekday_only", "pay_base_source": "contract_normal_wage", "weekly_std_minutes": 2400}
+  包内 scope 未记录的判据参数沿用代码默认值（不读本机 .env）
+  签名：有效 / pinned (key matches supplied pin; independent key_id verification not done) / key_id=ed25519:b07741b2e0bbcb9a3a37dd09a7348c717497145f7cbbdd580b18e7e80e7a9555
+  工件逐文件：OK checked=14
+  VERIFY SCRIPT：OK
+  ARTIFACTS DIGEST manifest-internal OK / external=OK
+  EXTRA FILE：OK
+  发现摘要：一致（findings.csv 1 行，反算 924c5e018509b8f7…）
+  EVIDENCE DIGEST OK fb69ec27d4efd84789b2213276cd6c38c558d619d5fb1fb9e446094db854094d / external=OK
+  PACKAGE SHA256 computed=88a237b5ae780de046cef523b280efbc8fa059e5c264738093eba4800bf876ec / external=OK
+  ANCHOR CHECK OK
+  = rule_pack_version: 期望 rp-2026.11.gd-pilot-… 实得 rp-2026.11.gd-pilot-…
+  = input_fingerprint: 期望 a8422f590784c5dcdc65… 实得 a8422f590784c5dcdc65…
+  = conclusion_digest: 期望 924c5e018509b8f7795f… 实得 924c5e018509b8f7795f…
+  发现（未签认） 期望 1 / 实得 1 分级 {'DEFENSIBLE': 1, 'REVIEW': 0, 'VIOLATION': 0}
+  已确认结论（包内）期望 0 / 实际 0 条（replay 不重建人工确认，只核对包内结论集行数）
+  重放结果：一致 —— 三元组、证据定位摘要与发现（未签认）条数逐项一致
+  RESULT OK
+  exit_code=0
+
+[engine-only] verify
+MANIFEST SCHEMA v3
+PRODUCER 0.4.17 83c651aeb0225cf225be213ef5de3eab9fd883d2 python=3.12.8 rule_pack=rp-2026.11.gd-pilot-standard.v5
+MANIFEST CHECKSUM OK
+ARTIFACTS OK checked=14
+VERIFY SCRIPT OK sha256=6721bac5c1580acd0213369e20d6f4ef92a592534d9b0b73cbe56e15d601c435
+ARTIFACTS DIGEST manifest-internal OK / external OK
+EXTRA FILE OK
+FINDINGS DIGEST OK 5dc46558152089f1c0be7522c7b1c175b387309d1c316eb8445dd81ada1d5b7d (9 fields; source_* not covered by digest)
+EVIDENCE DIGEST OK ed3b3f1b3c1961a22683979750bc12e44a048c9926617ef1a645fdfaa9cddfeb / external=OK
+COUNTS 发现（未签认） 115 条 / 已确认结论 0 条
+RULE VERSIONS {"rp-2026.10.gd-pilot-standard.v4": 99, "rp-2026.11.gd-pilot-standard.v5": 16}
+CHAIN OK events=8
+INPUTS COMPLETENESS OK INPUTS COMPLETENESS OK 输入清单 8 个与包内 inputs/ 一致
+INPUTS DIGEST OK aad527d187dad848924af8be868698a8da5e745ad31af4c3ff83d2d2e1d930a7
+SIGNATURE OK / pinned (key matches supplied pin; independent key_id verification not done) / key_id=ed25519:b07741b2e0bbcb9a3a37dd09a7348c717497145f7cbbdd580b18e7e80e7a9555
+SIGNATURE PINNED OK
+PACKAGE SHA256 computed=fccb852947711d8b837e11603ce227b68d1b471aac403112b5c255ee132e6aa4 / external=OK
+ANCHOR CHECK OK
+RESULT OK
+  exit_code=0
+
+[engine-only] replay
+重放举证包 package/engine-only.zip（run run-20261105T204959-42e5aed8）
+  审计链：完整，8 条
+  导出代码：version=0.4.17 commit=83c651aeb0225cf225be213ef5de3eab9fd883d2 python=3.12.8 rule_pack=rp-2026.11.gd-pilot-standard.v5
+  包内输入 8 个
+  输入摘要：与 manifest/签名一致（aad527d187dad848…）
+  钉回口径参数 {"cross_day_cut_hour": 7, "daily_std_minutes": 480, "ot_cap_scope": "weekday_only", "pay_base_source": "contract_normal_wage", "weekly_std_minutes": 2400}
+  包内 scope 未记录的判据参数沿用代码默认值（不读本机 .env）
+  签名：有效 / pinned (key matches supplied pin; independent key_id verification not done) / key_id=ed25519:b07741b2e0bbcb9a3a37dd09a7348c717497145f7cbbdd580b18e7e80e7a9555
+  工件逐文件：OK checked=14
+  VERIFY SCRIPT：OK
+  ARTIFACTS DIGEST manifest-internal OK / external=OK
+  EXTRA FILE：OK
+  发现摘要：一致（findings.csv 115 行，反算 5dc46558152089f1…）
+  EVIDENCE DIGEST OK ed3b3f1b3c1961a22683979750bc12e44a048c9926617ef1a645fdfaa9cddfeb / external=OK
+  PACKAGE SHA256 computed=fccb852947711d8b837e11603ce227b68d1b471aac403112b5c255ee132e6aa4 / external=OK
+  ANCHOR CHECK OK
+  = rule_pack_version: 期望 rp-2026.11.gd-pilot-… 实得 rp-2026.11.gd-pilot-…
+  = input_fingerprint: 期望 8b3b54a09aa8ede51697… 实得 8b3b54a09aa8ede51697…
+  = conclusion_digest: 期望 5dc46558152089f1c0be… 实得 5dc46558152089f1c0be…
+  发现（未签认） 期望 115 / 实得 115 分级 {'DEFENSIBLE': 23, 'REVIEW': 85, 'VIOLATION': 7}
+  已确认结论（包内）期望 0 / 实际 0 条（replay 不重建人工确认，只核对包内结论集行数）
+  重放结果：一致 —— 三元组、证据定位摘要与发现（未签认）条数逐项一致
+  RESULT OK
+  exit_code=0
+
+[reverse-order] verify
+MANIFEST SCHEMA v3
+PRODUCER 0.4.17 83c651aeb0225cf225be213ef5de3eab9fd883d2 python=3.12.8 rule_pack=rp-2026.11.gd-pilot-standard.v5
+MANIFEST CHECKSUM OK
+ARTIFACTS OK checked=14
+VERIFY SCRIPT OK sha256=6721bac5c1580acd0213369e20d6f4ef92a592534d9b0b73cbe56e15d601c435
+ARTIFACTS DIGEST manifest-internal OK / external OK
+EXTRA FILE OK
+FINDINGS DIGEST OK 5dc46558152089f1c0be7522c7b1c175b387309d1c316eb8445dd81ada1d5b7d (9 fields; source_* not covered by digest)
+EVIDENCE DIGEST OK ed3b3f1b3c1961a22683979750bc12e44a048c9926617ef1a645fdfaa9cddfeb / external=OK
+COUNTS 发现（未签认） 115 条 / 已确认结论 0 条
+RULE VERSIONS {"rp-2026.10.gd-pilot-standard.v4": 99, "rp-2026.11.gd-pilot-standard.v5": 16}
+CHAIN OK events=8
+INPUTS COMPLETENESS OK INPUTS COMPLETENESS OK 输入清单 8 个与包内 inputs/ 一致
+INPUTS DIGEST OK aad527d187dad848924af8be868698a8da5e745ad31af4c3ff83d2d2e1d930a7
+SIGNATURE OK / pinned (key matches supplied pin; independent key_id verification not done) / key_id=ed25519:b07741b2e0bbcb9a3a37dd09a7348c717497145f7cbbdd580b18e7e80e7a9555
+SIGNATURE PINNED OK
+PACKAGE SHA256 computed=093ec09c394f146e702a2546b9fa8248d186f59e82081b2fa56ee5a79544cddb / external=OK
+ANCHOR CHECK OK
+RESULT OK
+  exit_code=0
+
+[reverse-order] replay
+重放举证包 package/reverse-order.zip（run run-20261105T205003-f217fa2c）
+  审计链：完整，8 条
+  导出代码：version=0.4.17 commit=83c651aeb0225cf225be213ef5de3eab9fd883d2 python=3.12.8 rule_pack=rp-2026.11.gd-pilot-standard.v5
+  包内输入 8 个
+  输入摘要：与 manifest/签名一致（aad527d187dad848…）
+  钉回口径参数 {"cross_day_cut_hour": 7, "daily_std_minutes": 480, "ot_cap_scope": "weekday_only", "pay_base_source": "contract_normal_wage", "weekly_std_minutes": 2400}
+  包内 scope 未记录的判据参数沿用代码默认值（不读本机 .env）
+  签名：有效 / pinned (key matches supplied pin; independent key_id verification not done) / key_id=ed25519:b07741b2e0bbcb9a3a37dd09a7348c717497145f7cbbdd580b18e7e80e7a9555
+  工件逐文件：OK checked=14
+  VERIFY SCRIPT：OK
+  ARTIFACTS DIGEST manifest-internal OK / external=OK
+  EXTRA FILE：OK
+  发现摘要：一致（findings.csv 115 行，反算 5dc46558152089f1…）
+  EVIDENCE DIGEST OK ed3b3f1b3c1961a22683979750bc12e44a048c9926617ef1a645fdfaa9cddfeb / external=OK
+  PACKAGE SHA256 computed=093ec09c394f146e702a2546b9fa8248d186f59e82081b2fa56ee5a79544cddb / external=OK
+  ANCHOR CHECK OK
+  = rule_pack_version: 期望 rp-2026.11.gd-pilot-… 实得 rp-2026.11.gd-pilot-…
+  = input_fingerprint: 期望 8b3b54a09aa8ede51697… 实得 8b3b54a09aa8ede51697…
+  = conclusion_digest: 期望 5dc46558152089f1c0be… 实得 5dc46558152089f1c0be…
+  发现（未签认） 期望 115 / 实得 115 分级 {'DEFENSIBLE': 23, 'REVIEW': 85, 'VIOLATION': 7}
+  已确认结论（包内）期望 0 / 实际 0 条（replay 不重建人工确认，只核对包内结论集行数）
+  重放结果：一致 —— 三元组、证据定位摘要与发现（未签认）条数逐项一致
+  RESULT OK
+  exit_code=0
+
