@@ -14,4 +14,4 @@ tests/test_api.py::test_read_only_json_endpoints_are_get_and_session_bound
     from starlette.testclient import TestClient as TestClient  # noqa
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-656 passed, 9 skipped, 1 deselected, 1 warning in 299.09s (0:04:59)
+656 passed, 9 skipped, 1 deselected, 1 warning in 272.90s (0:04:32)
