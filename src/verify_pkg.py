@@ -44,6 +44,8 @@ def _note(name: str, status: str, result: dict, checks: dict, early: bool) -> st
         if result.get("inputs_digest_legacy"):
             return "（v2 契约无 inputs_digest；属版本缺失，不是缺失/篡改）"
         return "（早退，尚未走到输入摘要）" if early else "（未走到输入摘要）"
+    if name == "inputs_completeness" and (result.get("manifest_schema_version") or 3) < 3:
+        return "（旧包 schema < 3 无完整性对账契约；不是缺失）"
     return "（早退，尚未走到该检查）" if early else "（未走到该检查）"
 
 
