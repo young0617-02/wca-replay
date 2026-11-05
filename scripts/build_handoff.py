@@ -1,4 +1,4 @@
-"""生成第十七轮（0.4.15）交接目录：README 事实区、清单、锚点、覆盖范围全部由实物计算。
+"""生成交接目录：README 事实区、清单、锚点、覆盖范围全部由实物计算。
 
 机制 1 的落点：
 - `README-验收.md`、`READ-ME-FIRST.txt`、`OLD-WHEELS.md`、`OLD-ANCHORS.md`、
@@ -8,8 +8,8 @@
 
 用法：
     uv run python scripts/build_handoff.py \
-      --dist dist/wca-replay-0.4.15 --summary var/handoff-packages/summary.json \
-      --prev handoff/20261104-第十六轮整改 --out handoff/20261104-第十七轮整改
+      --dist dist/wca-replay-0.4.17 --summary var/handoff-packages/summary.json \
+      --prev handoff/20261104-第十八轮整改 --out handoff/20261104-第十九轮整改
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ ROLES = [
     ("dup-subdir-b-then-a", ("dup_subdir", "packages", 1), "dup-subdir-b-then-a.zip",
      "同批数据 b 先 a 后：batch_id 与结论摘要一致"),
     ("clean-wheel-default-flow", ("cross_run", "package"), "clean-wheel-default-flow.zip",
-     "仓库外干净 venv 仅装 0.4.15 wheel，默认流程 v6 产出"),
+     "仓库外干净 venv 仅装交付版 wheel，默认流程 v6 产出"),
 ]
 
 CN_NUM = "零一二三四五六七八九十"
@@ -94,6 +94,11 @@ def renumber_sections(text: str) -> tuple[str, list[str]]:
     return "\n".join(lines), titles
 
 
+def _round_label(name: str) -> str:
+    match = re.search(r"第([零一二三四五六七八九十]+)轮整改", name)
+    return match.group(1) if match else "本轮"
+
+
 def _anchor_counts(anchors: dict, version: str) -> tuple[int, int, int, int]:
     """单包锚点的“本轮/历史”拆分；旧锚点表与 README 共用同一扫描结果。"""
     current = sum(1 for a in anchors["singles"] if a["version"] == version)
@@ -101,6 +106,145 @@ def _anchor_counts(anchors: dict, version: str) -> tuple[int, int, int, int]:
     current_combined = sum(1 for a in anchors["combined"] if a["version"] == version)
     history_combined = len(anchors["combined"]) - current_combined
     return current, history, current_combined, history_combined
+
+
+def _read_anchor_doc(path: Path) -> tuple[str, str, dict]:
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    return str(doc.get("version") or ""), docfacts.anchor_kind(doc), doc
+
+
+def _handoff_search_dirs(prev: Path, out: Path) -> list[Path]:
+    """锚点候选来源：`--prev` 优先，其余交接目录按修改时间新→旧。"""
+    prev_resolved = prev.resolve()
+    out_resolved = out.resolve()
+    others = [d for d in (ROOT / "handoff").iterdir()
+              if d.is_dir() and d.resolve() not in (prev_resolved, out_resolved)]
+    others.sort(key=lambda d: d.stat().st_mtime, reverse=True)
+    return [prev] + others
+
+
+def _collect_anchor_candidates(prev: Path, out: Path) -> tuple[dict, list[dict]]:
+    """收集历史锚点：同一 (类型, 版本, 角色) 只取第一个来源（prev 优先）。
+
+    返回 (候选表, 来源记录)。来源记录用于在 `OLD-ANCHORS.md` 里如实列出
+    “哪个锚点来自哪个交付目录、源文件名是否与内容版本一致”。
+    """
+    chosen: dict[tuple[str, str, str], tuple[Path, dict]] = {}
+    sources: list[dict] = []
+    for directory in _handoff_search_dirs(prev, out):
+        for path in sorted(directory.glob("anchor*.json")):
+            try:
+                anchor_version, kind, doc = _read_anchor_doc(path)
+            except (OSError, ValueError):
+                continue
+            if not anchor_version or kind not in ("single", "combined"):
+                continue
+            key = (kind, anchor_version, str(doc.get("role") or ""))
+            if key in chosen:
+                continue
+            chosen[key] = (path, doc)
+            sources.append({
+                "source": path,
+                "version": anchor_version,
+                "kind": kind,
+                "name_version": docfacts.anchor_name_version(path.name),
+            })
+    return chosen, sources
+
+
+def _entry_sha(entry: dict) -> str:
+    return str(entry.get("package_sha256") or entry.get("sha256") or "")
+
+
+def _locate_target(out: Path, anchor_version: str, role: str, version: str) -> Path:
+    if anchor_version == version:
+        return out / "package" / f"{role}.zip"
+    return out / "release" / "old-packages" / f"{role}-{anchor_version}.zip"
+
+
+def _repair_anchor_doc(doc: dict, anchor_version: str, out: Path, version: str) -> dict:
+    """把历史锚点的 `file` 改成**以 JSON 自身位置为基准**的可解析相对路径；
+    目录内确实没有对应包的，显式标注“仅记录、不可解析”，不留“看似可解析”的路径。
+    """
+    repaired = json.loads(json.dumps(doc))
+    entries = (repaired["packages"] if docfacts.anchor_kind(repaired) == "combined"
+               else [repaired])
+    for entry in entries:
+        role = str(entry.get("role") or "")
+        original = entry.get("file")
+        entry["original_file"] = original
+        target = _locate_target(out, anchor_version, role, version)
+        if target.is_file() and docfacts.sha256_file(target) == _entry_sha(entry):
+            entry["file"] = target.relative_to(out).as_posix()
+            entry["file_status"] = "可解析（本目录内）"
+        else:
+            entry["file"] = (f"{docfacts.ANCHOR_MARKER}（原记录：{original}；"
+                             "获取方式见 OLD-ANCHORS.md）")
+            entry["file_status"] = "仅记录、不可解析"
+    return repaired
+
+
+def _assert_anchor_file(path: Path, out: Path) -> None:
+    """三方一致断言：文件名版本 == 内容版本 == 目标包 `producer.version`。
+
+    目标包不可解析（显式标注）时不参与 producer 比对，但仍校验“文件名==内容”。
+    任何一项不一致直接失败，构建不得继续。
+    """
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    anchor_version = str(doc.get("version") or "")
+    if not anchor_version:
+        raise SystemExit(f"{path.name} 缺少 version 字段")
+    name_version = docfacts.anchor_name_version(path.name)
+    if name_version and name_version != anchor_version:
+        raise SystemExit(
+            f"锚点文件名版本 {name_version} != 内容版本 {anchor_version}：{path.name}")
+    for entry in docfacts.anchor_file_entries(doc):
+        status = docfacts.anchor_file_status(path, entry.get("file"))
+        if status != "resolvable":
+            continue
+        facts = docfacts.package_facts(path.parent / entry["file"])
+        if facts["producer_version"] != anchor_version:
+            raise SystemExit(
+                f"{path.name}: 目标包 {entry['file']} 的 producer.version="
+                f"{facts['producer_version']} != 锚点版本 {anchor_version}")
+        if facts["sha256"] != _entry_sha(entry):
+            raise SystemExit(f"{path.name}: 目标包 {entry['file']} 的 SHA-256 与锚点不符")
+
+
+
+def _scan_version_mismatches(prev: Path, out: Path) -> dict:
+    """全目录扫描“文件名版本 != 内容版本”的锚点与清单，供 OLD-ANCHORS.md 逐条列出。
+
+    扫描不做修改：历史交接目录保持只读；“处置”一列只说明本轮如何按内容重新命名。
+    """
+    anchor_rows: list[dict] = []
+    manifest_rows: list[dict] = []
+    for directory in _handoff_search_dirs(prev, out):
+        for path in sorted(directory.glob("anchor*.json")):
+            try:
+                content_version, _kind, _doc = _read_anchor_doc(path)
+            except (OSError, ValueError):
+                continue
+            name_version = docfacts.anchor_name_version(path.name)
+            if name_version and name_version != content_version:
+                anchor_rows.append({
+                    "path": path.relative_to(ROOT).as_posix(),
+                    "name_version": name_version,
+                    "content_version": content_version,
+                    "disposition": "按内容版本改名另存；本目录不沿用该文件名",
+                })
+        manifest = directory / "交付清单.txt"
+        release_json = directory / "release" / "RELEASE.json"
+        if manifest.is_file() and release_json.is_file():
+            try:
+                claimed = manifest.read_text(encoding="utf-8").splitlines()[0].split()[0]
+                actual = json.loads(release_json.read_text(encoding="utf-8"))["version"]
+            except (IndexError, ValueError, KeyError):
+                continue
+            if claimed != actual:
+                manifest_rows.append({"path": manifest.relative_to(ROOT).as_posix(),
+                                      "claimed": claimed, "actual": actual})
+    return {"anchors": anchor_rows, "manifests": manifest_rows}
 
 
 def build(args: argparse.Namespace) -> int:
@@ -136,12 +280,29 @@ def build(args: argparse.Namespace) -> int:
         shutil.copy2(prev / "package" / filename,
                      out / "release" / "old-packages" / f"{role}-{prev_version}.zip")
 
-    # 3) 公钥、旧锚点
+    # 3) 公钥、历史锚点：文件名一律由“内容里的 version”派生，不沿用源文件名。
     for name in ("trusted-public-key.pub", "release-public-key.pub"):
         shutil.copy2(prev / name, out / name)
-    for path in sorted(prev.glob("anchor-0.4.*.json")):
-        shutil.copy2(path, out / path.name)
-    shutil.copy2(prev / "anchor.json", out / "anchor-0.4.14.json")
+    anchor_candidates, anchor_sources = _collect_anchor_candidates(prev, out)
+    historical_versions = sorted({v for (_kind, v, _role) in anchor_candidates
+                                  if v != version})
+    for anchor_version in historical_versions:
+        for kind in ("single", "combined"):
+            if not any(k == kind and v == anchor_version
+                       for (k, v, _role) in anchor_candidates):
+                raise SystemExit(f"历史锚点缺失：{anchor_version} 的 {kind} 汇总未找到")
+    for (kind, anchor_version, role), (source_path, source_doc) in sorted(
+            anchor_candidates.items()):
+        if anchor_version == version:
+            continue  # 本轮锚点在第 5 步由新包生成
+        filename = (f"anchor-{anchor_version}-{role}.json" if kind == "single"
+                    else f"anchor-{anchor_version}.json")
+        target = out / filename
+        if target.exists():
+            raise SystemExit(f"锚点目标文件重复：{filename}（来源 {source_path}）")
+        repaired = _repair_anchor_doc(source_doc, anchor_version, out, version)
+        _write(target, json.dumps(repaired, ensure_ascii=False, indent=2))
+        _assert_anchor_file(target, out)
 
     # 4) 文档与报告（仓库内为唯一来源）
     (out / "docs").mkdir()
@@ -149,7 +310,8 @@ def build(args: argparse.Namespace) -> int:
         shutil.copy2(ROOT / "docs" / name, out / "docs" / name)
     shutil.copy2(ROOT / "docs" / "已知残留与未闭合项.md", out / "已知残留与未闭合项.md")
     import fact_exemptions
-    _write(out / "docs" / "护栏豁免表.md", fact_exemptions.render_markdown(version))
+    _write(out / "docs" / "护栏豁免表.md",
+           _gen("exemptions", fact_exemptions.render_markdown(version)))
     shutil.copy2(ROOT / "policies" / "RULE-PACK.md", out / "RULE-PACK.md")
     (out / "reports").mkdir()
     for path in sorted((ROOT / "reports").iterdir()):
@@ -167,7 +329,8 @@ def build(args: argparse.Namespace) -> int:
         single = {
             "version": version,
             "role": role,
-            "file": filename,
+            "file": f"package/{filename}",
+            "file_status": "可解析（本目录内）",
             "anchor": pkg["anchor"],
             "package_sha256": pkg["sha256"],
             "artifacts_digest": pkg["artifacts_digest"],
@@ -182,9 +345,11 @@ def build(args: argparse.Namespace) -> int:
         }
         _write(out / f"anchor-{version}-{role}.json",
                json.dumps(single, ensure_ascii=False, indent=2))
+        _assert_anchor_file(out / f"anchor-{version}-{role}.json", out)
         packages_json.append({
             "role": role,
             "file": f"package/{filename}",
+            "file_status": "可解析（本目录内）",
             **{key: pkg[key] for key in
                ("bytes", "sha256", "anchor", "conclusion_digest", "evidence_digest",
                 "inputs_digest", "input_fingerprint", "artifacts_digest")},
@@ -217,7 +382,8 @@ def build(args: argparse.Namespace) -> int:
         "package_key_id": summary["key_id"],
     }
     _write(out / "anchor.json", json.dumps(combined, ensure_ascii=False, indent=2))
-    anchor_txt = [f"# {version} 本轮 anchor 速查；四包不变量见首段", ""]
+    _assert_anchor_file(out / "anchor.json", out)
+    anchor_txt = [f"# {version} 本轮 anchor 速查；四联摘要不变量见首段", ""]
     anchor_txt += [f"{k}={v}" for k, v in invariants.items()]
     anchor_txt.append("")
     anchor_txt += [f"{p['file']} sha256={p['sha256']} anchor={p['anchor']}"
@@ -251,7 +417,7 @@ def build(args: argparse.Namespace) -> int:
     # 7) 逐包逐文件差异（机制 3）
     diff_md, diff_detail = diff_packages.build_table(prev / "package", new_pkg_dir)
     _write(out / "reports" / "round17-diff.md",
-           _gen("diff", f"# 0.4.14 → {version} 包内工件差异（机制 3，逐包逐文件生成）\n\n"
+           _gen("diff", f"# {prev_version} → {version} 包内工件差异（机制 3，逐包逐文件生成）\n\n"
                         "> 由 `scripts/diff_packages.py` 生成。禁止改写成“仅因版本号”。\n\n"
                         + diff_md))
 
@@ -289,34 +455,146 @@ def build(args: argparse.Namespace) -> int:
     ])
     _write(out / "OLD-WHEELS.md", old_wheels_md)
 
-    anchors = docfacts.old_anchor_facts(out)
-    anchor_rows = [[f"`{a['name']}`", f"{a['bytes']}", f"`{a['sha256']}`"]
-                   for a in anchors["singles"]]
-    current_count, history_count, current_combined, history_combined = \
-        _anchor_counts(anchors, version)
+    # 8.1 锚点：file 指针逐条判定（可解析 / 显式标注 / 悬空），并找出“未随本目录交付”的包源
+    anchors = docfacts.anchor_records(out)
+    status_text = {"resolvable": "可解析（本目录内）",
+                   "marked": "仅记录、不可解析", "dangling": "悬空"}
+    acquisitions: dict[tuple[str, str], str] = {}
+    for name in [a["name"] for a in anchors["singles"] + anchors["combined"]
+                 if a["status"] == "marked"]:
+        anchor_path = out / name
+        doc = json.loads(anchor_path.read_text(encoding="utf-8"))
+        for entry in docfacts.anchor_file_entries(doc):
+            if docfacts.anchor_file_status(anchor_path, entry.get("file")) != "marked":
+                continue
+            role = str(entry.get("role") or "")
+            anchor_version = str(doc.get("version") or "")
+            if (anchor_version, role) in acquisitions:
+                continue
+            for directory in _handoff_search_dirs(prev, out):
+                candidate = directory / "package" / f"{role}.zip"
+                if not candidate.is_file():
+                    continue
+                if docfacts.sha256_file(candidate) != _entry_sha(entry):
+                    continue
+                if docfacts.package_facts(candidate)["producer_version"] != anchor_version:
+                    continue
+                acquisitions[(anchor_version, role)] = candidate.relative_to(ROOT).as_posix()
+                break
+    anchor_rows = [[f"`{a['name']}`", f"{a['version']}",
+                    "单包" if a["kind"] == "single" else "组合",
+                    status_text[a["status"]], f"{a['bytes']}", f"`{a['sha256']}`"]
+                   for a in anchors["singles"] + anchors["combined"]]
+    anchor_versions = sorted({a["version"] for a in
+                              anchors["singles"] + anchors["combined"]})
+    version_rows = []
+    for anchor_version in anchor_versions:
+        singles_v = [a for a in anchors["singles"] if a["version"] == anchor_version]
+        combined_v = [a for a in anchors["combined"] if a["version"] == anchor_version]
+        singles_marked = sum(1 for a in singles_v if a["status"] == "marked")
+        combined_marked = sum(1 for a in combined_v if a["status"] == "marked")
+        shipped = "是" if not (singles_marked or combined_marked) else "否（见下表）"
+        version_rows.append([anchor_version,
+                             f"{len(singles_v)}（标注 {singles_marked}）",
+                             f"{len(combined_v)}（标注 {combined_marked}）", shipped])
+    missing_rows = []
+    for anchor_version in anchor_versions:
+        for name in [a["name"] for a in anchors["singles"] if a["version"] == anchor_version
+                     and a["status"] == "marked"]:
+            doc = json.loads((out / name).read_text(encoding="utf-8"))
+            role = str(doc.get("role") or "")
+            source = acquisitions.get((anchor_version, role))
+            missing_rows.append([
+                anchor_version, role, "本目录无对应包（`package/` 与 `release/old-packages/` 均无）",
+                (f"`{source}`（不随本目录交付；sha 与锚点实测一致）" if source
+                 else "未找到可核对的源包；本目录不可自证")])
+    source_rows = []
+    for anchor_version in anchor_versions:
+        if anchor_version == version:
+            continue
+        for item in [s for s in anchor_sources
+                     if s["version"] == anchor_version and s["kind"] == "combined"]:
+            rel = item["source"].relative_to(ROOT).as_posix()
+            note = ("源文件名与内容版本一致"
+                    if item["name_version"] == item["version"]
+                    else f"源文件名写 {item['name_version']}，内容实为 {item['version']}；"
+                         "已按内容改名")
+            source_rows.append([anchor_version, "组合", f"`{rel}`", note])
+        single_items = [s for s in anchor_sources
+                        if s["version"] == anchor_version and s["kind"] == "single"]
+        if single_items:
+            dirs = sorted({s["source"].parent.relative_to(ROOT).as_posix() for s in single_items})
+            source_rows.append([anchor_version, f"单包（{len(single_items)} 个）",
+                                "、".join(f"`{d}/`" for d in dirs), "按内容版本逐一改名"])
+    mismatches = _scan_version_mismatches(prev, out)
+    mismatch_rows = [[f"`{row['path']}`", row["name_version"], row["content_version"],
+                      row["disposition"]] for row in mismatches["anchors"]]
+    manifest_rows = [[f"`{row['path']}`", row["claimed"], row["actual"]]
+                     for row in mismatches["manifests"]]
     old_anchors_md = "\n".join([
         _gen("old-anchors", "\n".join([
-            f"# 锚点实物（{version} 交接，由实物生成）",
+            f"# 锚点实物与 `file` 可达性（{version} 交接，由扫描器生成）",
             "",
-            f"本目录根下实有单包锚点 **{len(anchors['singles'])} 个**（当前 {version} "
-            f"**{current_count} 个**、历史 **{history_count} 个**）、组合记录 "
-            f"**{len(anchors['combined'])} 个**（当前 **{current_combined} 个**、历史 "
-            f"**{history_combined} 个**）。下表由扫描器逐文件生成；"
-            "**“没有指向不存在文件的指引”这一结论由扫描器给出**，不是手写声明。",
+            f"本目录根下实有锚点 **{anchors['anchor_total']} 个**（单包 "
+            f"**{len(anchors['singles'])} 个**、组合记录 **{len(anchors['combined'])} 个**）。",
+            f"**扫描器断言**：每个 `file` 字段都以**该 JSON 自身位置**为基准核对——"
+            f"可解析 **{anchors['by_status']['resolvable']} 个**、显式标注“仅记录、不可解析” "
+            f"**{anchors['by_status']['marked']} 个**、悬空 **{anchors['by_status']['dangling']} 个**。"
+            f"按指针计（组合锚点每包一条）：可解析 **{anchors['pointer_by_status']['resolvable']} 条**、"
+            f"标注 **{anchors['pointer_by_status']['marked']} 条**、悬空 "
+            f"**{anchors['pointer_by_status']['dangling']} 条**。"
+            "本结论由扫描器覆盖全部 `anchor*.json` 后生成，不是手写声明。",
             "",
-            docfacts.table(["文件", "字节", "SHA-256"], anchor_rows),
+            "## 按版本汇总（是否随本目录交付）",
             "",
-            "组合式 `anchor-0.4.*.json` / `anchor.json` 只是**汇总值记录**，不在任何签名保护范围，",
+            docfacts.table(["版本", "单包锚点", "组合锚点", "包是否随本目录交付"],
+                           version_rows),
+            "",
+            "## 历史记录：锚点已交付、对应包未随本目录交付",
+            "",
+            (docfacts.table(["版本", "角色", "缺失实物", "获取方式"],
+                            missing_rows) if missing_rows else "（无：本目录内全部锚点均可解析）"),
+            "",
+            "## 历史锚点来源与改名前后的核对",
+            "",
+            "> 文件名一律由**内容里的 `version`** 生成；构建时断言“文件名版本 == 内容版本 ==",
+            "> 目标包 `producer.version`”，任一不一致直接失败。",
+            "",
+            (docfacts.table(["版本", "类型", "来源", "说明"], source_rows)
+             if source_rows else "（无历史锚点）"),
+            "",
+            "## 全目录同名错版扫描（历史锚点 / 交付清单 / 旧发行物清单）",
+            "",
+            "扫描范围：`handoff/` 下全部交接目录（含未随本目录交付的历史轮次）。",
+            "",
+            "**锚点文件名版本 != 内容版本：**",
+            "",
+            (docfacts.table(["文件", "文件名版本", "内容版本", "处置"], mismatch_rows)
+             if mismatch_rows else "（无）"),
+            "",
+            "**交付清单首行版本 != 该目录 `RELEASE.json` 版本：**",
+            "",
+            (docfacts.table(["文件", "清单写", "实物版本"], manifest_rows)
+             if manifest_rows else "（无）"),
+            "",
+            "旧发行物清单：本轮重建时去掉重复的“目录（生成）”块，并把章节号按出现顺序重编；",
+            "表内历史哈希仍只作记录，可复核范围见该文件头部。",
+            "",
+            "## 锚点表（逐文件，哈希由字节计算）",
+            "",
+            docfacts.table(["文件", "版本", "类型", "file 状态", "字节", "SHA-256"],
+                           anchor_rows),
+            "",
+            "组合式 `anchor-<版本>.json` / `anchor.json` 只是**汇总值记录**，不在任何签名保护范围，",
             "也不能当作单包锚点使用（`--anchor-file` 只接受单包扁平 JSON）。",
-            "",
-            "**未列出的旧锚点不在本交付**：历史轮次的交付目录未随本目录提供；如需核对，",
-            "请向交付方索取对应轮次目录，本文件不伪造其存在。",
         ])),
     ])
     _write(out / "OLD-ANCHORS.md", old_anchors_md)
 
     # 9) 旧发行物清单：限定范围 + 章节号重编 + 目录
     legacy = (prev / "release" / "旧发行物-SHA256清单.md").read_text(encoding="utf-8")
+    # 上一版会把生成目录也复制进来，形成两个“目录（生成）”块；先删掉旧块再重排。
+    legacy = re.sub(r"(?ms)^## 目录（生成）\n\n(?:[0-9]+\. [^\n]*\n)+\n", "", legacy)
     legacy = re.sub(
         r"(?m)^.*仍可独立核验.*$",
         "> **可复核范围（{v}）**：只有本交付内实际存在的 `release/old-wheels/`、"
@@ -336,14 +614,39 @@ def build(args: argparse.Namespace) -> int:
     # 11) README / READ-ME-FIRST / KEY-NOTE
     _write(out / "README-验收.md",
            build_readme(version, release, rel_facts, packages_json, old, anchors,
-                        diff_md, diff_detail, out.name))
+                        diff_md, diff_detail, out.name, prev_version))
     _write(out / "READ-ME-FIRST.txt",
-           build_first(version, packages_json, old, anchors, diff_detail))
-    key_note = (prev / "KEY-NOTE.txt").read_text(encoding="utf-8").replace("0.4.14", version)
+           build_first(version, packages_json, old, anchors, diff_detail, out.name))
+    key_note = (prev / "KEY-NOTE.txt").read_text(encoding="utf-8").replace(prev_version, version)
     round_label = re.search(r"第([零一二三四五六七八九十]+)轮整改", out.name)
     old_label = re.search(r"第([零一二三四五六七八九十]+)轮交接", key_note)
     if round_label and old_label:
         key_note = key_note.replace(old_label.group(0), f"第{round_label.group(1)}轮交接")
+    # 旧包/旧 wheel 的落点必须与 OLD-WHEELS.md 的“所在目录”同源，不靠记忆。
+    old_versions_text = "、".join(sorted({p["version"] for p in old["packages"]
+                                         if p.get("version")}))
+    wheels_ow_versions = sorted({w["version"] for w in old["wheels"]
+                                 if "old-wheels" in w["dirs"] and w["version"]})
+    wheels_op_versions = sorted({w["version"] for w in old["wheels"]
+                                 if "old-packages" in w["dirs"] and w["version"]})
+    locks_ow_versions = sorted({x["version"] for x in old["locks"]
+                                if "old-wheels" in x["dirs"] and x["version"]})
+    locks_op_versions = sorted({x["version"] for x in old["locks"]
+                                if "old-packages" in x["dirs"] and x["version"]})
+    only_ow = [v for v in wheels_ow_versions if v not in wheels_op_versions]
+    key_note = re.sub(
+        r"(?s)旧包必须配.*?本轮新包（[^）]+）用本目录 release/ 的 [\d.]+ wheel。",
+        "旧包必须配**同版本** wheel。本目录的旧包只有 "
+        f"{old_versions_text} 共 {len(old['packages'])} 个 zip（版本不连续，0.4.12 没有包）。\n"
+        "  0.4.10/0.4.11 的 wheel 在 release/old-wheels/ 与 release/old-packages/ 各有一份"
+        "（同名同字节）；"
+        + (f"{only_ow[0]}–{only_ow[-1]} 的 wheel 只在 release/old-wheels/。"
+           if only_ow else "其余旧 wheel 只在 release/old-wheels/。")
+        + "\n  **0.4.10/0.4.11 的依赖锁只在 release/old-packages/**，"
+        f"0.4.13–0.4.16 的锁在 release/old-wheels/（实有 {len(locks_ow_versions)} 个版本）。"
+        "按 OLD-WHEELS.md 的“所在目录”列找即可，不要按目录名猜。\n"
+        f"  本轮新包（{version}）用本目录 release/ 的 {version} wheel。",
+        key_note, flags=re.S)
     _write(out / "KEY-NOTE.txt", key_note)
 
     # 12) 交付清单（排除自身）
@@ -386,7 +689,7 @@ def write_unshipped(out: Path) -> str:
 
 def build_readme(version: str, release: dict, rel: dict, packages: list[dict],
                  old: dict, anchors: dict, diff_md: str, diff_detail: list[str],
-                 handoff_name: str) -> str:
+                 handoff_name: str, prev_version: str) -> str:
     current_count, history_count, current_combined, history_combined = \
         _anchor_counts(anchors, version)
     rp_unchanged = not any("policies/RULE-PACK.md" in item for item in diff_detail)
@@ -423,12 +726,15 @@ def build_readme(version: str, release: dict, rel: dict, packages: list[dict],
         "",
         f"- 版本 `{version}`；包 **{len(packages)} 个**；`release/SHA256SUMS` "
         f"**{rel['covered_count']} 行**；旧 wheel **{len(old['wheels'])} 个**；"
-        f"旧包 **{len(old['packages'])} 个**；根目录单包锚点 **{len(anchors['singles'])} 个**",
+        f"旧包 **{len(old['packages'])} 个**；根目录锚点 **{anchors['anchor_total']} 个**"
+        f"（单包 {len(anchors['singles'])}、组合 {len(anchors['combined'])}；"
+        f"file 可解析 {anchors['by_status']['resolvable']}、"
+        f"显式标注 {anchors['by_status']['marked']}、悬空 {anchors['by_status']['dangling']}）",
         f"- producer commit `{release['git_commit']}`；构建时间 `{release['build_time']}`",
         f"- 包签名钥 `{packages[0]['key_id'].split(':')[1][:12]}…`；"
         f"发行钥 `{release['release_signature']['key_id'].split(':')[1][:12]}…`",
     ]))
-    return f"""# {version} 交付验收包（第十七轮整改）
+    return f"""# {version} 交付验收包（第{_round_label(handoff_name)}轮整改）
 
 **交付边界（先读）**：本目录之外的 `scripts/`、`tests/`、`docs/交付与验收SOP.md` 等属
 仓库内开发参考，**不随交付提供**；**验算与回放只依赖本目录内文件**。步骤见
@@ -470,11 +776,12 @@ def build_readme(version: str, release: dict, rel: dict, packages: list[dict],
   （本文件 §四），不再写“仅因版本号”。
 
 第三/四轮盲验的功能门槛全过：默认流程 `RESULT PARTIAL` exit 2（非 FAIL）、可自行走到
-`OK` exit 0、同版本七类篡改全部 `FAIL` exit 1、旧包可验。第四轮查出的 14 条文档问题
-逐条处置见 `reports/0.4.15-文档事实单一来源.md`。
+`OK` exit 0、同版本七类篡改全部 `FAIL` exit 1、旧包可验。第六轮盲验的 2 条阻断都在锚点上，
+本轮处置见 `reports/0.4.17-锚点纠正与扫描器扩展.md`；上一轮的 16 条见
+`reports/0.4.16-护栏加固与残留页.md`。
 
 八包重导后 `conclusion_digest`、`evidence_digest`、`inputs_digest`、`input_fingerprint`
-与 0.4.13/0.4.14 **逐包相同**；只有 `artifacts_digest` 因包内文档变化（原因见 §四）。
+与 0.4.15/0.4.16 **逐包相同**；只有 `artifacts_digest` 因包内文档变化（原因见 §四）。
 四主包不变量：conclusion `{packages[1]['conclusion_digest'][:8]}…`、
 evidence `{packages[1]['evidence_digest'][:8]}…`、
 inputs `{packages[1]['inputs_digest'][:8]}…`、
@@ -488,7 +795,7 @@ py -3.12 -m venv .venv-clean
 .venv-clean\\Scripts\\python -m pip install --require-hashes -r release\\requirements.lock.txt
 .venv-clean\\Scripts\\python -m pip install --no-deps release\\{release['wheel']}
 
-# 2) 验一个包（锚点、包 SHA、工件摘要、证据摘要一次给全）
+# 2) 验任一包（锚点、包 SHA、工件摘要、证据摘要一次给全）
 .venv-clean\\Scripts\\wca-verify.exe package\\engine-only.zip `
   --anchor-file anchor-{version}-engine-only.json `
   --public-key trusted-public-key.pub
@@ -540,14 +847,15 @@ py -3.12 -m venv .venv-clean
 ## 六、干净环境验证与默认流程实测
 
 仓库外干净 venv（仅安装 {version} wheel + 锁定依赖）对八个包逐个执行 `wca-verify` 与
-`wca replay`，结果记录在 `reports/round17-techcheck.txt`（**计数只写该日志一处**）。
+`wca replay`，逐条原始输出（含 `RESULT` 行与 exit code）记录在
+`reports/round19-techcheck.txt`（**计数只写该日志一处**）。
 默认流程三档（无钥 v2 / 有钥 v3 缺外部项 / 补齐五项）同样记录在该日志。
 
 ## 七、测试
 
 - 离线全量：`uv run pytest -q -m "not llm"`；
 - PostgreSQL 18 全量：同一条命令 + `WCA_TEST_POSTGRES_URL` 环境变量。
-- **计数只在 `reports/round17-techcheck.txt` 写一次**，本文件不复制数字，避免两个口径。
+- **计数只在 `reports/round19-techcheck.txt` 写一次**，本文件不复制数字，避免两个口径。
 - 同版本七类篡改回归仍全部 `FAIL` exit 1；schema v3 缺 `inputs_digest` 仍 `FAIL`，
   schema v2 缺字段才 `NOT CHECKED`。
 
@@ -569,8 +877,13 @@ py -3.12 -m venv .venv-clean
   **{locks_ow_count} 个**（{locks_ow_text}），`release/old-packages/`
   **{locks_op_count} 个**（{locks_op_text}）。`old-wheels/` 里没有 0.4.10/0.4.11
   的锁，它们在 `old-packages/`；按表找文件即可，不依赖记忆。
-- **旧锚点**：根目录实有单包锚点 **{len(anchors['singles'])} 个**、组合记录
-  **{len(anchors['combined'])} 个**，逐文件哈希见 `OLD-ANCHORS.md`（由实物生成）。
+- **旧锚点**：根目录实有锚点 **{anchors['anchor_total']} 个**（单包
+  **{len(anchors['singles'])} 个**、组合记录 **{len(anchors['combined'])} 个**）。
+  每个 `file` 字段都以该 JSON 自身位置为基准核对：**可解析
+  {anchors['by_status']['resolvable']} 个**、显式标注“仅记录、不可解析”
+  {anchors['by_status']['marked']} 个、**悬空 {anchors['by_status']['dangling']} 个**。
+  0.4.12 的 8 个包未随本目录交付，对应锚点已显式标注；获取方式见 `OLD-ANCHORS.md`
+  的“历史记录”表（已实测源包 sha 与锚点一致）。逐文件哈希与来源见该文件（由扫描器生成）。
 - **{version} 新包**：用本目录 `release/` 的 {version} wheel 与
   `anchor-{version}-<role>.json`。
 - **0.4.6 签名钥疑点**：该版发行钥 `ed25519:b07741b2…` 是包签名钥的误用；本目录不带该版
@@ -579,19 +892,20 @@ py -3.12 -m venv .venv-clean
 ## 十、目录结构
 
 ```text
-handoff/{handoff_name}/
+交接目录：{handoff_name}/
   README-验收.md / READ-ME-FIRST.txt / KEY-NOTE.txt / 交付清单.txt
   未随交付清单.md            # 扫描器生成的仓库路径全表（验算不需要）
   已知残留与未闭合项.md      # 不可自证的历史声明 + 四项流程/法律未闭合
   RULE-PACK.md / OLD-WHEELS.md / OLD-ANCHORS.md
   anchor.json / anchor.txt   # 汇总记录，无签名保护
-  anchor-{version}-<role>.json   # {len(packages)} 个新包单包锚点
-  anchor-0.4.10 … 0.4.14-<role>.json   # 历史单包锚点（实有 {history_count} 个）
+  anchor-{version}-<role>.json   # {len(packages)} 个新包单包锚点（file 指向 package/）
+  anchor-0.4.10 … 0.4.16-<role>.json   # 历史单包锚点（实有 {history_count} 个）
+  anchor-0.4.10 … 0.4.16.json          # 历史组合锚点（实有 {history_combined} 个）
   trusted-public-key.pub / release-public-key.pub
   package/                   # {len(packages)} 个 {version} 包
   release/                   # {version} 发行物 + old-wheels/ + old-packages/
   docs/                      # 签名方案 / 安全与证据链现状 / 冻结版本说明 / 护栏豁免表
-  reports/                   # 历史报告 + round18-techcheck.txt + round17-diff.md
+  reports/                   # 历史报告 + round19-techcheck.txt + round17-diff.md
 ```
 
 ## 十一、运行环境与默认输出路径
@@ -606,12 +920,12 @@ handoff/{handoff_name}/
 | README 结论 | 可否独立复现 | 说明 |
 | --- | --- | --- |
 | 八包 {version} 各 `verify`/`replay` 均 `RESULT OK` | 可 | 包、锚点、公钥、wheel 全在本目录 |
-| 0.4.14→{version} 四联摘要逐包相同（`artifacts_digest` 除外） | 可 | 用 `release/old-packages/` 的 0.4.14 包与 0.4.14 wheel 对照 |
-| 旧包配旧 wheel 可验可回放 | 可 | §九；实测记录见 `reports/round17-techcheck.txt` |
+| {prev_version}→{version} 四联摘要逐包相同（`artifacts_digest` 除外） | 可 | 用 `release/old-packages/` 的 {prev_version} 包与 {prev_version} wheel 对照 |
+| 旧包配旧 wheel 可验可回放 | 可 | §九 旧物表给出每个文件的真实目录；本轮未重跑 {len(old['packages'])} 包矩阵，原始记录见 `已知残留与未闭合项.md` |
 | 退出码 0/1/2/3 分档 | 可 | 按 §三参数变体照做 |
 | 无签名 v2 包 → `RESULT PARTIAL` exit 2 | 可 | 用 {version} wheel 导出无钥包后验算 |
 | 跨后端（SQLite vs PostgreSQL 18）五摘要相同 | 需自备 PG 18 | 交付不含数据库 |
-| 离线/PG 测试计数 | **不可** | 测试不随交付；计数只在 `reports/round17-techcheck.txt` |
+| 离线/PG 测试计数 | **不可** | 测试不随交付；计数只在 `reports/round19-techcheck.txt` |
 | `reports/` 中对 `dist/` 的引用 | 出处引用 | 历史发行目录不随交付，不影响验算 |
 
 ## 十三、`SHA256SUMS` 只保护 {rel['covered_count']} 个文件
@@ -625,14 +939,16 @@ handoff/{handoff_name}/
 
 ## 十四、文档事实单一来源
 
-机制 1–3 的实现与 14 条问题逐条关闭表见仓库 `reports/0.4.15-文档事实单一来源.md`
-（不随交付）；本交付内可复核的部分：§四差异表由 `reports/round17-diff.md` 原样给出，
-计数只在 `reports/round18-techcheck.txt` 出现一次。
+机制 1–3、0.4.16 护栏加固与 0.4.17 锚点纠正见
+`reports/0.4.17-锚点纠正与扫描器扩展.md`；上一轮 14 条关闭表见
+`reports/0.4.15-文档事实单一来源.md`。
+`reports/` 为历史归档（部分源文件不随交付）；本交付内可复核的部分：§四差异表由
+`reports/round17-diff.md` 原样给出，计数只在 `reports/round19-techcheck.txt` 出现一次。
 """
 
 
 def build_first(version: str, packages: list[dict], old: dict, anchors: dict,
-                diff_detail: list[str]) -> str:
+                diff_detail: list[str], handoff_name: str) -> str:
     current_count, history_count, current_combined, history_combined = \
         _anchor_counts(anchors, version)
     # 第 4 条完全由差异表的实测结果拼出：未变/时间戳变化都不是手写的。
@@ -647,14 +963,15 @@ def build_first(version: str, packages: list[dict], old: dict, anchors: dict,
         rp_text = "`policies/RULE-PACK.md` 本轮发生变化，见差异表"
     ts_text = ("、".join(f"`{name}`" for name in ts_files) if ts_files else "（无）")
     return _gen("read-me-first", "\n".join([
-        f"{version} 交付验收包（第十七轮整改）——先读这一页",
+        f"{version} 交付验收包（第{_round_label(handoff_name)}轮整改）——先读这一页",
         "",
         "1) 先读 README-验收.md §0（演示必须用 v3 包）与 §二（三步先跑通）；",
         f"2) 包在 package/（{len(packages)} 个），单包锚点 anchor-{version}-<role>.json，",
         "   公钥 trusted-public-key.pub；验算与回放只依赖本目录；",
         f"3) 旧物：old-wheels {len(old['wheels'])}、old-packages {len(old['packages'])}、",
-        f"   单包锚点 {len(anchors['singles'])} 个（本轮 {current_count} + 历史 {history_count}），"
-        f"均在目录内可复核；",
+        f"   锚点 {anchors['anchor_total']} 个（本轮 {current_count + current_combined} + 历史 "
+        f"{history_count + history_combined}）；file 可解析 {anchors['by_status']['resolvable']}、"
+        f"显式标注 {anchors['by_status']['marked']}、悬空 {anchors['by_status']['dangling']}；",
         "4) artifacts_digest 的变化原因见 README §四（逐包逐文件），不要概括为“仅因版本号”：",
         f"   {rp_text}；confirmed 包 {ts_text} 的时间戳真实变化；",
         "   其余变化为版本号文本、派生哈希与包内文档更新。",
@@ -668,12 +985,12 @@ def write_manifest(out: Path, version: str, release: dict, invariants: dict,
                    key=lambda p: p.relative_to(out).as_posix())
     reports = sorted({p.relative_to(out).as_posix() for p in out.rglob("reports/*")})
     lines = [
-        f"{version} 第十七轮交付清单",
+        f"{version} 第{_round_label(out.name)}轮交付清单",
         f"producer_commit={release['git_commit']}",
         f"release_key_id={release['release_signature']['key_id']}",
         f"package_key_id={packages[0]['key_id']}",
         "",
-        "四包不变量：",
+        "包级不变量（四联摘要，八包同值）：",
     ]
     lines += [f"  {key}={value}" for key, value in invariants.items()]
     lines += ["", f"八个包（{len(packages)} 个）："]

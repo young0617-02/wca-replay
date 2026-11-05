@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 # 只扫文档类文件；package/*.zip 与 release/*.whl 是二进制，不在此列。
-TEXT_SUFFIXES = (".md", ".txt")
+TEXT_SUFFIXES = (".md", ".txt", ".json", ".jsonl")
 # C1：前缀必须覆盖仓库里所有会被文档引用的目录，否则“全表”不成立。
 PREFIXES = ("docs", "scripts", "tests", "src", "data", "var", "reports",
             "rules", "tools", "dist", "handoff", "policies")

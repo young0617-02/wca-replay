@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-CURRENT_HANDOFF = ROOT / "handoff" / "20261104-第十七轮整改"
+CURRENT_HANDOFF = ROOT / "handoff" / "20261104-第十九轮整改"
 BLOCK_RE = re.compile(r"```powershell\s*\n(.*?)```", re.S)
 LABEL_RE = re.compile(r"RESULT (OK|PARTIAL|FAIL|INCOMPARABLE)")
 RC_RE = re.compile(r"(?:rc=|exit(?: code)?\s*)(\d)")
@@ -39,7 +39,7 @@ def _doc_paths() -> list[Path]:
     base = handoff_dir()
     paths = [base / "README-验收.md", base / "release" / "README-验收.md",
              base / "docs" / "安全与证据链现状.md"]
-    dist_readme = ROOT / "dist" / "wca-replay-0.4.15" / "README-验收.md"
+    dist_readme = ROOT / "dist" / "wca-replay-0.4.17" / "README-验收.md"
     if dist_readme.is_file():
         paths.append(dist_readme)
     return [p for p in paths if p.is_file()]

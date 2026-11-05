@@ -191,6 +191,16 @@ def old_anchor_facts(handoff_dir: Path) -> dict:
             singles.append({**file_fact(path, name=path.name), "version": version})
         else:
             combined.append({**file_fact(path, name=path.name), "version": version})
+    # `anchor.json` 同样是一份“汇总值记录”（本轮的组合锚点），文件名不带版本号，
+    # 上一版扫描器把它漏在计数外，导致“组合记录 N 个”与实际文件数差一。
+    root_anchor = handoff_dir / "anchor.json"
+    if root_anchor.is_file():
+        try:
+            version = json.loads(root_anchor.read_text(encoding="utf-8"))["version"]
+        except (KeyError, ValueError):
+            version = ""
+        combined.append({**file_fact(root_anchor, name=root_anchor.name),
+                         "version": str(version)})
     return {"singles": singles, "combined": combined}
 
 
@@ -244,6 +254,103 @@ def _collect_digests(value, found: set[str]) -> None:
             _collect_digests(item, found)
     elif isinstance(value, str) and _SHA_RE.fullmatch(value):
         found.add(value)
+
+
+ANCHOR_MARKER = "仅记录、不可解析"
+ANCHOR_NAME_RE = re.compile(r"anchor-(0\.4\.\d+)(?:-([A-Za-z0-9._-]+))?\.json$")
+
+
+def anchor_name_version(name: str) -> str:
+    """从锚点文件名取版本号；`anchor.json` 无名版本，返回空串。"""
+    match = ANCHOR_NAME_RE.match(name)
+    return match.group(1) if match else ""
+
+
+def anchor_kind(doc: dict) -> str:
+    if isinstance(doc.get("packages"), list):
+        return "combined"
+    return "single" if doc.get("role") else "unknown"
+
+
+def anchor_file_status(doc_path: Path, value) -> str:
+    """判定锚点 `file` 字段：resolvable / marked / dangling。
+
+    - 显式写有 `仅记录、不可解析` 的，算 marked；
+    - 其余必须是**以该 JSON 自身位置为基准**可解析的相对路径，否则算 dangling；
+    - 绝对路径、URL、含 `..` 的路径一律不算可解析（本交付只允许目录内相对路径）。
+    """
+    if not isinstance(value, str) or not value.strip():
+        return "dangling"
+    if ANCHOR_MARKER in value:
+        return "marked"
+    if value.startswith(("http://", "https://", "/", "\\")) or ".." in value:
+        return "dangling"
+    return "resolvable" if (Path(doc_path).parent / value).is_file() else "dangling"
+
+
+def anchor_file_entries(doc: dict) -> list[dict]:
+    """单包锚点返回一条，组合锚点返回 `packages[]` 每包一条。"""
+    if anchor_kind(doc) == "combined":
+        return list(doc["packages"])
+    return [doc]
+
+
+def anchor_records(handoff_dir: Path) -> dict:
+    """扫描交接目录全部 `anchor*.json`，给出 file 指针可解析性与错版名单。
+
+    计数口径：按锚点文件计（一个组合锚点算 1 个）；同时给出指针级计数，
+    便于报告同时说明“N 个锚点”和“N 个 file 指针”。
+    """
+    handoff_dir = Path(handoff_dir)
+    singles: list[dict] = []
+    combined: list[dict] = []
+    misnamed: list[dict] = []
+    for path in sorted(handoff_dir.glob("anchor*.json")):
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        version = str(doc.get("version") or "")
+        kind = anchor_kind(doc)
+        name_version = anchor_name_version(path.name)
+        if name_version and name_version != version:
+            misnamed.append({"name": path.name, "name_version": name_version,
+                             "content_version": version})
+        entries = anchor_file_entries(doc)
+        statuses = [anchor_file_status(path, entry.get("file")) for entry in entries]
+        if "dangling" in statuses:
+            status = "dangling"
+        elif "marked" in statuses:
+            status = "marked"
+        else:
+            status = "resolvable"
+        record = {
+            "name": path.name,
+            "version": version,
+            "kind": kind,
+            "status": status,
+            "pointer_statuses": statuses,
+            "roles": [str(entry.get("role") or "") for entry in entries],
+            "bytes": path.stat().st_size,
+            "sha256": sha256_file(path),
+        }
+        (combined if kind == "combined" else singles).append(record)
+
+    anchor_total = len(singles) + len(combined)
+    by_status = {key: sum(1 for r in singles + combined if r["status"] == key)
+                 for key in ("resolvable", "marked", "dangling")}
+    pointer_total = sum(len(r["pointer_statuses"]) for r in singles + combined)
+    pointer_by_status = {
+        key: sum(sum(1 for s in r["pointer_statuses"] if s == key)
+                 for r in singles + combined)
+        for key in ("resolvable", "marked", "dangling")
+    }
+    return {
+        "singles": singles,
+        "combined": combined,
+        "anchor_total": anchor_total,
+        "by_status": by_status,
+        "pointer_total": pointer_total,
+        "pointer_by_status": pointer_by_status,
+        "misnamed": misnamed,
+    }
 
 
 def generated_block(key: str, body: str) -> str:

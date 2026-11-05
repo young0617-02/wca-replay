@@ -5,7 +5,7 @@
 属于“字段因版本缺失”，只能是 NOT CHECKED / PARTIAL（exit 2）；
 schema v3 缺字段才是真违约，必须继续 FAIL（exit 1）。
 
-**限定语义（0.4.16）**：v2 只是“不会因缺 `inputs_digest` 这一项门禁而 FAIL”；
+**限定语义（0.4.17）**：v2 只是“不会因缺 `inputs_digest` 这一项门禁而 FAIL”；
 包内其他字节被改仍 `RESULT FAIL`（exit 1），`--require-signature` 下无签名也 FAIL。
 """
 

@@ -1,4 +1,4 @@
-﻿F.....FFFF.                                                              [100%]
+﻿F.....FFF..                                                              [100%]
 ================================== FAILURES ===================================
 _________________ test_generated_blocks_are_marked_and_paired _________________
 
@@ -74,7 +74,9 @@ ______________ test_every_path_like_string_exists_or_registered _______________
                     continue
                 if _exists(base, path, token):
                     continue
-                if token in physical or Path(token).name in physical:
+                # 不含目录的文件名才允许“按文件名匹配”；一旦写成 `a/b` 形式，必须**整条路径**
+                # 存在。否则“文件名对、目录写错”会被另一处的同名文件洗白（M1 的锁表即此类）。
+                if "/" not in token and (token in physical or Path(token).name in physical):
                     continue
                 head = token.split("/", 1)[0]
                 if head not in DELIVERY_INTERNAL_HEADS and token in unshipped:
@@ -96,7 +98,7 @@ E         OLD-ANCHORS.md 提到既不存在也未登记的路径/文件名：anc
 E         docs/签名方案.md 提到既不存在也未登记的路径/文件名：foo.csv
 E       assert not ['docs/签名方案.md 提到既不存在也未登记的路径/文件名：foo.csv', 'OLD-ANCHORS.md 提到既不存在也未登记的路径/文件名：anchor-0.4.1x.json']
 
-tests\test_doc_facts_guard.py:365: AssertionError
+tests\test_doc_facts_guard.py:367: AssertionError
 ______________________ test_declared_counts_match_actual ______________________
 
     def test_declared_counts_match_actual() -> None:
@@ -118,42 +120,12 @@ ______________________ test_declared_counts_match_actual ______________________
 E       AssertionError: 文档计数与实物不符：
 E         README-验收.md：'旧 wheel **13 个**' → 文档 13，实物 11（wheels）
 E         README-验收.md：'`release/old-wheels/` 实有 **13 个**' → 文档 13，实物 11（wheels_old_wheels）
+E         README-验收.md：'组合记录\n  **5 个**' → 文档 5，实物 6（combined）
+E         OLD-ANCHORS.md：'组合记录 **5 个**' → 文档 5，实物 6（combined）
 E         docs/签名方案.md：'100 条 v4' → 文档 100，实物 99（rule_v4）
-E       assert not ["README-验收.md：'旧 wheel **13 个**' → 文档 13，实物 11（wheels）", "README-验收.md：'`release/old-wheels/` 实有 **13 个**' → 文档 13，实物 11（wheels_old_wheels）", "docs/签名方案.md：'100 条 v4' → 文档 100，实物 99（rule_v4）"]
+E       assert not ["README-验收.md：'旧 wheel **13 个**' → 文档 13，实物 11（wheels）", "README-验收.md：'`release/old-wheels/` 实有 **13 个**' → 文档 13，实物...6（combined）", "OLD-ANCHORS.md：'组合记录 **5 个**' → 文档 5，实物 6（combined）", "docs/签名方案.md：'100 条 v4' → 文档 100，实物 99（rule_v4）"]
 
-tests\test_doc_facts_guard.py:444: AssertionError
-_______________ test_repo_docs_rule_version_counts_match_actual _______________
-
-    def test_repo_docs_rule_version_counts_match_actual() -> None:
-        """仓库文档同样不得把 99 条 v4 写成 100 条（本轮盲验数字类问题）。"""
-        packages = sorted((ROOT / "handoff" / "20261104-第十七轮整改" / "package").glob("*.zip"))
-        if not packages:
-            pytest.skip("缺少 0.4.15 举证包，无法取得 rule_versions 实物")
-        manifest = _package_manifest(packages[1])
-        versions = manifest["counts"]["rule_versions"]
-        v4 = sum(n for label, n in versions.items() if label.endswith(".v4"))
-        v5 = sum(n for label, n in versions.items() if label.endswith(".v5"))
-        docs = [ROOT / "README.md", ROOT / "docs" / "签名方案.md",
-                ROOT / "docs" / "交付与验收SOP.md", ROOT / "policies" / "口径声明-对外版.md"]
-        bad: list[str] = []
-        for path in docs:
-            text = path.read_text(encoding="utf-8")
-            for match in re.finditer(rf"({NUM_TOKEN})\s*条 v4", text):
-                value = _to_int(match.group(1))
-                if value is not None and value != v4:
-                    bad.append(f"{path.name}：v4 规则写 {value} 条，实物 {v4} 条")
-            for match in re.finditer(rf"({NUM_TOKEN})\s*条 v5", text):
-                value = _to_int(match.group(1))
-                if value is not None and value != v5:
-                    bad.append(f"{path.name}：v5 规则写 {value} 条，实物 {v5} 条")
->       assert not bad, "\n".join(bad)
-E       AssertionError: README.md：v4 规则写 100 条，实物 99 条
-E         签名方案.md：v4 规则写 100 条，实物 99 条
-E         交付与验收SOP.md：v4 规则写 100 条，实物 99 条
-E         口径声明-对外版.md：v4 规则写 100 条，实物 99 条
-E       assert not ['README.md：v4 规则写 100 条，实物 99 条', '签名方案.md：v4 规则写 100 条，实物 99 条', '交付与验收SOP.md：v4 规则写 100 条，实物 99 条', '口径声明-对外版.md：v4 规则写 100 条，实物 99 条']
-
-tests\test_doc_facts_guard.py:469: AssertionError
+tests\test_doc_facts_guard.py:446: AssertionError
 =========================== short test summary info ===========================
 FAILED tests/test_doc_facts_guard.py::test_generated_blocks_are_marked_and_paired - AssertionError: reports/round17-diff.md 缺少生成区标记
 assert (0 >= 1)
@@ -175,11 +147,8 @@ assert not ['docs/签名方案.md 提到既不存在也未登记的路径/文件
 FAILED tests/test_doc_facts_guard.py::test_declared_counts_match_actual - AssertionError: 文档计数与实物不符：
   README-验收.md：'旧 wheel **13 个**' → 文档 13，实物 11（wheels）
   README-验收.md：'`release/old-wheels/` 实有 **13 个**' → 文档 13，实物 11（wheels_old_wheels）
+  README-验收.md：'组合记录\n  **5 个**' → 文档 5，实物 6（combined）
+  OLD-ANCHORS.md：'组合记录 **5 个**' → 文档 5，实物 6（combined）
   docs/签名方案.md：'100 条 v4' → 文档 100，实物 99（rule_v4）
-assert not ["README-验收.md：'旧 wheel **13 个**' → 文档 13，实物 11（wheels）", "README-验收.md：'`release/old-wheels/` 实有 **13 个**' → 文档 13，实物 11（wheels_old_wheels）", "docs/签名方案.md：'100 条 v4' → 文档 100，实物 99（rule_v4）"]
-FAILED tests/test_doc_facts_guard.py::test_repo_docs_rule_version_counts_match_actual - AssertionError: README.md：v4 规则写 100 条，实物 99 条
-  签名方案.md：v4 规则写 100 条，实物 99 条
-  交付与验收SOP.md：v4 规则写 100 条，实物 99 条
-  口径声明-对外版.md：v4 规则写 100 条，实物 99 条
-assert not ['README.md：v4 规则写 100 条，实物 99 条', '签名方案.md：v4 规则写 100 条，实物 99 条', '交付与验收SOP.md：v4 规则写 100 条，实物 99 条', '口径声明-对外版.md：v4 规则写 100 条，实物 99 条']
-5 failed, 6 passed in 7.73s
+assert not ["README-验收.md：'旧 wheel **13 个**' → 文档 13，实物 11（wheels）", "README-验收.md：'`release/old-wheels/` 实有 **13 个**' → 文档 13，实物...6（combined）", "OLD-ANCHORS.md：'组合记录 **5 个**' → 文档 5，实物 6（combined）", "docs/签名方案.md：'100 条 v4' → 文档 100，实物 99（rule_v4）"]
+4 failed, 7 passed in 7.86s

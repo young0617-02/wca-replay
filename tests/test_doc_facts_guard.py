@@ -29,9 +29,9 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-# 红灯阶段可用 WCA_HANDOFF_DIR 指向上一个交付目录（0.4.15），绿阶段默认本轮的第十八轮。
+# 红灯阶段可用 WCA_HANDOFF_DIR 指向上一个交付目录（0.4.16），绿阶段默认本轮的第十九轮。
 HANDOFF = Path(os.environ.get(
-    "WCA_HANDOFF_DIR", ROOT / "handoff" / "20261104-第十八轮整改"))
+    "WCA_HANDOFF_DIR", ROOT / "handoff" / "20261104-第十九轮整改"))
 
 SHA_RE = re.compile(r"[0-9a-f]{64}")
 MANIFEST_LINE_RE = re.compile(
@@ -243,10 +243,22 @@ def test_relative_paths_resolve() -> None:
 PATHISH_RE = re.compile(
     r"(?<![A-Za-z0-9_./\\-])"
     r"((?:[A-Za-z0-9_.\-\u4e00-\u9fff]+/)+[A-Za-z0-9_.\-\u4e00-\u9fff]+)")
+# 文件名识别不再依赖后缀白名单：只要“点 + 字母开头的后缀”就扫（大小写不敏感），
+# 覆盖 `x.tar.gz`、`OLD-WHEELS.MD`、`requirements-0.4.10.lock`（少 `.txt`）等历史漏网写法。
+DOTTED_NAME_RE = re.compile(r"\.[A-Za-z][A-Za-z0-9_-]{0,5}$")
 BARE_FILE_RE = re.compile(
-    r"(?<![A-Za-z0-9_.\-\u4e00-\u9fff])([A-Za-z0-9_][A-Za-z0-9_.-]*\."
-    r"(?:whl|zip|md|txt|json|jsonl|csv|py|pub|sig|toml|lock))(?![A-Za-z0-9_.\-])")
+    r"(?<![A-Za-z0-9_.\-\u4e00-\u9fff])"
+    r"([A-Za-z0-9_][A-Za-z0-9_.-]*\.[A-Za-z][A-Za-z0-9_-]{0,5})"
+    r"(?![A-Za-z0-9_.\-])")
+# 无后缀文件名：已知文件名模式（`SHA256SUMS` 等）+ “见/文件/清单/…”后紧跟的裸名字，
+# 后者用于覆盖 `foo` 这类既无目录也无后缀的错误指引。
+KNOWN_BARE_NAMES = {"SHA256SUMS", "Makefile", "Dockerfile", "LICENSE", "CODEOWNERS",
+                    "OWNERS", "py.typed"}
+BARE_NAME_CONTEXT_RE = re.compile(
+    r"(?:见|文件|清单|目录|路径|位于|取自|放在|名为|读取|打开)\s*[*`]*"
+    r"([A-Za-z0-9_][A-Za-z0-9_.-]{1,40})")
 SKIP_TOKEN_CHARS = ("<", ">", "*", "{", "}", "://", "=", "|", '"', "'")
+SKIP_BARE_TOKENS = {"e.g", "i.e", "etc", "vs"}
 ARTIFACT_SUFFIXES = (".whl", ".zip", ".lock")
 PREFIX_HEADS = check_handoff_refs.PREFIXES
 # `release/`、`package/` 是交付内部命名空间：这些路径**必须真实存在**，
@@ -289,19 +301,25 @@ def _exists(base: Path, doc: Path, token: str) -> bool:
 
 
 def _path_like(token: str) -> bool:
-    """只把“像文件路径”的 token 纳入断言，避免把 `OK/FAIL`、`v1/v2` 之类当路径。"""
+    """只把“像文件路径”的 token 纳入断言，避免把 `OK/FAIL`、`v1/v2` 之类当路径。
+
+    后缀不再白名单：任何字母开头的后缀都算文件名（大小写不敏感）；
+    无后缀裸名字只认已知文件名模式，或由 `BARE_NAME_CONTEXT_RE` 明确指出的名字。
+    """
     token = token.rstrip("，。、；：")
     if token.endswith(("-", ".", "/")):
         return False
-    head = token.split("/", 1)[0]
-    suffix = Path(token).suffix.lower()
+    if token in SKIP_BARE_TOKENS:
+        return False
     if "/" in token:
-        return head in PREFIX_HEADS or suffix in (
-            ".whl", ".zip", ".md", ".txt", ".json", ".jsonl", ".csv", ".py",
-            ".pub", ".sig", ".toml", ".lock")
-    return bool(Path(token).suffix.lower() in (
-        ".whl", ".zip", ".md", ".txt", ".json", ".jsonl", ".csv", ".py",
-        ".pub", ".sig", ".toml", ".lock"))
+        head = token.split("/", 1)[0]
+        return (head in PREFIX_HEADS or head in DELIVERY_INTERNAL_HEADS
+                or bool(DOTTED_NAME_RE.search(token)))
+    if DOTTED_NAME_RE.search(token):
+        return True
+    if token in KNOWN_BARE_NAMES:
+        return True
+    return bool(re.fullmatch(r"[a-z][a-z0-9_-]{1,30}", token))
 
 
 def _historical_doc(path: Path, base: Path) -> bool:
@@ -338,6 +356,7 @@ def test_every_path_like_string_exists_or_registered() -> None:
         rel = path.relative_to(base).as_posix()
         candidates = [m.group(1) for m in PATHISH_RE.finditer(text)]
         candidates += [m.group(1) for m in BARE_FILE_RE.finditer(text)]
+        candidates += [m.group(1) for m in BARE_NAME_CONTEXT_RE.finditer(text)]
         for token in candidates:
             token = token.strip().rstrip("，。、；：")
             if any(mark in token for mark in SKIP_TOKEN_CHARS):
@@ -348,7 +367,9 @@ def test_every_path_like_string_exists_or_registered() -> None:
                 continue
             if _exists(base, path, token):
                 continue
-            if token in physical or Path(token).name in physical:
+            # 不含目录的文件名才允许“按文件名匹配”；一旦写成 `a/b` 形式，必须**整条路径**
+            # 存在。否则“文件名对、目录写错”会被另一处的同名文件洗白（M1 的锁表即此类）。
+            if "/" not in token and (token in physical or Path(token).name in physical):
                 continue
             head = token.split("/", 1)[0]
             if head not in DELIVERY_INTERNAL_HEADS and token in unshipped:
@@ -373,7 +394,8 @@ def test_every_path_like_string_exists_or_registered() -> None:
 
 def _count_facts(base: Path) -> dict[str, int]:
     old = docfacts.old_assets(base / "release")
-    anchors = docfacts.old_anchor_facts(base)
+    anchors = docfacts.anchor_records(base)
+    version = docfacts.release_facts(base / "release")["version"]
     packages = sorted((base / "package").glob("*.zip"))
     manifests = [_package_manifest(p) for p in packages]
     rule_versions: dict[str, int] = {}
@@ -393,6 +415,14 @@ def _count_facts(base: Path) -> dict[str, int]:
         "old_packages": len(old["packages"]),
         "singles": len(anchors["singles"]),
         "combined": len(anchors["combined"]),
+        "anchor_total": anchors["anchor_total"],
+        "anchor_resolvable": anchors["by_status"]["resolvable"],
+        "anchor_marked": anchors["by_status"]["marked"],
+        "anchor_dangling": anchors["by_status"]["dangling"],
+        "singles_current": sum(1 for a in anchors["singles"] if a["version"] == version),
+        "singles_history": sum(1 for a in anchors["singles"] if a["version"] != version),
+        "combined_current": sum(1 for a in anchors["combined"] if a["version"] == version),
+        "combined_history": sum(1 for a in anchors["combined"] if a["version"] != version),
         "covered": rel["covered_count"],
         "rule_v4": v4,
         "rule_v5": v5,
@@ -415,10 +445,15 @@ CLAIM_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(rf"旧包\s*\*\*({NUM_TOKEN})\s*个\*\*"), "old_packages"),
     (re.compile(rf"({NUM_TOKEN})\s*个\s*zip"), "old_packages"),
     (re.compile(rf"(?<!旧)包\s*\*\*({NUM_TOKEN})\s*个\*\*"), "packages"),
-    (re.compile(rf"根目录单包锚点\s*\*\*({NUM_TOKEN})\s*个\*\*"), "singles"),
+    (re.compile(rf"根目录锚点\s*\*\*({NUM_TOKEN})\s*个\*\*"), "anchor_total"),
+    (re.compile(rf"锚点\s*\*\*({NUM_TOKEN})\s*个\*\*"), "anchor_total"),
+    (re.compile(rf"单包\s*\*\*({NUM_TOKEN})\s*个\*\*"), "singles"),
     (re.compile(rf"单包锚点\s*\*\*({NUM_TOKEN})\s*个\*\*"), "singles"),
     (re.compile(rf"组合记录\s*\*\*({NUM_TOKEN})\s*个\*\*"), "combined"),
-    (re.compile(rf"({NUM_TOKEN})\s*个锚点"), "singles"),
+    (re.compile(rf"({NUM_TOKEN})\s*个锚点"), "anchor_total"),
+    (re.compile(rf"file 可解析\s*\*\*?({NUM_TOKEN})\s*个"), "anchor_resolvable"),
+    (re.compile(rf"显式标注[^\n]{{0,6}}\*\*({NUM_TOKEN})\s*个\*\*"), "anchor_marked"),
+    (re.compile(rf"悬空\s*\*\*?({NUM_TOKEN})\s*个"), "anchor_dangling"),
     (re.compile(rf"({NUM_TOKEN})\s*条 v4"), "rule_v4"),
     (re.compile(rf"({NUM_TOKEN})\s*条 v5"), "rule_v5"),
     (re.compile(rf"v4 规则\s*({NUM_TOKEN})\s*条"), "rule_v4"),
@@ -446,9 +481,9 @@ def test_declared_counts_match_actual() -> None:
 
 def test_repo_docs_rule_version_counts_match_actual() -> None:
     """仓库文档同样不得把 99 条 v4 写成 100 条（本轮盲验数字类问题）。"""
-    packages = sorted((ROOT / "handoff" / "20261104-第十七轮整改" / "package").glob("*.zip"))
+    packages = sorted((ROOT / "handoff" / "20261104-第十八轮整改" / "package").glob("*.zip"))
     if not packages:
-        pytest.skip("缺少 0.4.15 举证包，无法取得 rule_versions 实物")
+        pytest.skip("缺少 0.4.16 举证包，无法取得 rule_versions 实物")
     manifest = _package_manifest(packages[1])
     versions = manifest["counts"]["rule_versions"]
     v4 = sum(n for label, n in versions.items() if label.endswith(".v4"))
@@ -486,13 +521,13 @@ def test_numbers_are_artifact_facts_or_declared_constants() -> None:
     reports = sorted(p for p in (base / "reports").iterdir() if p.is_file())
     old_packages = sorted((base / "release" / "old-packages").glob("*.zip"))
     old = docfacts.old_assets(base / "release")
-    anchors = sorted(base.glob("anchor-0.4.*.json"))
+    anchor_facts = docfacts.anchor_records(base)
     sums_lines = [line for line in (base / "release" / "SHA256SUMS")
                   .read_text(encoding="utf-8").splitlines() if line.strip()]
     actual = {
         str(len(packages)), str(len(reports)), str(len(old_packages)),
         str(len(old["wheels"])), str(len(old["locks"])),
-        str(len(anchors)), str(len(sums_lines)),
+        str(anchor_facts["anchor_total"]), str(len(sums_lines)),
         str(len([p for p in base.rglob('*') if p.is_file()])),
     }
     for path in base.rglob("*"):
@@ -526,9 +561,12 @@ def test_numbers_are_artifact_facts_or_declared_constants() -> None:
     actual.add(str(len(old["wheels"])))
     actual.add(str(len(old["locks"])))
     actual.add(str(len(old["packages"])))
-    anchor_facts = docfacts.old_anchor_facts(base)
+    anchor_facts = docfacts.anchor_records(base)
     actual.add(str(len(anchor_facts["singles"])))
     actual.add(str(len(anchor_facts["combined"])))
+    actual.add(str(anchor_facts["anchor_total"]))
+    for key in ("resolvable", "marked", "dangling"):
+        actual.add(str(anchor_facts["by_status"][key]))
     # 机制 3：差异表的“变动文件数”和三类原因计数也必须由同一份 diff 重算。
     import diff_packages
     diff_md, _detail = diff_packages.build_table(base / "release" / "old-packages",
@@ -584,3 +622,281 @@ def test_numbers_are_artifact_facts_or_declared_constants() -> None:
                 continue
             bad.append(f"{path.relative_to(base).as_posix()} 出现无法溯源的数字：{token}")
     assert not bad, "以下数字既非产物事实也非显式登记：\n" + "\n".join(bad[:20])
+
+
+# ---------------------------------------------------------------------------
+# JSON 覆盖：锚点 / RELEASE / 包内 manifest / responsibility
+# ---------------------------------------------------------------------------
+
+def _anchor_paths(base: Path) -> list[Path]:
+    return sorted(base.glob("anchor*.json"))
+
+
+def _load_json(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_anchor_json_filename_version_matches_content() -> None:
+    """X1：锚点文件名必须由内容里的 `version` 派生，禁止“文件名写 0.4.14、内容是 0.4.15”。"""
+    base = _require_handoff()
+    release_version = _load_json(base / "release" / "RELEASE.json")["version"]
+    bad: list[str] = []
+    for path in _anchor_paths(base):
+        doc = _load_json(path)
+        version = str(doc.get("version") or "")
+        assert version, f"{path.name} 缺少 version 字段"
+        name_version = docfacts.anchor_name_version(path.name)
+        if name_version and name_version != version:
+            bad.append(f"{path.name}：文件名版本 {name_version} != 内容版本 {version}")
+        if path.name == "anchor.json" and version != release_version:
+            bad.append(f"anchor.json 内容版本 {version} != release/RELEASE.json {release_version}")
+    assert not bad, "锚点文件名与内容版本不一致：\n" + "\n".join(bad)
+
+
+def test_anchor_file_fields_resolve_or_are_marked() -> None:
+    """X2：`file` 要么是以该 JSON 自身位置为基准可解析的相对路径，要么显式标注“仅记录、不可解析”。
+
+    悬空（看起来可解析、实际不存在）一律失败；可解析的还必须与记录的 SHA-256 一致。
+    """
+    base = _require_handoff()
+    records = docfacts.anchor_records(base)
+    assert records["by_status"]["dangling"] == 0, (
+        "存在悬空 file 指针：\n" + "\n".join(
+            f"{r['name']} → {r['status']}" for r in
+            records["singles"] + records["combined"] if r["status"] == "dangling"))
+    bad: list[str] = []
+    for path in _anchor_paths(base):
+        doc = _load_json(path)
+        for entry in docfacts.anchor_file_entries(doc):
+            value = entry.get("file")
+            status = docfacts.anchor_file_status(path, value)
+            if status == "dangling":
+                bad.append(f"{path.name}：file 既不存在的也不标注：{value!r}")
+                continue
+            if status == "marked":
+                if docfacts.ANCHOR_MARKER not in str(value):
+                    bad.append(f"{path.name}：标注写法缺少“{docfacts.ANCHOR_MARKER}”：{value!r}")
+                continue
+            target = path.parent / str(value)
+            digest = entry.get("package_sha256") or entry.get("sha256")
+            if digest and docfacts.sha256_file(target) != digest:
+                bad.append(f"{path.name}：{value} 的 SHA-256 与锚点记录不符")
+    assert not bad, "\n".join(bad)
+
+
+def test_anchor_target_package_producer_version_matches() -> None:
+    """三方一致：文件名版本 == 内容版本 == 目标包 producer.version。"""
+    base = _require_handoff()
+    bad: list[str] = []
+    for path in _anchor_paths(base):
+        doc = _load_json(path)
+        version = str(doc.get("version") or "")
+        for entry in docfacts.anchor_file_entries(doc):
+            status = docfacts.anchor_file_status(path, entry.get("file"))
+            if status != "resolvable":
+                continue
+            facts = docfacts.package_facts(path.parent / str(entry["file"]))
+            if facts["producer_version"] != version:
+                bad.append(f"{path.name}：目标包 {entry['file']} 的 producer.version="
+                           f"{facts['producer_version']} != 锚点版本 {version}")
+    assert not bad, "\n".join(bad)
+
+
+def test_release_json_paths_and_counts_match_actual() -> None:
+    base = _require_handoff()
+    rel = _load_json(base / "release" / "RELEASE.json")
+    version = rel["version"]
+    wheel = base / "release" / rel["wheel"]
+    assert wheel.is_file(), f"RELEASE.json 的 wheel 不存在：{rel['wheel']}"
+    assert version in rel["wheel"], f"wheel 文件名不含版本 {version}：{rel['wheel']}"
+    lock = base / "release" / rel.get("lock_file", "requirements.lock.txt")
+    assert lock.is_file(), "RELEASE.json 指向的锁定依赖不存在"
+    sums = [line for line in (base / "release" / "SHA256SUMS")
+            .read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(sums) == docfacts.release_facts(base / "release")["covered_count"], \
+        "SHA256SUMS 行数与实物覆盖清单不符"
+    for line in sums:
+        digest, name = line.split(None, 1)
+        target = base / "release" / name.strip()
+        assert target.is_file(), f"SHA256SUMS 列了不存在的文件：{name.strip()}"
+        assert docfacts.sha256_file(target) == digest, f"{name.strip()} 的 SHA-256 与 SHA256SUMS 不符"
+
+
+def test_package_manifest_and_responsibility_json_match_anchors() -> None:
+    """包内 `manifest.json` / `responsibility.json` 的版本、计数、摘要必须与锚点同源。"""
+    base = _require_handoff()
+    release_version = _load_json(base / "release" / "RELEASE.json")["version"]
+    bad: list[str] = []
+    for package in sorted((base / "package").glob("*.zip")):
+        facts = docfacts.package_facts(package)
+        anchor_path = base / f"anchor-{release_version}-{package.stem}.json"
+        assert anchor_path.is_file(), f"{package.name} 缺少本轮单包锚点 {anchor_path.name}"
+        anchor = _load_json(anchor_path)
+        for key in ("sha256", "anchor", "artifacts_digest", "evidence_digest",
+                    "inputs_digest", "input_fingerprint", "counts"):
+            anchor_key = "package_sha256" if key == "sha256" else key
+            if anchor[anchor_key] != facts[key]:
+                bad.append(f"{package.name}：锚点 {anchor_key} 与包内字段不符")
+        with zipfile.ZipFile(package) as zf:
+            responsibility = json.loads(zf.read("responsibility.json").decode("utf-8"))
+        if responsibility["human_confirmed_findings"] != facts["human_confirmed_findings"]:
+            bad.append(f"{package.name}：responsibility.json 与 manifest 计数不符")
+    for old_package in sorted((base / "release" / "old-packages").glob("*.zip")):
+        facts = docfacts.package_facts(old_package)
+        if not facts["producer_version"]:
+            bad.append(f"{old_package.name}：manifest.json 缺少 producer.version")
+    assert not bad, "\n".join(bad)
+
+
+def test_json_and_jsonl_files_are_parseable() -> None:
+    """`.json`/`.jsonl` 也要纳入扫描：坏 JSON 不能因为“只扫 .md/.txt”而漏过。"""
+    base = _require_handoff()
+    for path in sorted(base.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in (".json", ".jsonl"):
+            continue
+        text = path.read_text(encoding="utf-8")
+        if path.suffix.lower() == ".json":
+            json.loads(text)
+        else:
+            for line in text.splitlines():
+                if line.strip():
+                    json.loads(line)
+
+
+# ---------------------------------------------------------------------------
+# 数字—名词绑定：数字必须与它紧跟的名词对应，不能“换个名词就通过”
+# ---------------------------------------------------------------------------
+
+def _noun_actuals(base: Path) -> dict[str, set[int]]:
+    old = docfacts.old_assets(base / "release")
+    records = docfacts.anchor_records(base)
+    version = _load_json(base / "release" / "RELEASE.json")["version"]
+    packages = sorted((base / "package").glob("*.zip"))
+    rel = docfacts.release_facts(base / "release")
+    manifests = [_package_manifest(p) for p in packages]
+    # 规则条数取“规则包 v4+v5 实际评测”的包（dup-subdir 包只评 1 条，不能拿来求和）。
+    representative = next(m for m in manifests
+                          if {"rp-2026.10.gd-pilot-standard.v4",
+                              "rp-2026.11.gd-pilot-standard.v5"} <=
+                          set(m["counts"].get("rule_versions", {})))
+    versions = representative["counts"]["rule_versions"]
+    v4 = sum(n for label, n in versions.items() if label.endswith(".v4"))
+    v5 = sum(n for label, n in versions.items() if label.endswith(".v5"))
+    singles = records["singles"]
+    combined = records["combined"]
+    file_counts = {
+        rel["covered_count"], rel["file_count"],
+        len([p for p in base.rglob("*") if p.is_file()]),
+        len(packages), len(old["packages"]),
+        len(list((base / "docs").glob("*"))), len(list((base / "reports").glob("*"))),
+    }
+    return {
+        "锚点": {records["anchor_total"], len(singles), len(combined),
+                 sum(1 for a in singles if a["version"] == version),
+                 sum(1 for a in singles if a["version"] != version),
+                 sum(1 for a in combined if a["version"] == version),
+                 sum(1 for a in combined if a["version"] != version),
+                 records["by_status"]["resolvable"], records["by_status"]["marked"],
+                 records["by_status"]["dangling"], len(records["misnamed"])},
+        "包": {len(packages), len(old["packages"]), 2},
+        "wheel": {len(old["wheels"]),
+                  sum(1 for w in old["wheels"] if "old-wheels" in w["dirs"]),
+                  sum(1 for w in old["wheels"] if "old-packages" in w["dirs"]),
+                  len(list((base / "release").glob("*.whl")))},
+        "锁": {len(old["locks"]),
+               sum(1 for x in old["locks"] if "old-wheels" in x["dirs"]),
+               sum(1 for x in old["locks"] if "old-packages" in x["dirs"])},
+        "文件": file_counts,
+        "规则": {v4, v5},
+        "条数": {v4, v5},
+    }
+
+
+NOUN_BINDING_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (re.compile(rf"(?<!第)(?<!唯)(?<!某)(?<!任)(?<!每)({NUM_TOKEN})\s*(?:个|份|项|套|条|张)?\s*锚点"), "锚点"),
+    (re.compile(rf"(?<!第)(?<!唯)(?<!某)(?<!任)(?<!每)({NUM_TOKEN})\s*(?:个|份|项|套|条|张)\s*(?:旧)?包"), "包"),
+    (re.compile(r"(?<!第)(?<!唯)(?<!某)(?<!任)(?<!每)([零一二三四五六七八九十两]+)包"), "包"),
+    (re.compile(rf"(?<!第)(?<!唯)(?<!某)(?<!任)(?<!每)({NUM_TOKEN})\s*(?:个|份|项|套|条|张)?\s*wheel"), "wheel"),
+    (re.compile(rf"(?<!第)(?<!唯)(?<!某)(?<!任)(?<!每)({NUM_TOKEN})\s*(?:个|份|项|套|条|张)?\s*(?:依赖)?锁(?!定)"), "锁"),
+    (re.compile(rf"(?<!第)(?<!唯)(?<!某)(?<!任)(?<!每)({NUM_TOKEN})\s*(?:个|份|项|套|条|张)\s*文件"), "文件"),
+    (re.compile(rf"(?<!第)(?<!唯)(?<!某)(?<!任)(?<!每)({NUM_TOKEN})\s*(?:个|份|项|套|条|张)\s*规则"), "规则"),
+    (re.compile(rf"(?<!第)(?<!唯)(?<!某)(?<!任)(?<!每)({NUM_TOKEN})\s*条(?:\s*数)?\s*(?:v[45]|规则)"), "条数"),
+    (re.compile(rf"(?<!第)(?<!唯)(?<!某)(?<!任)(?<!每)({NUM_TOKEN})\s*条数"), "条数"),
+]
+
+
+def _noun_claim_violations(text: str, actuals: dict[str, set[int]]) -> list[str]:
+    """返回“数字与名词不匹配”的原文片段。
+
+    单独的“一”按不定冠词处理（“验任一包”不构成计数声明）；
+    其余数字（含 13/8 等曾登记为全局常量的值）**不豁免**，必须与名词的实物计数绑定。
+    """
+    text = re.sub(r"0\.4\.\d+", "<VER>", text)
+    text = re.sub(r"\d{4}-\d{2}-\d{2}", "<DATE>", text)
+    text = re.sub(r"\d{2}:\d{2}(?::\d{2})?", "<TIME>", text)
+    text = re.sub(r"[0-9a-f]{8,}", "<HEX>", text)
+    bad: list[str] = []
+    for pattern, noun in NOUN_BINDING_PATTERNS:
+        for match in pattern.finditer(text):
+            raw = match.group(1)
+            if raw in ("一", "壹"):
+                continue
+            value = _to_int(raw)
+            if value is None:
+                continue
+            if value not in actuals[noun]:
+                bad.append(f"{match.group(0)!r}：{noun} 实物计数不含 {value}"
+                           f"（允许 {sorted(actuals[noun])}）")
+    return bad
+
+
+def test_number_noun_binding_matches_artifacts() -> None:
+    """本轮补齐的漏洞 1：数字必须绑到正确名词（`56 个锚点` 改成 `56 个包` 必须失败）。"""
+    base = _require_handoff()
+    actuals = _noun_actuals(base)
+    bad: list[str] = []
+    for path in _living_docs(base):
+        if path.name in ("未随交付清单.md", "旧发行物-SHA256清单.md"):
+            continue
+        for violation in _noun_claim_violations(path.read_text(encoding="utf-8"), actuals):
+            bad.append(f"{path.relative_to(base).as_posix()}：{violation}")
+    assert not bad, "数字与名词不匹配：\n" + "\n".join(bad[:20])
+
+
+@pytest.mark.parametrize("text, noun", [
+    ("本目录共 56 个包", "包"),
+    ("共 23 份锚点", "锚点"),
+    ("23 项 wheel", "wheel"),
+    ("23 套锁", "锁"),
+    ("23 个文件", "文件"),
+    ("23 条规则", "规则"),
+    ("23 条数", "条数"),
+    ("中文数词：八个包", "包"),
+    ("中文数词：两份锚点", "锚点"),
+])
+def test_number_noun_binding_detects_planted_claims(text: str, noun: str) -> None:
+    """合成样例证明检测能力：这些数字与对应实物不符，必须被抓到。"""
+    actuals = {
+        "锚点": {8, 56, 64, 72}, "包": {2, 48}, "wheel": {12, 13},
+        "锁": {5, 6}, "文件": {5, 191, 192}, "规则": {99, 16},
+        "条数": {99, 16},
+    }
+    violations = _noun_claim_violations(text, actuals)
+    assert violations, f"未命中应报错的数字—名词组合：{text}（{noun}）"
+
+
+# ---------------------------------------------------------------------------
+# 裸文件名识别：放宽后缀 + 大小写不敏感 + 无后缀名
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("token", [
+    "requirements-0.4.10.lock", "foo", "x.tar.gz", "OLD-WHEELS.MD", "release/Makefile",
+])
+def test_bare_filename_tokens_are_detected(token: str) -> None:
+    """漏洞 2 的回归：后缀白名单曾被绕过（少 `.txt`、任意后缀、大写、无后缀）。"""
+    context = f"见 `{token}` 与 {token}"
+    candidates = [m.group(1) for m in PATHISH_RE.finditer(context)]
+    candidates += [m.group(1) for m in BARE_FILE_RE.finditer(context)]
+    candidates += [m.group(1) for m in BARE_NAME_CONTEXT_RE.finditer(context)]
+    assert token in candidates, f"未把 {token!r} 识别为文件名/路径候选"
+    assert _path_like(token), f"{token!r} 未被纳入存在性断言"
