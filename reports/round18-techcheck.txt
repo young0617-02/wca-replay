@@ -36,12 +36,14 @@ PostgreSQL 18 全量（`$env:WCA_TEST_POSTGRES_URL=...; uv run pytest -q`）→ 
 命令统一使用：`--anchor-file anchor-0.4.16-<role>.json --public-key trusted-public-key.pub
 --require-signature`。
 
-仓库外干净 venv（仅装 `dist` wheel + `requirements.lock.txt`）另行复核：16/16 为 `RESULT OK`
-且 `exit_code=0`。原始输出见 `reports/round18-cleanvenv.txt`；复现命令：
+仓库外干净 venv（仅装交付 wheel + `requirements.lock.txt`）另行复核：16/16 为 `RESULT OK`
+且 `exit_code=0`。`dist/wca-replay-0.4.16/` 是仓库侧构建目录（不随交付）；本目录内同字节的
+0.4.16 wheel 与锁在 `release/old-wheels/`。原始输出见 `reports/round18-cleanvenv.txt`；
+历史复现命令（已按本交付目录改写路径，未重跑）：
 
     python -m venv .tmp-venv-0416
-    .tmp-venv-0416\Scripts\python -m pip install --no-deps dist/wca-replay-0.4.16/worktime_compliance_agent-0.4.16-py3-none-any.whl
-    .tmp-venv-0416\Scripts\python -m pip install -r dist/wca-replay-0.4.16/requirements.lock.txt
+    .tmp-venv-0416\Scripts\python -m pip install --no-deps release/old-wheels/worktime_compliance_agent-0.4.16-py3-none-any.whl
+    .tmp-venv-0416\Scripts\python -m pip install -r release/old-wheels/requirements-0.4.16.lock.txt
 
 [clean-wheel-default-flow] verify
   uv run wca-verify "package/clean-wheel-default-flow.zip" --anchor-file "anchor-0.4.16-clean-wheel-default-flow.json" --public-key trusted-public-key.pub --require-signature

@@ -99,6 +99,56 @@ def _round_label(name: str) -> str:
     return match.group(1) if match else "本轮"
 
 
+def _cjk_to_int(text: str) -> int:
+    digits = {ch: i for i, ch in enumerate(CN_NUM)}
+    if text == "十":
+        return 10
+    if "十" in text:
+        head, _, tail = text.partition("十")
+        return (digits[head] if head else 1) * 10 + (digits[tail] if tail else 0)
+    return digits.get(text, 0)
+
+
+def _report_sections(out: Path) -> str:
+    """§十 的 `reports/` 明细：本轮逐条、历史逐条，均由目录扫描得出。"""
+    label = _round_label(out.name)
+    index = _cjk_to_int(label)
+    prefix = f"round{index}-"
+    role_order = ("techcheck", "redphase", "offline-raw", "pg-raw", "cleanvenv")
+
+    def _key(name: str):
+        match = re.match(r"round(\d+)-(.+?)(?:\.txt)?$", name)
+        if not match:
+            return (9999, 999, name)
+        role = match.group(2)
+        priority = role_order.index(role) if role in role_order else 999
+        return (int(match.group(1)), priority, name)
+
+    files = sorted((p.name for p in (out / "reports").iterdir()
+                    if p.is_file() and p.name.startswith("round") and p.suffix == ".txt"),
+                   key=_key)
+    current = [n for n in files if n.startswith(prefix)]
+    history = [n for n in files if not n.startswith(prefix)]
+
+    def _rows(head: str, names: list[str]) -> str:
+        if not names:
+            return ""
+        lines, cur = [], "                             #   " + head
+        cont = "                             #         "
+        for i, name in enumerate(names):
+            token = name + ("、" if i < len(names) - 1 else "")
+            if len(cur) + len(token) > 100 and cur.strip():
+                lines.append(cur)
+                cur = cont + token
+            else:
+                cur += token
+        lines.append(cur)
+        return "\n".join(lines)
+
+    parts = [_rows("本轮：", current), _rows("历史（随本目录交付）：", history)]
+    return "\n".join(part for part in parts if part)
+
+
 def _anchor_counts(anchors: dict, version: str) -> tuple[int, int, int, int]:
     """单包锚点的“本轮/历史”拆分；旧锚点表与 README 共用同一扫描结果。"""
     current = sum(1 for a in anchors["singles"] if a["version"] == version)
@@ -114,11 +164,17 @@ def _read_anchor_doc(path: Path) -> tuple[str, str, dict]:
 
 
 def _handoff_search_dirs(prev: Path, out: Path) -> list[Path]:
-    """锚点候选来源：`--prev` 优先，其余交接目录按修改时间新→旧。"""
+    """锚点候选来源：`--prev` 优先，其余**不晚于 prev** 的交接目录按修改时间新→旧。
+
+    只取不晚于 prev 的目录：重建时“当前交付目录”已存在，若把它也算作来源，
+    同一历史锚点会从“已改写过的副本”再改写一次，导致同一仓库重建结果不可复现。
+    """
     prev_resolved = prev.resolve()
     out_resolved = out.resolve()
+    cutoff = prev.stat().st_mtime
     others = [d for d in (ROOT / "handoff").iterdir()
-              if d.is_dir() and d.resolve() not in (prev_resolved, out_resolved)]
+              if d.is_dir() and d.resolve() not in (prev_resolved, out_resolved)
+              and d.stat().st_mtime <= cutoff]
     others.sort(key=lambda d: d.stat().st_mtime, reverse=True)
     return [prev] + others
 
@@ -405,29 +461,8 @@ def build(args: argparse.Namespace) -> int:
                    for p in packages_json]
     _write(out / "anchor.txt", "\n".join(anchor_txt))
 
-    # 6) 覆盖范围（从实际 SHA256SUMS 读行）
+    # 6) 覆盖范围所需的签名事实（三分类清单在第 12 步前由目录扫描写出）
     rel_facts = docfacts.release_facts(out / "release")
-    coverage_lines = [
-        f"# SHA256SUMS 保护范围（{version}，由实物生成）",
-        "",
-        f"`release/SHA256SUMS` 实际有 **{rel_facts['covered_count']} 行**，"
-        f"`release/SHA256SUMS.sig` 只保护这 {rel_facts['covered_count']} 个文件：",
-        "",
-    ]
-    coverage_lines += [f"{i}. `{row['name']}`" for i, row in
-                       enumerate(rel_facts["covered"], 1)]
-    coverage_lines += [
-        "",
-        "## 不在保护范围的文件",
-        "",
-        "- `release/old-wheels/`、`release/old-packages/` 下的旧物",
-        "- `release/旧发行物-SHA256清单.md`、本说明文件",
-        "- 交接根目录的 `package/*.zip`、`anchor*.json`、`docs/`、`reports/`",
-        "",
-        "这些文件的完整性由各自的包签名、锚点记录或 `交付清单.txt` 的逐文件 SHA-256 负责。",
-    ]
-    _write(out / "release" / "SHA256SUMS-覆盖范围.md",
-           _gen("sha256sums-scope", "\n".join(coverage_lines)))
 
     # 7) 逐包逐文件差异（机制 3）
     diff_md, diff_detail = diff_packages.build_table(prev / "package", new_pkg_dir)
@@ -628,9 +663,10 @@ def build(args: argparse.Namespace) -> int:
     _write(out / "未随交付清单.md", unshipped)
 
     # 11) README / READ-ME-FIRST / KEY-NOTE
+    reports_lines = _report_sections(out)
     _write(out / "README-验收.md",
            build_readme(version, release, rel_facts, packages_json, old, anchors,
-                        diff_md, diff_detail, out.name, prev_version))
+                        diff_md, diff_detail, out.name, prev_version, reports_lines))
     _write(out / "READ-ME-FIRST.txt",
            build_first(version, packages_json, old, anchors, diff_detail, out.name))
     key_note = (prev / "KEY-NOTE.txt").read_text(encoding="utf-8").replace(prev_version, version)
@@ -665,6 +701,9 @@ def build(args: argparse.Namespace) -> int:
         key_note, flags=re.S)
     _write(out / "KEY-NOTE.txt", key_note)
 
+    # 11.5) 覆盖范围：三分节逐文件，全部由目录扫描得出；必须先于交付清单写完
+    write_coverage(out, version)
+
     # 12) 交付清单（排除自身）
     write_manifest(out, version, release, invariants, packages_json)
     errors = check_handoff_refs.check_refs(out)
@@ -673,6 +712,45 @@ def build(args: argparse.Namespace) -> int:
     print(f"OK {out}：{len(packages_json)} 包，文件 "
           f"{sum(1 for p in out.rglob('*') if p.is_file())} 个")
     return 0
+
+
+def write_coverage(out: Path, version: str) -> None:
+    """`release/SHA256SUMS-覆盖范围.md`：按目录扫描分三类逐文件列全。
+
+    1) 在签名保护内：`release/SHA256SUMS` 的每一行；
+    2) 不在签名内、但会被 `交付清单.txt` 记哈希：除清单自身外的全部实有文件；
+    3) 两者都没有：清单自身（`write_manifest` 按设计排除自己）。
+    """
+    signed = [f"release/{row['name']}"
+              for row in docfacts.release_facts(out / "release")["covered"]]
+    # 本文件与 `交付清单.txt` 即将写入；`write_manifest` 的登记口径是“除交付清单自身外
+    # 全部文件”，因此先把两者并入扫描集合，清单写入后三分类仍成立。
+    all_files = sorted(set(p.relative_to(out).as_posix()
+                           for p in out.rglob("*") if p.is_file())
+                       | {"release/SHA256SUMS-覆盖范围.md", "交付清单.txt"})
+    listed = {f for f in all_files if f != "交付清单.txt"}
+    only_listed = [f for f in all_files if f in listed and f not in signed]
+    neither = [f for f in all_files if f not in listed and f not in signed]
+    lines = [
+        f"# SHA256SUMS 保护范围（{version}，由目录扫描生成）",
+        "",
+        "`release/SHA256SUMS` 实有 "
+        f"{len(signed)} 行，`release/SHA256SUMS.sig` 只保护这 {len(signed)} 个文件。",
+        "本文由生成器扫描本目录实际文件、`release/SHA256SUMS` 与 `交付清单.txt` 后生成，",
+        "三类逐文件列全；禁止人工编辑。",
+        "",
+        f"## 一、在签名保护内（`release/SHA256SUMS` 的 {len(signed)} 行，"
+        "`SHA256SUMS.sig` 验签覆盖）",
+        "",
+    ]
+    lines += [f"- `{path}`" for path in signed]
+    lines += ["", "## 二、不在签名内，只在 `交付清单.txt` 记哈希", ""]
+    lines += [f"- `{path}`" for path in only_listed]
+    lines += ["", "## 三、既不在签名内，也不在 `交付清单.txt` 记哈希", ""]
+    lines += [f"- `{path}`（清单按设计不含自身；无签名、无外部哈希锚）"
+              for path in neither]
+    _write(out / "release" / "SHA256SUMS-覆盖范围.md",
+           _gen("sha256sums-scope", "\n".join(lines)))
 
 
 def write_unshipped(out: Path) -> str:
@@ -705,7 +783,7 @@ def write_unshipped(out: Path) -> str:
 
 def build_readme(version: str, release: dict, rel: dict, packages: list[dict],
                  old: dict, anchors: dict, diff_md: str, diff_detail: list[str],
-                 handoff_name: str, prev_version: str) -> str:
+                 handoff_name: str, prev_version: str, reports_lines: str) -> str:
     current_count, history_count, current_combined, history_combined = \
         _anchor_counts(anchors, version)
     rp_unchanged = not any("policies/RULE-PACK.md" in item for item in diff_detail)
@@ -758,7 +836,13 @@ def build_readme(version: str, release: dict, rel: dict, packages: list[dict],
 `src/` 源码随 wheel 提供（可用于 diff 复核），仓库内测试/脚本不随交付。
 文档里出现的仓库路径，要么在本目录内真实存在，要么逐条列在
 [未随交付清单.md](未随交付清单.md)（该表由扫描器生成，覆盖 `docs/ scripts/ tests/ src/`
-`data/ var/ reports/ rules/ tools/ dist/ handoff/` 全部前缀）。
+`data/ var/ reports/ rules/ tools/ dist/ handoff/` 全部前缀）。其中 `docs/`、`reports/`
+在本目录内各带一部分实物（可直接打开）；`src/` 随 wheel 提供；`scripts/`、`tests/`、
+`data/`、`var/`、`rules/`、`tools/`、`dist/`、`handoff/` 属**仓库侧，不随交付**。
+
+> **同名文件提示（先读）**：本目录有**两个同名 `README-验收.md`**。被签名的是
+> `release/README-验收.md`（在 `release/SHA256SUMS` 的 {rel['covered_count']} 行内）；**根目录这份 `README-验收.md`
+> 不在签名范围**，其完整性只由 `交付清单.txt` 的记录负责。核对签名时勿取错文件。
 
 {header}
 
@@ -911,7 +995,7 @@ py -3.12 -m venv .venv-clean
 交接目录：{handoff_name}/
   README-验收.md / READ-ME-FIRST.txt / KEY-NOTE.txt / 交付清单.txt
   未随交付清单.md            # 扫描器生成的仓库路径全表（验算不需要）
-  已知残留与未闭合项.md      # 不可自证的历史声明 + 四项流程/法律未闭合
+  已知残留与未闭合项.md      # 不可自证的历史声明 + 四项流程/法律未闭合 + 验收结论边界
   RULE-PACK.md / OLD-WHEELS.md / OLD-ANCHORS.md
   anchor.json / anchor.txt   # 汇总记录，无签名保护
   anchor-{version}-<role>.json   # {len(packages)} 个新包单包锚点（file 指向 package/）
@@ -921,7 +1005,8 @@ py -3.12 -m venv .venv-clean
   package/                   # {len(packages)} 个 {version} 包
   release/                   # {version} 发行物 + old-wheels/ + old-packages/
   docs/                      # 签名方案 / 安全与证据链现状 / 冻结版本说明 / 护栏豁免表
-  reports/                   # 历史报告 + round19-techcheck.txt + round17-diff.md
+  reports/                   # 历史报告 + 原始输出 + round17-diff.md
+{reports_lines}
 ```
 
 ## 十一、运行环境与默认输出路径
@@ -942,16 +1027,16 @@ py -3.12 -m venv .venv-clean
 | 无签名 v2 包 → `RESULT PARTIAL` exit 2 | 可 | 用 {version} wheel 导出无钥包后验算 |
 | 跨后端（SQLite vs PostgreSQL 18）五摘要相同 | 需自备 PG 18 | 交付不含数据库 |
 | 离线/PG 测试计数 | **不可** | 测试不随交付；计数只在 `reports/round19-techcheck.txt` |
-| `reports/` 中对 `dist/` 的引用 | 出处引用 | 历史发行目录不随交付，不影响验算 |
+| `reports/` 中对 `dist/` 的引用 | 出处引用 | `dist/` 为**仓库侧，不随交付**；不影响验算 |
 
-## 十三、`SHA256SUMS` 只保护 {rel['covered_count']} 个文件
+## 十三、`SHA256SUMS` 只保护 `release/` 下的 {rel['covered_count']} 个文件
 
-`release/SHA256SUMS` 实有 {rel['covered_count']} 行，`SHA256SUMS.sig` 只保护这
-{rel['covered_count']} 个顶层文件：{('、'.join('`' + row['name'] + '`' for row in rel['covered']))}。
-**不在保护范围**：`release/old-wheels/`、`release/old-packages/`、
-`release/旧发行物-SHA256清单.md`、`release/SHA256SUMS-覆盖范围.md` 本身，以及交接根目录的
-`package/*.zip`、`anchor*.json`、`docs/`、`reports/`。逐条见
-`release/SHA256SUMS-覆盖范围.md`（同样由实物生成）。
+`release/SHA256SUMS` 实有 {rel['covered_count']} 行，`release/SHA256SUMS.sig` 只保护这 {rel['covered_count']} 个文件，逐条写全路径：
+
+{chr(10).join(f"{i}. `release/{row['name']}`" for i, row in enumerate(rel['covered'], 1))}
+
+**不在保护范围**的文件由目录扫描逐文件分类，三类（签名内 / 只在 `交付清单.txt` 记哈希 /
+两者都没有）全表见 `release/SHA256SUMS-覆盖范围.md`；以该文件为准，本文不手写清单。
 
 ## 十四、文档事实单一来源
 
