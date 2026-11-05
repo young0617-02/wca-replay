@@ -80,3 +80,31 @@ def test_freeze_note_points_to_0412_and_explains_0411() -> None:
     assert "0.4.12" in note
     assert "0.4.11" in note
     assert "未对外" in note
+
+
+# 第二轮补正 3：交接文档里出现的仓库路径，必须已交付或已列入未随交付清单。
+def test_handoff_repo_refs_are_listed_as_unshipped() -> None:
+    if not HANDOFF.is_dir():
+        pytest.skip("第十四轮交接目录尚未生成")
+    import sys
+
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from check_handoff_refs import check_refs  # noqa: PLC0415
+
+    errors = check_refs(HANDOFF)
+    assert errors == [], "文档引用的仓库路径未在未随交付清单列明：\n" + "\n".join(errors)
+
+
+# 第二轮补正 1：SHA256SUMS 的实际行数必须与“覆盖范围”说明一致，且不重签。
+def test_shasums_scope_declaration_matches_real_file() -> None:
+    if not HANDOFF.is_dir():
+        pytest.skip("第十四轮交接目录尚未生成")
+    sums = (HANDOFF / "release" / "SHA256SUMS").read_text(encoding="utf-8")
+    lines = [ln for ln in sums.splitlines() if ln.strip()]
+    scope = (HANDOFF / "release" / "SHA256SUMS-覆盖范围.md").read_text(encoding="utf-8")
+    assert len(lines) == 5
+    for line in lines:
+        name = line.split(None, 1)[1].strip()
+        assert (HANDOFF / "release" / name).is_file(), f"清单条目不存在：{name}"
+    assert "只有下列 **5 行**" in scope  # 覆盖范围说明必须如实写 5 个
+    assert "不在 `SHA256SUMS.sig` 保护范围内" in scope

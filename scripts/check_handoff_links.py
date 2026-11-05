@@ -1,4 +1,4 @@
-"""交接目录自检：确认 README 引用的每个相对路径都真实存在。
+"""交接目录自检：确认 README 引用的每个相对路径都真实存在，且文内仓库路径已列明。
 
 用法：
     uv run python scripts/check_handoff_links.py handoff/20261104-第十四轮整改
@@ -14,6 +14,14 @@ from pathlib import Path
 
 LINK_RE = re.compile(r"\]\(([^)]+)\)")
 WHEEL_RE = re.compile(r"`(release/old-wheels/[^`]+\.whl)`")
+
+
+def _check_refs(root: Path) -> list[str]:
+    """复用仓库路径扫描器；脚本与测试都随仓库存在，故按同目录导入。"""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from check_handoff_refs import check_refs  # noqa: PLC0415
+
+    return check_refs(root)
 
 
 def check(root: Path) -> list[str]:
@@ -42,6 +50,7 @@ def check(root: Path) -> list[str]:
         for rel in WHEEL_RE.findall(old_text):
             if not (root / rel).is_file():
                 errors.append(f"OLD-WHEELS.md 引用的 wheel 不存在：{rel}")
+    errors += _check_refs(root)
     return errors
 
 
@@ -55,9 +64,10 @@ def main(argv: list[str]) -> int:
         for msg in errors:
             print(f"FAIL {msg}")
         return 1
-    print(f"OK {root}：README 相对路径与旧 wheel 清单全部可达")
+    print(f"OK {root}：README 相对路径可达，文档内仓库路径均已交付或已列明")
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv))
+
