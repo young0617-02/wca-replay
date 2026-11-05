@@ -93,6 +93,12 @@ def _readme(version: str, commit: str, wheel: str, build_time: str) -> str:
 本目录用于**不拿源码仓库**的第三方复核：装 wheel + 锁定依赖，再对你手上的举证包
 跑 `verify` 与 `replay`。发行物本身不含源码仓库、私钥、数据库或样例数据。
 
+**PoC 边界（先读）**：本交付是**验证工具 + 8 个样例包**的 PoC，**不构成合规结论**，
+**不可作为生产就绪依据**。四项未闭合：**信任根**（包外固定公钥需独立渠道交付）、
+**真实具名确认**（样例为合成数据、无真实具名工具人签认）、**法律文本充分性**（条文为
+对外精简版，不替代律师判断）、**数据合规**（未做真实个人信息处理评估）。详见
+`docs/安全与证据链现状.md` 第 3 节。
+
 - 版本：`{version}`；构建时间：`{build_time}`；git commit：`{commit}`
 - wheel：`{wheel}`
 - Python 要求：`>=3.12`（本项目在 3.12.8 上构建与实测）
@@ -155,8 +161,10 @@ def _readme(version: str, commit: str, wheel: str, build_time: str) -> str:
 - **计数口径**：`manifest.counts` 新增 `findings_total` / `findings_batched` / `issues_total`；
   三处计数（manifest、`policies/CONFIDENCE.md`、`未覆盖清单.md`）必须一致。统计重复类问题时
   不要直接数 `findings.csv` 行数，见 README“如何正确统计重复类问题”。
-- **规则包 v6**：0.4.8 起默认 `rp-2026.11.gd-pilot-standard.v6`（切换日 2026-11-04，
-  v5/v4 仍可用显式 `WCA_RULE_PACK` 选择与回放；v5 旧包继续配 0.4.7 wheel，v6 新包配 0.4.8 wheel。
+- **规则包 v6**：0.4.8 起默认 `rp-2026.11.gd-pilot-standard.v6`（切换日 2026-11-04；
+  v5/v4 仍可用显式 `WCA_RULE_PACK` 选择与回放）。包内 `manifest.producer.version` 必须与
+  你所装 wheel 的版本一致；**版本不一致即 `PRODUCER FAIL`（exit 1）**，应按
+  `OLD-WHEELS.md` 换用对应版本 wheel，不要按“v5/v6 固定配对某版本”推断。
 - **跨后端可复算**：同一输入用 SQLite 或 PostgreSQL 18 导出，`conclusion_digest`、
   `evidence_digest`、`inputs_digest`、`input_fingerprint`、`artifacts_digest` 逐字节相同。
   导出侧行序全部在 Python 显式排序，不依赖 SQL 的 NULL 顺序或文本 collation；回归用例
