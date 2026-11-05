@@ -147,7 +147,11 @@ def _map_token(token: str, base: Path, facts: dict) -> str:
 def _argv(command: str, base: Path) -> list[str]:
     facts = _facts(base, _role_of(command, base))
     tokens = shlex.split(command.replace("\\", "/"), posix=True)
-    head, rest = tokens[0], [_map_token(tok, base, facts) for tok in tokens[1:]]
+    head, rest = tokens[0], tokens[1:]
+    # 文档命令通常写 `wca replay <包> ...`；子命令名不是参数，避免重复传入。
+    if rest and rest[0] == "replay":
+        rest = rest[1:]
+    rest = [_map_token(tok, base, facts) for tok in rest]
     # `python -m src.verify_pkg` 不执行 main()；按 console entry point 的方式调用。
     if "wca-verify" in head:
         return [sys.executable, "-c",
@@ -200,6 +204,27 @@ def test_documented_commands_execute_as_written(doc_index: int) -> None:
     assert results, f"{doc} 中未抽到任何 wca-verify/wca replay 示例命令（机制 2 失去覆盖）"
     for result in results:
         _assert_matches(result)
+
+
+def test_missing_evidence_gate_yields_partial_exit_2() -> None:
+    """A1 的运行时红线：声称 `RESULT OK` 的命令若缺 `--expect-evidence-digest`，
+    真实结果只能是 `RESULT PARTIAL` exit 2。这条测试证明“文档写 OK 却不给该参数”必错。"""
+    base = handoff_dir()
+    facts = _facts(base, "engine-only")
+    argv = [sys.executable, "-c",
+            "import sys; from src.verify_pkg import main; sys.exit(main(sys.argv[1:]))",
+            facts["package"].as_posix(),
+            "--public-key", facts["public_key"].as_posix(),
+            "--expect-anchor", facts["anchor"],
+            "--expect-package-sha256", facts["package_sha256"],
+            "--expect-artifacts-digest", facts["artifacts_digest"]]
+    proc = subprocess.run(argv, cwd=ROOT, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
+    assert proc.returncode == 2, (
+        f"缺 --expect-evidence-digest 竟未降级为 PARTIAL：rc={proc.returncode}\n"
+        f"{(proc.stdout or '') + (proc.stderr or '')}")
+    assert "RESULT PARTIAL" in (proc.stdout or ""), (
+        "缺 --expect-evidence-digest 时必须输出 RESULT PARTIAL：\n" + (proc.stdout or ""))
 
 
 def test_commands_claiming_ok_carry_all_five_gates() -> None:

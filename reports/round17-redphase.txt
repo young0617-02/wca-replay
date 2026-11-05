@@ -31,3 +31,14 @@ FAILED tests/test_doc_commands.py::test_commands_claiming_ok_carry_all_five_gate
     wca replay <包>.zip --public-key <包外固定公钥> --expect-anchor "<四/五段>" --require-signature
 assert not ['handoff\\20261104-第十六轮整改\\docs\\安全与证据链现状.md: 缺 [\'--expect-evidence-digest\']\n  wca-verify <包>.zip --public-key <包外...'--expect-evidence-digest\']\n  wca replay <包>.zip --public-key <包外固定公钥> --expect-anchor "<四/五段>" --require-signature']
 1 failed in 0.17s
+
+=== 运行时红线（A1 对照）===
+对 0.4.15 engine-only 包执行“旧文档命令”（只给四类外部门禁，缺 --expect-evidence-digest）：
+  wca-verify package/engine-only.zip --public-key trusted-public-key.pub
+    --expect-anchor "<五段>" --expect-package-sha256 <包SHA> --expect-artifacts-digest <artifacts>
+实际输出末两行：
+  ANCHOR CHECK OK
+  RESULT PARTIAL —— RESULT PARTIAL：内容检查通过，但缺少/未通过 外部 evidence_digest
+实际退出码：2
+结论：旧文档写“RESULT OK，rc=0”与实测不符；补齐 --expect-evidence-digest 后才是 RESULT OK exit 0。
+该对照已固化为 tests/test_doc_commands.py::test_missing_evidence_gate_yields_partial_exit_2。

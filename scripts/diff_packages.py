@@ -135,9 +135,14 @@ def _classify(name: str, old: bytes, new: bytes) -> list[str]:
     return sorted(reasons) if reasons else ["内容变化（需人工说明）"]
 
 
+def _role_of(stem: str) -> str:
+    """`confirmed-0.4.14` 与 `confirmed` 是同一角色的新旧命名。"""
+    return re.sub(r"-0\.4\.\d+$", "", stem)
+
+
 def build_table(old_dir: Path, new_dir: Path) -> tuple[str, list[str]]:
-    old_files = {p.stem: p for p in old_dir.glob("*.zip")}
-    new_files = {p.stem: p for p in new_dir.glob("*.zip")}
+    old_files = {_role_of(p.stem): p for p in old_dir.glob("*.zip")}
+    new_files = {_role_of(p.stem): p for p in new_dir.glob("*.zip")}
     if set(old_files) != set(new_files):
         raise SystemExit(f"新旧包 role 不一致：仅旧 {sorted(set(old_files) - set(new_files))}；"
                          f"仅新 {sorted(set(new_files) - set(old_files))}")
@@ -145,6 +150,7 @@ def build_table(old_dir: Path, new_dir: Path) -> tuple[str, list[str]]:
     detail: list[list[str]] = []
     invariant_rows: list[list[str]] = []
     reason_counts: dict[str, int] = {}
+    unchanged_by_role: dict[str, set[str]] = {}
     for role in sorted(new_files):
         old_members = _read_members(old_files[role])
         new_members = _read_members(new_files[role])
@@ -166,6 +172,9 @@ def build_table(old_dir: Path, new_dir: Path) -> tuple[str, list[str]]:
                 reason_counts[item] = reason_counts.get(item, 0) + 1
             detail.append([role, name, "、".join(kind), _explain(kind, name)])
         same = [key for key in _DIGEST_KEYS if old_d[key] == new_d[key]]
+        unchanged_by_role[role] = {
+            name for name in set(old_members) & set(new_members)
+            if old_members[name] == new_members[name]}
         rows.append([
             role,
             f"`{str(old_d['artifacts_digest'])[:12]}…` → `{str(new_d['artifacts_digest'])[:12]}…`",
@@ -199,6 +208,15 @@ def build_table(old_dir: Path, new_dir: Path) -> tuple[str, list[str]]:
         "| --- | --- |",
     ]
     body += ["| " + " | ".join(row) + " |" for row in invariant_rows]
+    common = set.intersection(*unchanged_by_role.values()) if unchanged_by_role else set()
+    body += [
+        "",
+        f"### 逐字节未变的成员（在全部 {len(unchanged_by_role)} 个包内都未变）",
+        "",
+        "| 包内文件 | 包数 |",
+        "| --- | --- |",
+    ]
+    body += [f"| `{name}` | {len(unchanged_by_role)} |" for name in sorted(common)]
     body += [
         "",
         "### 三类原因汇总（按文件计数）",

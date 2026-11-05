@@ -117,15 +117,15 @@ def build(args: argparse.Namespace) -> int:
     shutil.copytree(dist, out / "release")
     for name in ("old-wheels", "old-packages"):
         shutil.copytree(prev / "release" / name, out / "release" / name)
-    shutil.copy2(dist / release["wheel"], out / "release" / "old-wheels" / release["wheel"])
-    shutil.copy2(dist / "requirements.lock.txt",
-                 out / "release" / "old-wheels" / "requirements-0.4.14.lock.txt")
+    prev_release = prev / "release"
+    prev_version = json.loads((prev_release / "RELEASE.json").read_text(encoding="utf-8"))["version"]
+    prev_wheel = json.loads((prev_release / "RELEASE.json").read_text(encoding="utf-8"))["wheel"]
+    shutil.copy2(prev_release / prev_wheel, out / "release" / "old-wheels" / prev_wheel)
+    shutil.copy2(prev_release / "requirements.lock.txt",
+                 out / "release" / "old-wheels" / f"requirements-{prev_version}.lock.txt")
     for role, _key, filename, _desc in ROLES:
         shutil.copy2(prev / "package" / filename,
-                     out / "release" / "old-packages" / f"{role}-0.4.14.zip")
-    shutil.copy2(dist / release["wheel"], out / "release" / "old-packages" / release["wheel"])
-    shutil.copy2(dist / "requirements.lock.txt",
-                 out / "release" / "old-packages" / "requirements-0.4.14.lock.txt")
+                     out / "release" / "old-packages" / f"{role}-{prev_version}.zip")
 
     # 3) 公钥、旧锚点
     for name in ("trusted-public-key.pub", "release-public-key.pub"):
@@ -135,9 +135,10 @@ def build(args: argparse.Namespace) -> int:
     shutil.copy2(prev / "anchor.json", out / "anchor-0.4.14.json")
 
     # 4) 文档与报告（仓库内为唯一来源）
+    (out / "docs").mkdir()
     for name in ("签名方案.md", "安全与证据链现状.md", "冻结版本说明.md"):
         shutil.copy2(ROOT / "docs" / name, out / "docs" / name)
-    shutil.copy2(ROOT / "RULE-PACK.md", out / "RULE-PACK.md")
+    shutil.copy2(ROOT / "policies" / "RULE-PACK.md", out / "RULE-PACK.md")
     (out / "reports").mkdir()
     for path in sorted((ROOT / "reports").iterdir()):
         if path.suffix == ".md" or path.name.startswith("round"):
@@ -232,10 +233,11 @@ def build(args: argparse.Namespace) -> int:
         "",
         "这些文件的完整性由各自的包签名、锚点记录或 `交付清单.txt` 的逐文件 SHA-256 负责。",
     ]
-    _write(out / "release" / "SHA256SUMS-覆盖范围.md", "\n".join(coverage_lines))
+    _write(out / "release" / "SHA256SUMS-覆盖范围.md",
+           _gen("sha256sums-scope", "\n".join(coverage_lines)))
 
     # 7) 逐包逐文件差异（机制 3）
-    diff_md, _detail = diff_packages.build_table(prev / "package", new_pkg_dir)
+    diff_md, diff_detail = diff_packages.build_table(prev / "package", new_pkg_dir)
     _write(out / "reports" / "round17-diff.md",
            f"# 0.4.14 → {version} 包内工件差异（机制 3，逐包逐文件生成）\n\n"
            "> 由 `scripts/diff_packages.py` 生成。禁止改写成“仅因版本号”。\n\n" + diff_md)
@@ -307,8 +309,9 @@ def build(args: argparse.Namespace) -> int:
 
     # 11) README / READ-ME-FIRST / KEY-NOTE
     _write(out / "README-验收.md", build_readme(version, release, rel_facts, packages_json,
-                                                old, anchors, diff_md))
-    _write(out / "READ-ME-FIRST.txt", build_first(version, packages_json, old, anchors))
+                                                old, anchors, diff_md, diff_detail))
+    _write(out / "READ-ME-FIRST.txt",
+           build_first(version, packages_json, old, anchors, diff_detail))
     key_note = (prev / "KEY-NOTE.txt").read_text(encoding="utf-8").replace("0.4.14", version)
     _write(out / "KEY-NOTE.txt", key_note)
 
@@ -347,16 +350,29 @@ def write_unshipped(out: Path) -> str:
         else:
             lines += [f"- `{ref}`" for ref in refs_for]
         lines.append("")
-    return "\n".join(lines)
+    return _gen("unshipped", "\n".join(lines))
 
 
 def build_readme(version: str, release: dict, rel: dict, packages: list[dict],
-                 old: dict, anchors: dict, diff_md: str) -> str:
+                 old: dict, anchors: dict, diff_md: str, diff_detail: list[str]) -> str:
+    rp_unchanged = not any("policies/RULE-PACK.md" in item for item in diff_detail)
+    ts_files = sorted({item.split(":", 1)[0].split("/", 1)[1] for item in diff_detail
+                       if item.startswith("confirmed/") and "真实时间戳" in item
+                       and "内容变化" not in item})
+    diff_conclusion = (
+        ("`policies/RULE-PACK.md` 在全部 8 个包内逐字节未变（上表“逐字节未变的成员”列出）；"
+         if rp_unchanged else "`policies/RULE-PACK.md` 本轮有变化（见上表）；")
+        + "真实变化的是 "
+        + ("、".join(f"`{n}`" for n in ts_files) if ts_files else "（无时间戳文件）")
+        + " 的时间戳，以及包内 `CONFIDENCE.md` 的版本串；其余为版本号文本、派生哈希与文档更新。"
+        "不得概括为“仅因版本号”。")
     rows = [[f"`{p['file'].split('/')[-1]}`", f"{p['bytes']:,}", f"`{p['sha256']}`",
              f"`{p['conclusion_digest'][:8]}…`", f"`{p['evidence_digest'][:8]}…`",
              f"`{p['inputs_digest'][:8]}…`", f"`{p['input_fingerprint'][:8]}…`"]
             for p in packages]
     counts = packages[1]["counts"]
+    old_versions = sorted({p["version"] for p in old["packages"] if p.get("version")})
+    old_versions_text = " / ".join(old_versions)
     header = _gen("handoff-header", "\n".join([
         "本目录实测事实（构建时生成，禁止人工编辑）：",
         "",
@@ -420,18 +436,18 @@ fingerprint `{packages[1]['input_fingerprint'][:8]}…`（实测）。
 
 ```powershell
 # 1) 建干净环境（仅本目录 wheel + 锁定依赖）
-py -3.12 -m venv .venv-0415
-.venv-0415\\Scripts\\python -m pip install --require-hashes -r release\\requirements.lock.txt
-.venv-0415\\Scripts\\python -m pip install --no-deps release\\{release['wheel']}
+py -3.12 -m venv .venv-clean
+.venv-clean\\Scripts\\python -m pip install --require-hashes -r release\\requirements.lock.txt
+.venv-clean\\Scripts\\python -m pip install --no-deps release\\{release['wheel']}
 
 # 2) 验一个包（锚点、包 SHA、工件摘要、证据摘要一次给全）
-.venv-0415\\Scripts\\wca-verify.exe package\\engine-only.zip `
+.venv-clean\\Scripts\\wca-verify.exe package\\engine-only.zip `
   --anchor-file anchor-{version}-engine-only.json `
   --public-key trusted-public-key.pub
 # 期望：RESULT OK，exit 0
 
 # 3) 回放同一个包
-.venv-0415\\Scripts\\wca.exe replay package\\engine-only.zip `
+.venv-clean\\Scripts\\wca.exe replay package\\engine-only.zip `
   --anchor-file anchor-{version}-engine-only.json `
   --public-key trusted-public-key.pub
 # 期望：RESULT OK，exit 0
@@ -462,9 +478,7 @@ py -3.12 -m venv .venv-0415
 
 {diff_md}
 
-> 结论：`RULE-PACK.md` 若在某一包里逐字节未变，就不是“版本号更新导致 artifacts 变化”的证据；
-> 真正变化的是包内 `CONFIDENCE.md` 版本串与 `confirmed` 包
-> `conclusions_final.csv`/`responsibility.json` 的时间戳。逐条以上表为准。
+> 结论（由上表生成，不是手写）：{diff_conclusion}
 
 ## 五、计数口径
 
@@ -497,7 +511,7 @@ py -3.12 -m venv .venv-0415
 ## 九、旧包、旧 wheel 与旧锚点（本目录内可复现）
 
 - **旧包实物**：`release/old-packages/` 实有 **{len(old['packages'])} 个** zip
-  （0.4.10 / 0.4.11 / 0.4.13 / 0.4.14 八个角色），逐文件哈希见 `交付清单.txt`。
+  （{old_versions_text} 八个角色），逐文件哈希见 `交付清单.txt`。
 - **旧 wheel**：`release/old-wheels/` 实有 **{len(old['wheels'])} 个** wheel 与
   **{len(old['locks'])} 个**依赖锁，清单见 `OLD-WHEELS.md`（由实物生成）。
 - **旧锚点**：根目录实有单包锚点 **{len(anchors['singles'])} 个**、组合记录
@@ -561,18 +575,30 @@ handoff/20261104-第十七轮整改/
 """
 
 
-def build_first(version: str, packages: list[dict], old: dict, anchors: dict) -> str:
+def build_first(version: str, packages: list[dict], old: dict, anchors: dict,
+                diff_detail: list[str]) -> str:
+    # 第 4 条完全由差异表的实测结果拼出：未变/时间戳变化都不是手写的。
+    rp_unchanged = not any("policies/RULE-PACK.md" in item for item in diff_detail)
+    ts_files = sorted({item.split(":", 1)[0].split("/", 1)[1] for item in diff_detail
+                       if item.startswith("confirmed/") and "真实时间戳" in item
+                       and "内容变化" not in item})
+    if rp_unchanged:
+        rp_text = (f"`policies/RULE-PACK.md` 在 {len(packages)} 个包内逐字节未变"
+                   "（差异表不出现该成员）")
+    else:
+        rp_text = "`policies/RULE-PACK.md` 本轮发生变化，见差异表"
+    ts_text = ("、".join(f"`{name}`" for name in ts_files) if ts_files else "（无）")
     return _gen("read-me-first", "\n".join([
         f"{version} 交付验收包（第十七轮整改）——先读这一页",
         "",
-        f"1) 先读 README-验收.md §0（演示必须用 v3 包）与 §二（三步先跑通）；",
+        "1) 先读 README-验收.md §0（演示必须用 v3 包）与 §二（三步先跑通）；",
         f"2) 包在 package/（{len(packages)} 个），单包锚点 anchor-{version}-<role>.json，",
         "   公钥 trusted-public-key.pub；验算与回放只依赖本目录；",
         f"3) 旧物：old-wheels {len(old['wheels'])}、old-packages {len(old['packages'])}、",
         f"   旧锚点 {len(anchors['singles'])} 个，均在目录内可复核；",
-        "4) artifacts_digest 的变化原因见 README §四（逐包逐文件），",
-        "   不要沿用旧说法“仅因版本号”：RULE-PACK.md 在 part 包里逐字节未变，",
-        "   真正变化的还有 confirmed 包 conclusions_final.csv / responsibility.json 的时间戳。",
+        "4) artifacts_digest 的变化原因见 README §四（逐包逐文件），不要概括为“仅因版本号”：",
+        f"   {rp_text}；confirmed 包 {ts_text} 的时间戳真实变化；",
+        "   其余变化为版本号文本、派生哈希与包内文档更新。",
     ]))
 
 

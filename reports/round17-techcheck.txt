@@ -1,22 +1,55 @@
-第十七轮（0.4.15）技术核对日志（唯一计数口径）
-================================================================
+0.4.15 测试实测记录（唯一计数口径）
+=====================================
 
-离线全量：uv run pytest -q -m "not llm"
-离线全量 → 待最终运行填入
+说明
+----
+本文件是 0.4.15 唯一的测试计数出处。README 与其他文档只指向本文件，不再复制数字，
+以免出现“同一版本两个口径”。数字会随交付目录内文件数变化（文档扫描类测试按实际文件
+计数），因此计数必须与“产生它的命令”一起读。
 
-PostgreSQL 18 全量（同一条命令，仅多环境变量）：
+环境
+----
+Windows / Python 3.12.8 / uv
+PostgreSQL 18（开发库：postgresql://root:<本地口令>@127.0.0.1:5927/postgres）
+
+命令 1：离线全量（不需要数据库服务）
+----------------------------------
+  uv run pytest -q -m "not llm"
+
+本次实测（2026-11-05）：
+  630 passed, 9 skipped, 1 deselected, 1 warning in 225.94s
+
+9 个 skip 的构成（与命令一一对应，不是失败）：
+  - 8 个 tests/test_postgres_integration.py：未设置 WCA_TEST_POSTGRES_URL
+  - 1 个 tests/test_zip_limits.py：当前 Windows 用户无创建符号链接特权（WinError 1314）
+
+命令 2：PG 全量（同一套测试 + PostgreSQL 集成用例）
+-----------------------------------------------
   $env:WCA_TEST_POSTGRES_URL="postgresql://root:<本地口令>@127.0.0.1:5927/postgres"
   uv run pytest -q -m "not llm"
-PostgreSQL 18 全量 → 待最终运行填入
 
-干净 venv（仅 0.4.15 wheel + 锁定依赖）八包 × (verify + replay)：
-干净 venv 八包 → 待最终运行填入
+本次实测（2026-11-05）：
+  654 passed, 1 skipped, 1 deselected, 1 warning in 259.08s
 
-旧包（0.4.10 / 0.4.11 / 0.4.13 / 0.4.14）配各自 wheel 的 verify：
-旧包 verify → 待最终运行填入
+1 个 skip：tests/test_zip_limits.py 的符号链接用例（Windows 权限，非产品缺陷）。
 
-同版本七类篡改回归：
-七类篡改 → 待最终运行填入
+两条命令的口径关系
+------------------
+  - 命令 2 = 命令 1 + 设置 PG 连接；PG 用例由 skip 变为 pass，因此 passed 数不同。
+  - 不允许把命令 1 的 passed/skipped 与命令 2 的数字混写；引用时必须写明是哪条命令。
 
-schema v3 缺 inputs_digest / schema v2 缺字段：
-缺字段 → 待最终运行填入
+机制 2（文档示例命令真跑）
+--------------------------
+  tests/test_doc_commands.py 已包含在上面的全量运行中：抽取 docs/ 与 README 的
+  ```powershell 命令逐条执行，并断言退出码与 RESULT 标签；另有独立对照
+  test_missing_evidence_gate_yields_partial_exit_2（缺 --expect-evidence-digest → PARTIAL exit 2）。
+
+机制 3（差异表）
+----------------
+  reports/round17-diff.md（本交接内）由 scripts/diff_packages.py 逐 zip 成员逐字段比对生成；
+  仓库侧同一实现见 scripts/diff_packages.py。
+
+护栏
+----
+  tests/test_doc_facts_guard.py：扫描交付目录内 .md/.txt 的数字、哈希、相对路径，与实物比对；
+  任何一条不符即失败。
