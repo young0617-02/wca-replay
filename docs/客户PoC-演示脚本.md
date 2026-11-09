@@ -2,7 +2,7 @@
 
 > 用途：销售/售前照着念、照着敲。全程在一台客户能看见的 Windows 机器上操作，不播放 PPT。
 > 依据：`handoff/20261104-第十九轮整改/` 内的 `README-验收.md`、`READ-ME-FIRST.txt`、`KEY-NOTE.txt`、
-> `已知残留与未闭合项.md`，以及仓库 `docs/口径声明.md`、`docs/安全与证据链现状.md`。
+> `已知残留与未闭合项.md`，以及仓库 `docs/口径声明.md`（演示机若无仓库，需随包外附件提供）、`docs/安全与证据链现状.md`。
 > 版本：0.4.17 冻结版，8 个样例包。**本脚本不新增任何流程，只把已交付的能力演出来。**
 
 **先说一句必须随每份材料带走的边界：**
@@ -150,11 +150,11 @@ RESULT OK
 
 ## 3. 现场篡改：让命令自己变 `RESULT FAIL`（5 分钟）
 
-**演什么**：复制一个包到临时目录，解开，**让客户自己选改一条结论、或删一个输入文件**，再跑同一条验算命令。
+**演什么**：复制一个包到临时目录，解开，**让客户自己选改一个规则编号（`findings.csv` 里会有 3 行被替换）、或删一个输入文件**，再跑同一条验算命令。
 
 > 操作提示：这一段故意不传外部包 SHA。因为只要 zip 字节变了，包 SHA 会**最先**报错；那样客户只看到“包哈希不对”，看不到里面哪一项被改。用目录形态 + 其余四项门禁，能看清内部检查具体点名的文件。
 
-### 3.1 改一条结论
+### 3.1 改一个规则编号（会动 3 行）
 
 ```powershell
 $demo = "$env:TEMP\wca-demo"
@@ -163,7 +163,7 @@ New-Item -ItemType Directory -Force $demo | Out-Null
 Copy-Item package\engine-only.zip "$demo\engine-only-conclusion.zip" -Force
 Expand-Archive "$demo\engine-only-conclusion.zip" "$demo\engine-only-conclusion" -Force
 
-# 把第一条结论的规则编号 QUAL-02 改成 QUAL-03（只改一个词，包内哈希就对不上了）
+# 把 findings.csv 里的规则编号 QUAL-02 全部改成 QUAL-03（实测替换 3 处：第 2、3、11 行；包内哈希就对不上了）
 $p = "$demo\engine-only-conclusion\findings.csv"
 (Get-Content $p -Raw -Encoding UTF8).Replace('QUAL-02','QUAL-03') |
   Set-Content $p -Encoding UTF8 -NoNewline
@@ -193,7 +193,7 @@ RESULT FAIL —— ARTIFACT FAIL 工件哈希不一致：findings.csv
 
 **说哪句话**：
 
-> 我只改了 `findings.csv` 里的一个词，命令自己就变红了，而且**点名是哪张表**。它没有执行包里的脚本，也没有联网问我们；它比的是包里登记的哈希。
+> 我把 `findings.csv` 里的 `QUAL-02` 规则编号改成了 `QUAL-03`（这条命令会替换全部 3 处，分别在第 2、3、11 行），命令自己就变红了，而且**点名是哪张表**。它没有执行包里的脚本，也没有联网问我们；它比的是包里登记的哈希。
 
 ### 3.2 删一个输入文件（更直观，建议现场演这个）
 
@@ -228,7 +228,7 @@ RESULT FAIL —— INPUTS COMPLETENESS FAIL ... 缺少 inputs/leave.csv
 
 > 注意，前面十几项都还是绿的：工件没坏、结论摘要没坏、审计链也完整；**只有“输入完整性”这一项红了，而且直接告诉您缺的是 `leave.csv`**。
 >
-> 这就是我们要的效果：**不是一句“验不过”，而是能指出哪一项不对、缺了哪个文件**。如果只删一条输入还想蒙过去，`INPUTS DIGEST` 也会接着报不一致。
+> 这就是我们要的效果：**不是一句“验不过”，而是能指出哪一项不对、缺了哪个文件**。它在 `INPUTS COMPLETENESS` 这一项就直接停下（早退）；后面的 `INPUTS DIGEST` 显示 `NOT CHECKED`，表示**没有走到**，不是“通过”，也不是“报不一致”。
 
 **这段证明什么**：
 
@@ -366,7 +366,7 @@ RESULT FAIL —— PRODUCER FAIL 包内 producer 与当前验算版本不一致�
 1. `README-验收.md`（交接目录首页）
 2. `已知残留与未闭合项.md`
 3. `docs/安全与证据链现状.md` 第 3 节
-4. `docs/口径声明.md`（所有数字的口径与“未测”清单）
+4. `docs/口径声明.md`（所有数字的口径与“未测”清单；**仓库侧文档，交接目录内没有等价全量文件，需随包外附件提供**。包内 `policies/口径声明-对外版.md` 只是对外精简版，不含全部数字口径与未测清单）
 
 ---
 
@@ -423,7 +423,7 @@ RESULT FAIL —— PRODUCER FAIL 包内 producer 与当前验算版本不一致�
 | “**改一个字节一定被抓**” | “参与哈希与签名的字节会被抓；自由文本字段不参与验算。” |
 | “旧包也能验，说明**版本无所谓**” | “旧包必须配同版本 wheel，否则第一道就是 `PRODUCER FAIL`。” |
 | “删输入一定会 `FAIL`” | “带输入契约的 v3 包会 `FAIL`；默认 v2 无签名包只会 `PARTIAL`，不能拿它演示。” |
-| “导出只要 3 秒，性能有 SLA” | “那是特定数据量下的实验值，不是 SLA；引用前先看 `docs/口径声明.md`。” |
+| “导出只要 3 秒，性能有 SLA” | “那是特定数据量下的实验值，不是 SLA；引用前先看随包外附件提供的 `docs/口径声明.md`。” |
 
 ---
 

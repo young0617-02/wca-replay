@@ -184,7 +184,8 @@ def test_counts_three_places_agree_after_batching(tmp_path):
         assert "- 发现（未签认）：1 条" in confidence
         assert "- 其中批次 finding：1 条" in confidence
         assert "- 按问题条数计：49 条" in confidence
-        assert "发现（未签认）1 条 / 已确认结论 0 条" in not_covered
+        assert ("发现（未签认）1 条 / 已确认结论（APPROVED）0 条"
+                " / 已人工处置合计 0 条") in not_covered
         assert "批次 finding 1 条，按问题条数计 49 条" in not_covered
     finally:
         built["conn"].close()

@@ -606,6 +606,7 @@ def responsibility_block(conn: Connection, cfg: Config, run_id: str) -> dict:
     signs = conn.execute(
         "SELECT seq, actor, ts, payload_sha256 FROM audit_event "
         "WHERE action = 'evidence.sign' AND run_id = ? ORDER BY seq", (run_id,)).fetchall()
+    approved_count = sum(1 for c in confirmed if c.get("decision") == "APPROVED")
     return {
         "principle": "数值一律由确定性规则引擎计算；AI 只做意图归类与已有事实的叙述，"
                      "且出口有数字白名单与重大事项拒诺两道闸；对外结论必须由具名人工确认。",
@@ -615,11 +616,12 @@ def responsibility_block(conn: Connection, cfg: Config, run_id: str) -> dict:
         "ai_participation": ai,
         "ai_participation_count": len(ai),
         "human_confirmations": confirmed,
-        "human_confirmed_findings": len(confirmed),
+        "approved_findings": approved_count,
         "unsigned_findings_excluded_from_conclusions": len(pending),
         "pending_findings": [p["rule_id"] + ":" + p["emp_id"] for p in pending][:200],
-        "signed_by": [{"seq": int(x["seq"]), "actor": x["actor"], "ts": x["ts"]} for x in signs],
-        "signed": bool(signs),
+        "delivery_registered_by": [{"seq": int(x["seq"]), "actor": x["actor"], "ts": x["ts"]}
+                                   for x in signs],
+        "delivery_registered": bool(signs),
     }
 
 
@@ -690,6 +692,28 @@ def _trim_input_entry(entry: dict, fields: set[str], work: Path) -> None:
     entry["trimmed"] = True
 
 
+# 0.4.18：员工主数据若带姓名/工号列，导出默认剔除；列不存在不报错（样例数据无这两列）。
+# 客户仍可用 --omit-fields 追加其他列；这里只处理身份直标识，不碰工资基数。
+DEFAULT_EMPLOYEE_OMIT_FIELDS = ("name", "emp_no")
+
+
+def _default_omissions(collected: dict) -> tuple[tuple[str, str], ...]:
+    """按实际表头决定是否剔除员工身份列；缺列即跳过，避免对无此列的包失败。"""
+    present: set[tuple[str, str]] = set()
+    for entry in collected.get("entries", []):
+        if str(entry.get("kind")) != "employee":
+            continue
+        source = Path(entry["source"])
+        if not source.is_file():
+            continue
+        with source.open("r", encoding="utf-8-sig", newline="") as fh:
+            header = next(csv.reader(fh), [])
+        for field in DEFAULT_EMPLOYEE_OMIT_FIELDS:
+            if field in header:
+                present.add(("employee", field))
+    return tuple(sorted(present))
+
+
 def _apply_omissions(collected: dict, work: Path,
                      omit_fields: tuple[tuple[str, str], ...]) -> list[dict]:
     """按 kind 分组裁剪；请求的 kind/field 必须实际存在，否则失败关闭。"""
@@ -732,11 +756,12 @@ def _write_conclusions_csv(path: Path, rows: list[dict]) -> None:
 
 
 def _write_package_confidence(path, *, findings_count: int, final_count: int,
-                              signed: bool, findings_batched: int = 0,
+                              delivery_registered: bool, approved_count: int = 0,
+                              findings_batched: int = 0,
                               issues_total: int | None = None) -> None:
     """把本包真实计数写进已签名工件，避免静态 CONFIDENCE 把 confirmed 包写成 0 条。"""
     base = path.read_text(encoding="utf-8").rstrip()
-    role = "含已确认结论" if final_count else "engine-only（无已确认结论）"
+    role = "含已确认结论" if approved_count else "engine-only（无已确认结论）"
     issues_total = findings_count if issues_total is None else issues_total
     block = (
         "\n\n## 本包计数（导出时生成）\n\n"
@@ -744,8 +769,9 @@ def _write_package_confidence(path, *, findings_count: int, final_count: int,
         f"- 其中批次 finding：{findings_batched} 条（每批代表多条重复问题）\n"
         f"- 按问题条数计：{issues_total} 条"
         "（= finding 条数 - 批次 finding 条数 + 各批 batch_size 合计）\n"
-        f"- 已确认结论：{final_count} 条\n"
-        f"- responsibility.signed：{'true' if signed else 'false'}\n"
+        f"- 已确认结论（decision=APPROVED）：{approved_count} 条\n"
+        f"- 已人工处置合计（含更正/需补充数据）：{final_count} 条\n"
+        f"- responsibility.delivery_registered：{'true' if delivery_registered else 'false'}\n"
         f"- 本包角色：{role}\n"
         "- 三处口径应一致：本文件、`manifest.counts`、`未覆盖清单.md`；"
         "若不一致，以 manifest 为准并视为导出缺陷。\n"
@@ -785,6 +811,7 @@ def _aggregate_findings(findings) -> list[dict]:
 
 def _not_covered_markdown(nc: dict, *, findings_count: int = 0,
                           final_count: int = 0,
+                          approved_count: int = 0,
                           rule_versions: dict[str, int] | None = None,
                           aggregate_findings: list[dict] | None = None,
                           findings_batched: int = 0,
@@ -805,11 +832,12 @@ def _not_covered_markdown(nc: dict, *, findings_count: int = 0,
     out = [
         "# 未覆盖清单（本期不做 / 未验证）",
         "",
-        f"- 本轮包内：发现（未签认）{findings_count} 条 / 已确认结论 {final_count} 条"
+        f"- 本轮包内：发现（未签认）{findings_count} 条 / 已确认结论（APPROVED）{approved_count} 条"
+        f" / 已人工处置合计 {final_count} 条"
         f"；其中批次 finding {findings_batched} 条，按问题条数计 "
         f"{findings_count if issues_total is None else issues_total} 条"
         "（以 manifest.counts.findings_total / findings_batched / issues_total / "
-        "final_conclusions 为准）",
+        "approved_conclusions / final_conclusions 为准）",
         "- 单条规则版本分布：" + (", ".join(
             f"{k}={v}" for k, v in sorted((rule_versions or {}).items())) or "无")
         + "。`rule_version` 是单条规则版本，不等于 rule pack 版本；v5 包内保留未改判据的 v4 规则是预期。",
@@ -1337,6 +1365,7 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
     issues_total = findings_total - findings_batched + batched_issue_rows
     nc_md.write_text(_not_covered_markdown(
         nc, findings_count=findings_total, final_count=len(resp["human_confirmations"]),
+        approved_count=resp["approved_findings"],
         rule_versions=_rule_version_counts(findings),
         aggregate_findings=_aggregate_findings(findings),
         findings_batched=findings_batched, issues_total=issues_total))
@@ -1345,7 +1374,9 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
         raise RuntimeError("缺少 policies/CONFIDENCE.md，无法生成按包计数")
     _write_package_confidence(
         confidence_path, findings_count=findings_total,
-        final_count=len(resp["human_confirmations"]), signed=bool(resp["signed"]),
+        final_count=len(resp["human_confirmations"]),
+        delivery_registered=bool(resp["delivery_registered"]),
+        approved_count=resp["approved_findings"],
         findings_batched=findings_batched, issues_total=issues_total)
 
     # 8) 输入自含（US-EX-01）：把本次结论真正依赖的原始 CSV 一起打包，让重放不需要另外索要数据
@@ -1372,6 +1403,7 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
         # 这样换空库重导同一批 CSV 时，inputs_digest 不会因 file_id 不同而漂移。
         for entry, arc in zip(collected["entries"], input_arcnames(collected["entries"])):
             entry["arcname"] = arc
+        omit_fields = tuple(sorted(set(omit_fields) | set(_default_omissions(collected))))
         omitted_fields = _apply_omissions(collected, work, omit_fields)
         status = input_budget_status(collected["total_bytes"])
         collected["warning"] = status in ("warning", "critical")
@@ -1533,6 +1565,8 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
             "approval_rows": int(collected.get("approval_rows", 0)),
             # 对外结论集只含已人工确认的条目；未确认的仍留在 findings.csv 里等处置
             "final_conclusions": len(resp["human_confirmations"]),
+            # 0.4.18：确认成立只数 decision=APPROVED；final_conclusions 仍为“已处置”合计
+            "approved_conclusions": resp["approved_findings"],
             "unsigned_pending": resp["unsigned_findings_excluded_from_conclusions"],
             "ai_answered_questions": resp["ai_participation_count"],
             # rule_version 是“单条规则版本”，不等于 rule pack 版本；v5 包里可以同时有
@@ -1541,8 +1575,8 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
         },
         "chain_verification": verification.as_dict(),
         "responsibility": {k: resp[k] for k in
-                           ("principle", "engine_only_outputs", "never_output", "signed",
-                            "signed_by", "human_confirmed_findings",
+                           ("principle", "engine_only_outputs", "never_output",
+                            "delivery_registered", "delivery_registered_by", "approved_findings",
                             "unsigned_findings_excluded_from_conclusions", "ai_participation_count")},
         "not_covered": {"regimes_excluded": nc["scope"]["worktime_regimes_excluded"],
                         "cities_covered": nc["scope"].get("cities_covered"),

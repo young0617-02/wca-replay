@@ -126,7 +126,9 @@ def package_facts(zip_path: Path) -> dict:
         "producer_version": manifest["producer"]["version"],
         "producer_commit": manifest["producer"]["commit"],
         "counts": manifest["counts"],
-        "human_confirmed_findings": responsibility["human_confirmed_findings"],
+        # 双读：0.4.18+ 写 approved_findings，0.4.17 及更早只有 human_confirmed_findings。
+        "approved_findings": responsibility.get(
+            "approved_findings", responsibility.get("human_confirmed_findings")),
         "conclusions_rows": max(0, len(conclusions.splitlines()) - 1),
     }
 

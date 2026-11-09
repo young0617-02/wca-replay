@@ -310,7 +310,7 @@ def check_inputs_completeness(root: Path, manifest: dict, schema_ver: int) -> di
                            f"包内 inputs 缺少 {len(missing) + len(absent_files)} 个："
                            + "；".join(problems[:8]))}
     return {"ok": True, "status": "OK", "expected": total, "missing": 0, "extra": 0,
-            "reason": f"INPUTS COMPLETENESS OK 输入清单 {total} 个与包内 inputs/ 一致"}
+            "reason": f"输入清单 {total} 个与包内 inputs/ 一致"}
 
 
 def check_findings(root: Path, manifest: dict) -> dict:
@@ -341,16 +341,68 @@ def check_findings(root: Path, manifest: dict) -> dict:
                 "actual_digest": actual, "rows": rows, "rule_versions": versions}
     conclusions = root / "conclusions_final.csv"
     final_rows = 0
+    approved_rows = 0
     if conclusions.is_file():
         with conclusions.open("r", encoding="utf-8-sig", newline="") as fh:
-            final_rows = sum(1 for _ in csv.DictReader(fh))
+            for record in csv.DictReader(fh):
+                final_rows += 1
+                if str(record.get("decision") or "").strip() == "APPROVED":
+                    approved_rows += 1
     if int(counts.get("final_conclusions", -1)) != final_rows:
         return {"ok": False,
                 "reason": "COUNTS FAIL manifest.counts.final_conclusions 与 conclusions_final.csv 行数不一致",
                 "actual_digest": actual, "rows": rows, "final_rows": final_rows,
                 "rule_versions": versions}
+    # 0.4.18 起新增的“确认成立数”只数 APPROVED；旧包无此字段时不校验（弱校验）。
+    if "approved_conclusions" in counts:
+        try:
+            declared_approved = int(counts["approved_conclusions"])
+        except (TypeError, ValueError):
+            return {"ok": False,
+                    "reason": "COUNTS FAIL manifest.counts.approved_conclusions 不是整数",
+                    "actual_digest": actual, "rows": rows, "final_rows": final_rows,
+                    "rule_versions": versions}
+        if declared_approved != approved_rows:
+            return {"ok": False,
+                    "reason": "COUNTS FAIL manifest.counts.approved_conclusions 与 "
+                              "conclusions_final.csv 的 APPROVED 行数不一致",
+                    "actual_digest": actual, "rows": rows, "final_rows": final_rows,
+                    "approved_rows": approved_rows, "rule_versions": versions}
+    registered, resp_reason = _delivery_registered(root)
+    if resp_reason:
+        return {"ok": False, "reason": resp_reason, "actual_digest": actual, "rows": rows,
+                "final_rows": final_rows, "approved_rows": approved_rows,
+                "rule_versions": versions}
     return {"ok": True, "reason": "", "actual_digest": actual, "rows": rows,
-            "final_rows": final_rows, "rule_versions": versions}
+            "final_rows": final_rows, "approved_rows": approved_rows,
+            "delivery_registered": registered, "rule_versions": versions}
+
+
+def _delivery_registered(root: Path) -> tuple[bool | None, str]:
+    """双读交付登记位：0.4.18+ 读 `delivery_registered`，旧包回落 `signed`。
+
+    两者同时存在且不一致时失败关闭（半迁移包）；两者都无则返回 None（不校验）。
+    """
+    path = root / "responsibility.json"
+    if not path.is_file():
+        return None, ""
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return None, f"RESPONSIBILITY FAIL 无法解析 responsibility.json：{type(exc).__name__}"
+    if not isinstance(doc, dict):
+        return None, "RESPONSIBILITY FAIL responsibility.json 顶层不是对象"
+    has_new = "delivery_registered" in doc
+    has_old = "signed" in doc
+    if has_new and has_old and bool(doc["delivery_registered"]) != bool(doc["signed"]):
+        return None, ("RESPONSIBILITY FAIL delivery_registered 与 signed 同时存在且取值不一致"
+                      "（半迁移包）")
+    value = doc.get("delivery_registered", doc.get("signed"))
+    if value is None:
+        return None, ""
+    if not isinstance(value, bool):
+        return None, "RESPONSIBILITY FAIL delivery_registered/signed 不是布尔值"
+    return value, ""
 
 
 def evidence_digest_from_findings(path: Path) -> tuple[str, int]:

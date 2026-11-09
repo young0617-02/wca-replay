@@ -214,11 +214,11 @@ def test_signing_puts_a_named_actor_in_the_chain(conn, cfg):
     ver = verify_chain(conn, cfg)
     assert ver.ok, ver.reason
     resp = responsibility_block(conn, cfg, out.run_id)
-    assert resp["signed"] is True
-    assert [s["actor"] for s in resp["signed_by"]] == ["human:rv1"]
+    assert resp["delivery_registered"] is True
+    assert [s["actor"] for s in resp["delivery_registered_by"]] == ["human:rv1"]
 
     manifest = export_package(conn, cfg, out.run_id)
-    assert manifest["responsibility"]["signed"] is True
+    assert manifest["responsibility"]["delivery_registered"] is True
     assert manifest["chain_verification"]["ok"] is True
 
     with pytest.raises(ValueError):
@@ -277,13 +277,13 @@ def test_responsibility_block_separates_machine_and_human(conn, cfg):
                   note="按省口径人工核额", amount_cents=8800)
 
     resp = responsibility_block(conn, cfg, out.run_id)
-    assert resp["human_confirmed_findings"] == 1
+    assert resp["approved_findings"] == 1
     one = resp["human_confirmations"][0]
     assert one["confirmed_by"] == "rv1" and one["decision"] == "APPROVED"
     assert one["amount_cents_input"] == 8800 and one["amount_entered_by"] == "human:rv1"
     total = conn.execute("SELECT COUNT(*) AS n FROM finding WHERE run_id = ?",
                          (out.run_id,)).fetchone()["n"]
-    assert resp["human_confirmed_findings"] + \
+    assert resp["approved_findings"] + \
         resp["unsigned_findings_excluded_from_conclusions"] == total, "两个桶必须盖住全部结论"
 
     # 引擎只做数值档位，金额/定性一律不是它的输出
@@ -296,11 +296,11 @@ def test_responsibility_block_separates_machine_and_human(conn, cfg):
     assert q["gate_decision"] in ("ANSWERED", "EXPLAIN_ONLY", "ESCALATED")
     assert "本 run" in resp["ai_participation_scope_note"], "问答留痕必须标明按 run 过滤"
 
-    assert resp["signed"] is False, "没签字就不能显示成已签发"
+    assert resp["delivery_registered"] is False, "没登记交付就不能显示成已登记"
     manifest = export_package(conn, cfg, out.run_id)
     with zipfile.ZipFile(Path(manifest["package_zip"])) as zf:
         in_zip = json.loads(zf.read("responsibility.json").decode("utf-8"))
-        assert in_zip["human_confirmed_findings"] == 1
+        assert in_zip["approved_findings"] == 1
         assert in_zip["ai_participation_count"] == 1
         text = json.dumps(in_zip, ensure_ascii=False)
         assert "amount_cents_input" not in text and "amount_entered_by" not in text

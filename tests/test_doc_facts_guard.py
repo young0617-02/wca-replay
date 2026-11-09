@@ -785,7 +785,10 @@ def test_package_manifest_and_responsibility_json_match_anchors() -> None:
                 bad.append(f"{package.name}：锚点 {anchor_key} 与包内字段不符")
         with zipfile.ZipFile(package) as zf:
             responsibility = json.loads(zf.read("responsibility.json").decode("utf-8"))
-        if responsibility["human_confirmed_findings"] != facts["human_confirmed_findings"]:
+        # 冻结包是 0.4.17 及更早产物，只有旧字段；0.4.18+ 包用新字段。与 docfacts 保持同一双读口径。
+        expected = responsibility.get(
+            "approved_findings", responsibility.get("human_confirmed_findings"))
+        if expected != facts["approved_findings"]:
             bad.append(f"{package.name}：responsibility.json 与 manifest 计数不符")
     for old_package in sorted((base / "release" / "old-packages").glob("*.zip")):
         facts = docfacts.package_facts(old_package)

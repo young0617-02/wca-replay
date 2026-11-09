@@ -88,14 +88,16 @@ def test_confidence_matches_manifest_and_not_covered_for_both_packages(conn, cfg
         manifest, confidence, not_covered, _findings = _package_docs(zip_path)
         findings_n = int(manifest["counts"]["findings"])
         final_n = int(manifest["counts"]["final_conclusions"])
+        approved_n = int(manifest["counts"]["approved_conclusions"])
         assert findings_n == len(_findings)
         assert final_n == expected_final
         assert f"- 发现（未签认）：{findings_n} 条" in confidence
-        assert f"- 已确认结论：{final_n} 条" in confidence
+        assert f"- 已确认结论（decision=APPROVED）：{approved_n} 条" in confidence
         assert f"- 本包角色：{role}" in confidence
         assert "本包 0 条" not in confidence
         assert (
-            f"发现（未签认）{findings_n} 条 / 已确认结论 {final_n} 条"
+            f"发现（未签认）{findings_n} 条 / 已确认结论（APPROVED）{approved_n} 条"
+            f" / 已人工处置合计 {final_n} 条"
             in not_covered
         )
 

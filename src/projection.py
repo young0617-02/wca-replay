@@ -104,7 +104,7 @@ PROJECTION_INPUT_FIELDS: dict[str, set[str]] = {
 }
 
 # 当前导入器真正可选的字段。其余“非投影字段”仍被导入校验/表结构要求，不能剪。
-OMITTABLE_FIELDS = {("leave", "paid")}
+OMITTABLE_FIELDS = {("leave", "paid"), ("employee", "name"), ("employee", "emp_no")}
 OMITTED_REASON = "非投影字段；导入可选，不影响规则结论"
 
 
