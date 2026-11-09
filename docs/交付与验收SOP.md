@@ -486,6 +486,11 @@ sha256 `25ad007314b54a46f83afcda8c0905d8aaf796472d6c872f7cef5159daf996f1`。
   由 `evidence_digest` 独立覆盖；`未覆盖清单.md` 逐条写“该结论为周期聚合，无法定位到单行”
   并给区间/表/规则。
 
+**0.4.18 字段双读**：新包 `responsibility.json` 只写 `delivery_registered` /
+`delivery_registered_by`，`manifest.counts` 增 `approved_conclusions`（仅统计 APPROVED）；
+0.4.17 及更早包无新字段时回落 `signed` / `human_confirmed_findings`。两字段并存且取值不一致
+判为半迁移包，`wca-verify` 直接 FAIL；`wca replay` 同口径。
+
 **交接包**：`handoff/20261104-第三轮整改/`，共 **18 个文件 / 512,843 字节**（其中
 `交付清单.txt` 覆盖的 17 个非自身文件合计 511,130 字节）。目录含两个包、`release/` 发行物副本、
 公钥、`anchor.json`/`anchor.txt`、单包 anchor JSON、`KEY-NOTE.txt` 与 `交付清单.txt`。
