@@ -852,6 +852,20 @@ def build(args: argparse.Namespace) -> int:
     return 0
 
 
+def hash_scope(rel_path: str, signed: set[str]) -> str:
+    """哈希管辖规则：每个交付文件恰好归入一类。
+
+    - `signed`：被 `release/SHA256SUMS` 收录的 `release/` 顶层文件（`SHA256SUMS.sig` 保护）；
+    - `neither`：`交付清单.txt` 自身（清单按设计不含自身）；
+    - `manifest`：其余全部文件（含 `offline-deps/`，只由 `交付清单.txt` 记哈希）。
+    """
+    if rel_path in signed:
+        return "signed"
+    if rel_path == "交付清单.txt":
+        return "neither"
+    return "manifest"
+
+
 def write_coverage(out: Path, version: str) -> None:
     """`release/SHA256SUMS-覆盖范围.md`：按目录扫描分三类逐文件列全。
 
@@ -859,20 +873,28 @@ def write_coverage(out: Path, version: str) -> None:
     2) 不在签名内、但会被 `交付清单.txt` 记哈希：除清单自身外的全部实有文件；
     3) 两者都没有：清单自身（`write_manifest` 按设计排除自己）。
     """
+    # 哈希管辖规则（唯一来源，禁止临场豁免；新增目录一律落到第 2 类）：
+    #   1) `release/` 顶层被 `release/SHA256SUMS` 收录的 5 个文件 → 由 `SHA256SUMS` +
+    #      `SHA256SUMS.sig` 保护（签名范围内）；
+    #   2) 其余全部交付文件（根目录文本、锚点、`docs/`、`reports/`、`package/`、
+    #      `offline-deps/`、`release/` 下的旧物与索引自身等）→ 只在 `交付清单.txt` 记哈希；
+    #   3) `交付清单.txt` 自身 → 两者都没有（清单按设计不含自身）。
+    # 本索引按该规则逐文件列全，因此“三类逐文件列全”这句话恒为真；
+    # 为满足某个字节约束而让本索引少列文件属于流程反模式（见候选清单 P2）。
     signed = [f"release/{row['name']}"
               for row in docfacts.release_facts(out / "release")["covered"]]
+    signed_set = set(signed)
     # 本文件与 `交付清单.txt` 即将写入；`write_manifest` 的登记口径是“除交付清单自身外
     # 全部文件”，因此先把两者并入扫描集合，清单写入后三分类仍成立。
-    # `offline-deps/` 刻意不列入本索引：本文件是随 `release/` 冻结的基线文档，加入
-    # 47 个依赖文件会让它逐字节变化；离线依赖的逐文件哈希由 `交付清单.txt` 与
-    # `offline-deps/README.md` 负责，两者都在其中明示。
     all_files = sorted(set(p.relative_to(out).as_posix()
-                           for p in out.rglob("*")
-                           if p.is_file() and "offline-deps" not in p.relative_to(out).parts)
+                           for p in out.rglob("*") if p.is_file())
+                       | signed_set
                        | {"release/SHA256SUMS-覆盖范围.md", "交付清单.txt"})
-    listed = {f for f in all_files if f != "交付清单.txt"}
-    only_listed = [f for f in all_files if f in listed and f not in signed]
-    neither = [f for f in all_files if f not in listed and f not in signed]
+    buckets: dict[str, list[str]] = {"signed": [], "manifest": [], "neither": []}
+    for rel in all_files:
+        buckets[hash_scope(rel, signed_set)].append(rel)
+    only_listed = buckets["manifest"]
+    neither = buckets["neither"]
     lines = [
         f"# SHA256SUMS 保护范围（{version}，由目录扫描生成）",
         "",
