@@ -863,8 +863,12 @@ def write_coverage(out: Path, version: str) -> None:
               for row in docfacts.release_facts(out / "release")["covered"]]
     # 本文件与 `交付清单.txt` 即将写入；`write_manifest` 的登记口径是“除交付清单自身外
     # 全部文件”，因此先把两者并入扫描集合，清单写入后三分类仍成立。
+    # `offline-deps/` 刻意不列入本索引：本文件是随 `release/` 冻结的基线文档，加入
+    # 47 个依赖文件会让它逐字节变化；离线依赖的逐文件哈希由 `交付清单.txt` 与
+    # `offline-deps/README.md` 负责，两者都在其中明示。
     all_files = sorted(set(p.relative_to(out).as_posix()
-                           for p in out.rglob("*") if p.is_file())
+                           for p in out.rglob("*")
+                           if p.is_file() and "offline-deps" not in p.relative_to(out).parts)
                        | {"release/SHA256SUMS-覆盖范围.md", "交付清单.txt"})
     listed = {f for f in all_files if f != "交付清单.txt"}
     only_listed = [f for f in all_files if f in listed and f not in signed]
