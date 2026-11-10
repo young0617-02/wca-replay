@@ -1052,8 +1052,9 @@ def build_readme(version: str, release: dict, rel: dict, packages: list[dict],
     return f"""# {version} 交付验收包（第{_round_label(handoff_name)}轮整改）
 
 **交付边界（先读）**：本目录之外的 `scripts/`、`tests/`、`docs/交付与验收SOP.md` 等属
-仓库内开发参考，**不随交付提供**；**验算与回放只依赖本目录内文件**。步骤见
-[release/README-验收.md](release/README-验收.md) 第 2–4 节；锚点、公钥与样例包均在本目录。
+仓库内开发参考，**不随交付提供**；**验算与回放只依赖本目录内文件**。验算步骤见本文件 §二（含 Windows / Linux / macOS
+三平台写法）或 [release/README-验收.md](release/README-验收.md) 第 2–4 节：两份**判定口径相同**、
+照任一份执行即可，若两份有出入以 `release/` 为准；锚点、公钥与样例包均在本目录。
 `src/` 源码随 wheel 提供（可用于 diff 复核），仓库内测试/脚本不随交付。
 文档里出现的仓库路径，要么在本目录内真实存在，要么逐条列在
 [未随交付清单.md](未随交付清单.md)（该表由扫描器生成，覆盖 `docs/ scripts/ tests/ src/`
@@ -1064,6 +1065,10 @@ def build_readme(version: str, release: dict, rel: dict, packages: list[dict],
 > **同名文件提示（先读）**：本目录有**两个同名 `README-验收.md`**。被签名的是
 > `release/README-验收.md`（在 `release/SHA256SUMS` 的 {rel['covered_count']} 行内）；**根目录这份 `README-验收.md`
 > 不在签名范围**，其完整性只由 `交付清单.txt` 的记录负责。核对签名时勿取错文件。
+> **两份的关系**：判定口径相同（四步、五项外部门禁、`RESULT OK` 且 exit 0 才算通过），
+> **写法不同**——`release/` 那份用“包外锚点字符串 + 显式 `--expect-*` 参数”，本目录这份用
+> `--anchor-file` 单包锚点文件，两者等价；**若两份有出入，以 `release/` 为准**（它在签名覆盖内）。
+> 照任一份执行即可；本目录这份另负责组合锚点、离线依赖与样例包的说明。
 
 **验算用哪个构建（先读）**：验算请使用本目录 `release/` 内随附的
 `worktime_compliance_agent-{version}-py3-none-any.whl` 及其锁定依赖，**不要**用源码树、
@@ -1113,77 +1118,111 @@ def build_readme(version: str, release: dict, rel: dict, packages: list[dict],
 
 ## 二、验算四步（Windows / Linux / macOS）
 
-> **`RESULT PARTIAL`（exit 2）看起来像通过，其实少验了一项。** 最常见的原因是漏了
-> `--public-key`，或漏了 `--expect-anchor` / `--anchor-file`。PARTIAL 只表示“能核的都核了”，
-> 不表示验算完整；**只有 `RESULT OK`（exit 0）才算通过**。看到 PARTIAL 不要往下走，
-> 先补齐公钥与锚点再重跑。
+> **以下命令均在本交付目录内执行（先切到该目录）；退出码 0 且 `RESULT OK` 才算法通过。**
+
+> **看到 `RESULT PARTIAL`（exit 2）不算通过。** 最常见的原因是漏了 `--public-key`，
+> 或漏了 `--expect-anchor` / `--anchor-file`。PARTIAL 只表示“能核的都核了”，
+> 不表示验算完整；看到 PARTIAL 不要往下走，先补齐公钥与锚点再重跑。
+
+### 前置自检（先做，三平台各自写法）
+
+Windows（PowerShell）：
+
+```powershell
+py -3.12 --version
+```
+
+Linux（bash）：
+
+```bash
+python3.12 --version
+```
+
+macOS（bash）：
+
+```bash
+python3.12 --version   # 没装就先：brew install python@3.12
+```
+
+三处都必须打印 `Python 3.12.x`；没有就先安装 Python 3.12，再用它建环境，不要用 3.11 或更低版本凑。
 
 三平台命令只差三处：解释器名（Windows `py -3.12` / Linux、macOS `python3.12`）、
 虚拟环境可执行目录（`Scripts\\` / `bin/`，入口名 `wca-verify.exe` / `wca-verify`）、
 路径分隔符（`\\` / `/`）。其余参数完全一致。
 
-**空气隙 / 内网环境**：第 2 步不要联网，改用本目录的依赖缓存：
-
-```text
-pip install --no-index --find-links=<本目录>/offline-deps/wheels --require-hashes -r release/requirements.lock.txt
-```
-
-信任链条与逐 wheel 校验方式见 `offline-deps/README.md`；`offline-deps/` 不替代
-`release/`，主验算路径仍是 `release/` 内的 wheel。
+**空气隙 / 内网环境**：Windows 与 Linux 两个平台块里的第 2 步已经是离线写法
+（`--no-index --find-links`，macOS 同 Linux），不需要联网。信任链条与逐 wheel 校验方式见
+`offline-deps/README.md`；`offline-deps/` 不替代 `release/`，主验算路径仍是 `release/` 内的 wheel。
+本机有网时也可去掉 `--no-index --find-links` 走默认索引，但交付验收推荐离线路径。
 
 ### Windows（PowerShell）
 
 ```powershell
-# 1) 建干净环境
+# 1) 建干净环境（前置自检：py -3.12 --version 必须打印 3.12.x）
 py -3.12 -m venv .venv-clean
 
-# 2) 装锁定依赖与本目录 wheel
-.venv-clean\\Scripts\\python -m pip install --require-hashes -r release\\requirements.lock.txt
+# 2) 装锁定依赖与本目录 wheel（离线路径：不访问索引，逐包按 lock 哈希校验）
+.venv-clean\\Scripts\\python -m pip install --no-index --find-links=offline-deps\\wheels --no-cache-dir --require-hashes -r release\\requirements.lock.txt
 .venv-clean\\Scripts\\python -m pip install --no-deps release\\{release['wheel']}
 
 # 3) 验任一包（锚点、包 SHA、工件摘要、证据摘要一次给全）
 .venv-clean\\Scripts\\wca-verify.exe package\\engine-only.zip `
   --anchor-file anchor-{version}-engine-only.json `
   --public-key trusted-public-key.pub
-# 期望：RESULT OK，exit 0
+# 期望：RESULT OK 且 exit=0；非 0 时按 §三 的失败类型对照
+"exit=$LASTEXITCODE"
 
 # 4) 回放同一个包
 .venv-clean\\Scripts\\wca.exe replay package\\engine-only.zip `
   --anchor-file anchor-{version}-engine-only.json `
   --public-key trusted-public-key.pub
-# 期望：RESULT OK，exit 0
+# 期望：RESULT OK 且 exit=0；非 0 时按 §三 的失败类型对照
+"exit=$LASTEXITCODE"
 ```
 
 ### Linux（bash）
 
 ```bash
-# 1) 建干净环境
+# 1) 建干净环境（前置自检：python3.12 --version 必须打印 3.12.x）
 python3.12 -m venv .venv-clean
 
-# 2) 装锁定依赖与本目录 wheel
-.venv-clean/bin/python -m pip install --require-hashes -r release/requirements.lock.txt
+# 2) 装锁定依赖与本目录 wheel（离线路径：不访问索引，逐包按 lock 哈希校验）
+.venv-clean/bin/python -m pip install --no-index --find-links=offline-deps/wheels --no-cache-dir --require-hashes -r release/requirements.lock.txt
 .venv-clean/bin/python -m pip install --no-deps release/{release['wheel']}
 
 # 3) 验任一包（锚点、包 SHA、工件摘要、证据摘要一次给全）
 .venv-clean/bin/wca-verify package/engine-only.zip \\
   --anchor-file anchor-{version}-engine-only.json \\
   --public-key trusted-public-key.pub
-# 期望：RESULT OK，exit 0
+# 期望：RESULT OK 且 exit=0；非 0 时按 §三 的失败类型对照
+echo "exit=$?"
 
 # 4) 回放同一个包
 .venv-clean/bin/wca replay package/engine-only.zip \\
   --anchor-file anchor-{version}-engine-only.json \\
   --public-key trusted-public-key.pub
-# 期望：RESULT OK，exit 0
+# 期望：RESULT OK 且 exit=0；非 0 时按 §三 的失败类型对照
+echo "exit=$?"
 ```
 
 ### macOS（bash）
 
-命令与 Linux 完全相同：Homebrew 或 python.org 安装的 Python 3.12 都提供 `python3.12`，
+前置自检见上（macOS 那块：`python3.12 --version` 必须打印 `Python 3.12.x`）。装好之后，
+四步命令与 Linux 完全相同：Homebrew 或 python.org 安装的 Python 3.12 都提供 `python3.12`，
 虚拟环境入口在 `bin/`。若 `python3.12` 不在 `PATH`，用
 `$(brew --prefix python@3.12)/bin/python3.12` 建环境即可，后续命令不变。
 
 八个包逐一替换 `engine-only` 为对应角色名即可；实物 SHA 见 §四。
+
+### 锚点文件怎么选（拿错会误判）
+
+- `anchor-{version}-<角色>.json`：**单包扁平锚点**（`anchor` / `package_sha256` /
+  `artifacts_digest` / `evidence_digest`），`--anchor-file` 只接受这种；验哪个包就用哪个角色的文件。
+- `anchor-{version}.json` 与 `anchor.json`：**组合锚点**，`packages` 是数组、覆盖本批全部
+  {len(packages)} 个包，只作汇总记录；传给 `--anchor-file` 会被拒绝（“组合式 anchor.json 含多个包”）。
+- `anchor.txt`：组合锚点的人读版本，用于抄进邮件/台账，不是命令行参数。
+- 拿错文件的典型症状：拿 A 包的锚点验 B 包 → `PACKAGE SHA256 FAIL`（exit 1）或
+  “组合式 anchor.json 含多个包”；这**不是包坏了**，换对文件即可。
 
 ## 三、退出码与默认流程（统一口径）
 
