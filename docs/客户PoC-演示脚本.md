@@ -1,9 +1,10 @@
-# 客户 PoC 演示脚本（0.4.17 · 15–25 分钟）
+# 客户 PoC 演示脚本（0.4.18 · 15–25 分钟）
 
 > 用途：销售/售前照着念、照着敲。全程在一台客户能看见的 Windows 机器上操作，不播放 PPT。
-> 依据：`handoff/20261104-第十九轮整改/` 内的 `README-验收.md`、`READ-ME-FIRST.txt`、`KEY-NOTE.txt`、
-> `已知残留与未闭合项.md`，以及仓库 `docs/口径声明.md`（演示机若无仓库，需随包外附件提供）、`docs/安全与证据链现状.md`。
-> 版本：0.4.17 冻结版，8 个样例包。**本脚本不新增任何流程，只把已交付的能力演出来。**
+> 依据：`handoff/20261109-第二十轮整改/` 内的 `README-验收.md`、`READ-ME-FIRST.txt`、`KEY-NOTE.txt`、
+> `已知残留与未闭合项.md`，以及仓库 `docs/口径声明.md`（演示机若无仓库，需随包外附件提供；该文件确实未随交付，
+> 见交接目录 `未随交付清单.md` 的 `docs/` 段）、`docs/安全与证据链现状.md`。
+> 版本：0.4.18 冻结版，8 个样例包。**本脚本不新增任何流程，只把已交付的能力演出来。**
 
 **先说一句必须随每份材料带走的边界：**
 
@@ -18,24 +19,24 @@
 
 | 要准备什么 | 具体要求 | 没准备好会怎样 |
 | --- | --- | --- |
-| 交接目录 | 把 `20261104-第十九轮整改/` 整个拷到客户机器，例如 `C:\wca-demo\20261104-第十九轮整改` | 包、锚点、公钥、wheel 都找不到 |
+| 交接目录 | 把 `20261109-第二十轮整改/` 整个拷到客户机器，例如 `C:\wca-demo\20261109-第二十轮整改` | 包、锚点、公钥、wheel 都找不到 |
 | Python 3.12 | `py -3.12 --version` 能打印 `Python 3.12.x` | 建不了干净环境 |
 | 依赖安装条件 | 能访问 PyPI，或提前准备与 `release\requirements.lock.txt` 同版本的本地 wheel 缓存 | 装不上 `pynacl` 等依赖，验签跑不了 |
 | 磁盘与临时目录 | `%TEMP%` 可写；预留几百 MB | 解压/回放失败 |
-| 演示包 | 至少 `package\engine-only.zip`、`anchor-0.4.17-engine-only.json`、`trusted-public-key.pub` | 第一段就演不下去 |
+| 演示包 | 至少 `package\engine-only.zip`、`anchor-0.4.18-engine-only.json`、`trusted-public-key.pub` | 第一段就演不下去 |
 | 旧包对照 | `release\old-packages\engine-only-0.4.16.zip` 与 `anchor-0.4.16-engine-only.json` | 第五段演不了 |
 
 **上台前 3 分钟自检（也需提前做）：**
 
 ```powershell
-Set-Location 'C:\wca-demo\20261104-第十九轮整改'
+Set-Location 'C:\wca-demo\20261109-第二十轮整改'
 
-# 1) 包没坏：哈希应与 anchor-0.4.17-engine-only.json 里的 package_sha256 一致
+# 1) 包没坏：哈希应与 anchor-0.4.18-engine-only.json 里的 package_sha256 一致
 (Get-FileHash package\engine-only.zip -Algorithm SHA256).Hash.ToLower()
 
 # 2) 交接目录齐：下面四个都应存在
-'trusted-public-key.pub','anchor-0.4.17-engine-only.json',
-'release\worktime_compliance_agent-0.4.17-py3-none-any.whl',
+'trusted-public-key.pub','anchor-0.4.18-engine-only.json',
+'release\worktime_compliance_agent-0.4.18-py3-none-any.whl',
 'package\engine-only.zip' | ForEach-Object { "$_ = $(Test-Path $_)" }
 ```
 
@@ -44,6 +45,8 @@ Set-Location 'C:\wca-demo\20261104-第十九轮整改'
 1. **不要**拿现场 `wca all` 默认生成的包演示“删输入被拦截”。默认无签名钥时生成的是 **v2 无签名包**，没有输入契约，删输入只会得到 `RESULT PARTIAL`（exit 2），会给人“删了也没事”的错觉。**要用 `package\` 下的 v3 样例包。**
 2. **不要**把 `RESULT PARTIAL` 说成通过。PARTIAL 是“不完整、不能当验收”。
 3. **不要**把旧包的 `PRODUCER FAIL` 说成“包被篡改”。那是版本配对问题，不是篡改，也不是验签失败。
+
+**要现场自己生成包时的前置条件**：`wca all` 默认后端是 PostgreSQL，**先起库并配好 `WCA_DATABASE_URL`**；库没起会直接 `ValueError`（需先起库，不能现场临时变出来）。若临时用 sqlite 回退，只能验证“无签名钥导出 v2、删输入只 `PARTIAL`”这条结论，**不证明 PostgreSQL 后端下的字节与结论一致**。
 
 ---
 
@@ -70,11 +73,11 @@ Set-Location 'C:\wca-demo\20261104-第十九轮整改'
 ### 2.1 建干净环境（需提前准备：联网或本地 wheel 缓存）
 
 ```powershell
-Set-Location 'C:\wca-demo\20261104-第十九轮整改'
+Set-Location 'C:\wca-demo\20261109-第二十轮整改'
 
 py -3.12 -m venv .venv-clean
 .venv-clean\Scripts\python -m pip install --require-hashes -r release\requirements.lock.txt
-.venv-clean\Scripts\python -m pip install --no-deps release\worktime_compliance_agent-0.4.17-py3-none-any.whl
+.venv-clean\Scripts\python -m pip install --no-deps release\worktime_compliance_agent-0.4.18-py3-none-any.whl
 ```
 
 **说哪句话**：
@@ -85,7 +88,7 @@ py -3.12 -m venv .venv-clean
 
 ```powershell
 .venv-clean\Scripts\wca-verify.exe package\engine-only.zip `
-  --anchor-file anchor-0.4.17-engine-only.json `
+  --anchor-file anchor-0.4.18-engine-only.json `
   --public-key trusted-public-key.pub
 ```
 
@@ -93,7 +96,7 @@ py -3.12 -m venv .venv-clean
 
 ```text
 MANIFEST SCHEMA v3
-PRODUCER 0.4.17 d4e5366b97637b2b4683339ce3ad5404469d8659 ...
+PRODUCER 0.4.18 5a24fb30141eb59a4ec8ea9abab4a0b479c07689 ...
 MANIFEST CHECKSUM OK
 ARTIFACTS OK checked=14
 FINDINGS DIGEST OK 5dc46558...
@@ -108,6 +111,8 @@ RESULT OK
 
 退出码 `0`。
 
+> **producer 门（两条路径别混）**：客户用 `release\` 里的 0.4.18 wheel 验本目录的 0.4.18 包时，`producer.version` 与 `producer.commit` 天然与 `RELEASE.json` 一致，**不需要设置任何环境变量**。`WCA_BUILD_COMMIT` 只在“从源码树直接跑、仓库 HEAD 已前移”时用于跨版本复算例外流程。本次 0.4.18 的 8 个包在干净 venv 中实测**全程未注入该变量**，8/8 通过。
+
 **说哪句话**：
 
 > `RESULT OK` 说明：包内清单没被改、14 个工件逐个哈希对得上、115 条发现能反算出同一个结论摘要、审计链完整、8 个输入文件与清单一致、签名与您手上这把公钥匹配、包外锚点也对得上。
@@ -118,9 +123,11 @@ RESULT OK
 
 ```powershell
 .venv-clean\Scripts\wca.exe replay package\engine-only.zip `
-  --anchor-file anchor-0.4.17-engine-only.json `
+  --anchor-file anchor-0.4.18-engine-only.json `
   --public-key trusted-public-key.pub
 ```
+
+> **硬提示：锚点必须与包同版本。** 只把包换成 0.4.18、锚点还留着 `anchor-0.4.17-*`，以目录形态演示（3.1 / 3.2）时会先在 `ARTIFACTS DIGEST external` 失败；以 zip + `--anchor-file` 演示时会在 `PACKAGE SHA256` 先失败，`replay` 还会打出“旧包 / 未记录 producer”的误导行。两者都走不到三元组比对，现场会讲错故事。
 
 **客户看到什么（关键行）**：
 
@@ -169,7 +176,7 @@ $p = "$demo\engine-only-conclusion\findings.csv"
   Set-Content $p -Encoding UTF8 -NoNewline
 
 # 从锚点文件读出包外期望值，避免手抄长哈希
-$A = Get-Content anchor-0.4.17-engine-only.json -Raw -Encoding UTF8 | ConvertFrom-Json
+$A = Get-Content anchor-0.4.18-engine-only.json -Raw -Encoding UTF8 | ConvertFrom-Json
 $anchor = $A.anchor
 $art = $A.artifacts_digest
 $ev = $A.evidence_digest
@@ -198,6 +205,8 @@ RESULT FAIL —— ARTIFACT FAIL 工件哈希不一致：findings.csv
 ### 3.2 删一个输入文件（更直观，建议现场演这个）
 
 > 若跳过 3.1，请先执行 3.1 里定义 `$demo`、`$A`、`$anchor`、`$art`、`$ev` 的那几行。
+>
+> **硬提示（与 2.3 同一条）**：锚点必须与包同版本。若仍读 `anchor-0.4.17-*`，本节会先在 `ARTIFACTS DIGEST external` 报 FAIL，根本看不到 `INPUTS COMPLETENESS` 这一行。
 
 ```powershell
 Copy-Item package\engine-only.zip "$demo\engine-only-deleted.zip" -Force
@@ -221,6 +230,8 @@ INPUTS COMPLETENESS FAIL 输入清单列了 8 个，包内 inputs 缺少 1 个�
 ...
 RESULT FAIL —— INPUTS COMPLETENESS FAIL ... 缺少 inputs/leave.csv
 ```
+
+> 0.4.18 在 FAIL 分支会把 `INPUTS COMPLETENESS FAIL` 标签重复打印一次（显示层残留），不影响判定与退出码；OK 分支已修好，不会重复。
 
 退出码 `1`。
 
@@ -248,7 +259,7 @@ RESULT FAIL —— INPUTS COMPLETENESS FAIL ... 缺少 inputs/leave.csv
 
 ```powershell
 .venv-clean\Scripts\wca-verify.exe package\engine-only.zip `
-  --anchor-file anchor-0.4.17-engine-only.json
+  --anchor-file anchor-0.4.18-engine-only.json
 ```
 
 **客户看到什么（关键行）**：
@@ -286,7 +297,7 @@ RESULT PARTIAL —— RESULT PARTIAL：内容检查通过，但缺少/未通过 
 
 ## 5. 旧包对比：`PRODUCER FAIL` 不是篡改，是版本配对（3 分钟）
 
-**演什么**：用同一套 0.4.17 环境，去验一个 0.4.16 的旧包。
+**演什么**：用同一套 0.4.18 环境，去验一个 0.4.16 的旧包。
 
 ```powershell
 .venv-clean\Scripts\wca-verify.exe release\old-packages\engine-only-0.4.16.zip `
@@ -303,14 +314,14 @@ ARTIFACTS NOT CHECKED checked=0（早退，尚未走到该检查）
 ...
 SIGNATURE NOT CHECKED（早退，尚未走到验签）
 RESULT FAIL —— PRODUCER FAIL 包内 producer 与当前验算版本不一致：version,commit
-（包内 b51bb48e... / 当前 d4e5366b...）
+（包内 b51bb48e... / 当前 5a24fb30...）
 ```
 
 退出码 `1`。
 
 **说哪句话**：
 
-> 这不是说旧包被篡改，也不是验签失败。它是在第一道“版本核对”就停了：**包内写的导出代码是 0.4.16，您手上这把验算器是 0.4.17**。
+> 这不是说旧包被篡改，也不是验签失败。它是在第一道“版本核对”就停了：**包内写的导出代码是 0.4.16，您手上这把验算器是 0.4.18**。
 >
 > 规则是：`producer.version` 必须等于您装的 wheel 版本，`producer.commit` 必须等于那个版本 `RELEASE.json` 里记录的 commit。对不上就先 `PRODUCER FAIL`，后面的签名、工件检查都还没走到，所以显示 `NOT CHECKED`，不是“验不过”。
 
@@ -366,7 +377,7 @@ RESULT FAIL —— PRODUCER FAIL 包内 producer 与当前验算版本不一致�
 1. `README-验收.md`（交接目录首页）
 2. `已知残留与未闭合项.md`
 3. `docs/安全与证据链现状.md` 第 3 节
-4. `docs/口径声明.md`（所有数字的口径与“未测”清单；**仓库侧文档，交接目录内没有等价全量文件，需随包外附件提供**。包内 `policies/口径声明-对外版.md` 只是对外精简版，不含全部数字口径与未测清单）
+4. `docs/口径声明.md`（所有数字的口径与“未测”清单；**仓库侧文档，交接目录内没有等价全量文件，需随包外附件提供**。它确实未随交付，见交接目录 `未随交付清单.md` 的 `docs/` 段（20 条里列有 `docs/口径声明.md`）；`包外勘误附件/` 只勘误 0.4.17 的两页措辞，不能替代。包内 `policies/口径声明-对外版.md` 只是对外精简版，不含全部数字口径与未测清单）
 
 ---
 
@@ -381,7 +392,7 @@ RESULT FAIL —— PRODUCER FAIL 包内 producer 与当前验算版本不一致�
 不能直接当法律结论。它是可复核材料，是否采信、能否作为证据，由仲裁/法院和你们法务判断；我们不替代律师。
 
 **3. 你们通过合规审查或等保了吗？**
-没有。这是 PoC 验证工具，不是通过合规审查的产品；19 轮是技术验收，不等于合规认证。
+没有。这是 PoC 验证工具，不是通过合规审查的产品；20 轮是技术验收，不等于合规认证。
 
 **4. 我凭什么相信这把公钥是你们的？**
 现在只能证明“包与您手上这把公钥匹配”，不能证明这把钥属于我们。信任根要靠合同附件、官网指纹或企业 PKI 等独立渠道分发；这一步本轮未闭合。
@@ -413,7 +424,7 @@ RESULT FAIL —— PRODUCER FAIL 包内 producer 与当前验算版本不一致�
 | 不要说 | 换成这句 |
 | --- | --- |
 | “这套系统**符合法规** / 符合劳动法” | “它按公开条文和自设口径做规则计算，是否符合法规要你们法务判断。” |
-| “我们已经**通过合规审查 / 通过审计**了” | “通过了 19 轮技术验收，这是 PoC 验证，不是合规审查。” |
+| “我们已经**通过合规审查 / 通过审计**了” | “通过了 20 轮技术验收，这是 PoC 验证，不是合规审查。” |
 | “举证包**有法律效力** / 等同于仲裁证据” | “它是一份可复核材料，是否采信由仲裁/法院决定。” |
 | “**绝对防篡改** / 没人能改” | “能发现包内字节被改；防不住私钥持有人，也防不住公钥与包外锚点被一起替换。” |
 | “AI 能**算出加班费 / 自动判定赔偿**” | “引擎只算工时指标，不产出金额；金额由人录入并由人负责。” |
@@ -422,7 +433,7 @@ RESULT FAIL —— PRODUCER FAIL 包内 producer 与当前验算版本不一致�
 | “公钥能**证明这是我们公司发的**” | “pin 只证明包与这把公钥匹配；主体身份要靠独立渠道核验。” |
 | “**改一个字节一定被抓**” | “参与哈希与签名的字节会被抓；自由文本字段不参与验算。” |
 | “旧包也能验，说明**版本无所谓**” | “旧包必须配同版本 wheel，否则第一道就是 `PRODUCER FAIL`。” |
-| “删输入一定会 `FAIL`” | “带输入契约的 v3 包会 `FAIL`；默认 v2 无签名包只会 `PARTIAL`，不能拿它演示。” |
+| “删输入一定会 `FAIL`” | “带输入契约的 v3 包会 `FAIL`；默认 v2 无签名包只会 `PARTIAL`，不能拿它演示（现场自己生成需先起 PostgreSQL）。” |
 | “导出只要 3 秒，性能有 SLA” | “那是特定数据量下的实验值，不是 SLA；引用前先看随包外附件提供的 `docs/口径声明.md`。” |
 
 ---
@@ -445,7 +456,8 @@ RESULT FAIL —— PRODUCER FAIL 包内 producer 与当前验算版本不一致�
 
 ## 附：本脚本对应的实测输出从哪来
 
-- 八包 `verify` / `replay` 的逐条原始输出与退出码：`reports/round19-techcheck.txt`（交接目录内）。
+- 0.4.18 本轮变更、双读复跑与测试收口记录：`reports/0.4.18-已确认结论拆分与导出裁剪.md`（交接目录内）。
+- 本脚本 0.4.18 版逐节盲跑（含退出码、失败点与耗时）：`reports/20261110-PoC演示脚本盲跑记录-第二十轮.md`（仓库内）。
 - 退出码 0/1/2/3 的统一定义：`README-验收.md` 第三节。
 - 旧包、旧 wheel、依赖锁的真实位置：`OLD-WHEELS.md` 与 `KEY-NOTE.txt`。
-- 本脚本中的篡改、缺公钥、旧包三类输出，已按交接目录的 0.4.17 包与锚点在本机复跑核对；现场请以客户机器上的实际输出为准。
+- 本脚本中的篡改、缺公钥、旧包三类输出，已按交接目录的 0.4.18 包与锚点在干净的 0.4.18 venv 中复跑核对（全程未注入 `WCA_BUILD_COMMIT`）；现场请以客户机器上的实际输出为准。
