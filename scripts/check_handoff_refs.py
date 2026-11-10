@@ -27,11 +27,25 @@ def text_files(root: Path):
             yield path
 
 
+def _is_prefix_listing(ref: str, prefixes: tuple[str, ...]) -> bool:
+    """判断该串是不是“前缀词按扫描顺序拼接”的说明句，而非真实路径。
+
+    `docs/scripts/tests/src/.../handoff` 是文档在列举扫描前缀，不是文件路径；
+    但 `src/rules` 这类真实的仓库子目录仍要照常校验，所以要求至少 3 段且顺序连续。
+    """
+    parts = ref.split("/")
+    if len(parts) < 3 or any(part not in prefixes for part in parts):
+        return False
+    order = [prefixes.index(part) for part in parts]
+    return all(back == front + 1 for front, back in zip(order, order[1:]))
+
+
 def refs(text: str, prefixes: tuple[str, ...] = PREFIXES) -> set[str]:
     pattern = re.compile(
         r"(?<![\w./-])(?:" + "|".join(prefixes)
         + r")/[A-Za-z0-9_./\-\u4e00-\u9fff]+")
-    return {m.group(0).rstrip("./") for m in pattern.finditer(text)}
+    found = {m.group(0).rstrip("./") for m in pattern.finditer(text)}
+    return {ref for ref in found if not _is_prefix_listing(ref, prefixes)}
 
 
 def active_prefixes(root: Path) -> tuple[str, ...]:

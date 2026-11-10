@@ -120,6 +120,61 @@ def _cjk_to_int(text: str) -> int:
     return digits.get(text, 0)
 
 
+DIGEST_KEYS = ("conclusion_digest", "evidence_digest", "inputs_digest",
+               "input_fingerprint")
+MAIN_ROLES = ("engine-only", "confirmed", "cross-db", "reverse-order")
+
+
+def _version_key(version: str) -> tuple[int, int, int]:
+    """版本号按数值元组排序：`0.4.9` 必须排在 `0.4.12` 之前（字符串排序会反过来）。"""
+    parts = [int(part) for part in str(version).split(".") if part.isdigit()]
+    return tuple((parts + [0, 0, 0])[:3])
+
+
+def _version_ranges(versions) -> str:
+    """把版本集合按数值排序后合并成连续区间；区间起止都由实有版本算出，不写死。"""
+    ordered = sorted({str(v) for v in versions if v}, key=_version_key)
+    if not ordered:
+        return "（无）"
+    spans: list[tuple[str, str]] = []
+    start = prev = ordered[0]
+    for current in ordered[1:]:
+        p, c = _version_key(prev), _version_key(current)
+        consecutive = p[0] == c[0] and p[1] == c[1] and c[2] == p[2] + 1
+        if not consecutive:
+            spans.append((start, prev))
+            start = current
+        prev = current
+    spans.append((start, prev))
+    return "、".join(s if s == e else f"{s}–{e}" for s, e in spans)
+
+
+def _missing_versions(versions) -> list[str]:
+    """同一 major.minor 分支内、夹在最小与最大版本之间但没有实物的版本。"""
+    ordered = sorted({str(v) for v in versions if v}, key=_version_key)
+    if not ordered:
+        return []
+    first, last = _version_key(ordered[0]), _version_key(ordered[-1])
+    if first[:2] != last[:2]:
+        return []
+    present = set(ordered)
+    return [f"{first[0]}.{first[1]}.{patch}"
+            for patch in range(first[2], last[2] + 1)
+            if f"{first[0]}.{first[1]}.{patch}" not in present]
+
+
+def _digest_groups(packages: list[dict]) -> list[tuple[tuple[str, ...], list[str]]]:
+    """按四联摘要的实测值分组，供清单逐组列出；不写“八包同值”这类无据概括。"""
+    order = {role: index for index, (role, *_rest) in enumerate(ROLES)}
+    groups: dict[tuple[str, ...], list[str]] = {}
+    for pkg in packages:
+        key = tuple(str(pkg[name]) for name in DIGEST_KEYS)
+        groups.setdefault(key, []).append(str(pkg["role"]))
+    for roles in groups.values():
+        roles.sort(key=lambda role: order.get(role, len(order)))
+    return sorted(groups.items(), key=lambda item: (-len(item[1]), item[1][0]))
+
+
 def _report_sections(out: Path) -> str:
     """§十 的 `reports/` 明细：本轮逐条、历史逐条，均由目录扫描得出。"""
     label = _round_label(out.name)
@@ -227,6 +282,28 @@ def _entry_sha(entry: dict) -> str:
     return str(entry.get("package_sha256") or entry.get("sha256") or "")
 
 
+MARKED_RE = re.compile(
+    r"^" + re.escape(docfacts.ANCHOR_MARKER)
+    + r"(?:（原记录：(.*?)；获取方式见 OLD-ANCHORS\.md）)?$", re.S)
+
+
+def _unwrap_marked(value) -> str:
+    """剥掉生成器历史上反复套上的“仅记录、不可解析（原记录：…）”，回到最内层记录值。
+
+    早期版本对已标注的 `file` 又包了一层，重建时逐次叠加成二层/三层嵌套。这里循环
+    解包到不再匹配为止，保证同一份历史锚点重建多次也只有一个包装层。
+    """
+    text = "" if value is None else str(value)
+    while True:
+        match = MARKED_RE.match(text)
+        if not match:
+            return text
+        inner = match.group(1)
+        if inner is None:
+            return text
+        text = inner
+
+
 def _locate_target(out: Path, anchor_version: str, role: str, version: str) -> Path:
     if anchor_version == version:
         return out / "package" / f"{role}.zip"
@@ -242,7 +319,8 @@ def _repair_anchor_doc(doc: dict, anchor_version: str, out: Path, version: str) 
                else [repaired])
     for entry in entries:
         role = str(entry.get("role") or "")
-        original = entry.get("file")
+        # 先解开历史嵌套，再写 original_file：同一锚点重建多次也只保留一层包装。
+        original = _unwrap_marked(entry.get("file"))
         entry["original_file"] = original
         target = _locate_target(out, anchor_version, role, version)
         if target.is_file() and docfacts.sha256_file(target) == _entry_sha(entry):
@@ -318,6 +396,27 @@ def _scan_version_mismatches(prev: Path, out: Path) -> dict:
     return {"anchors": anchor_rows, "manifests": manifest_rows}
 
 
+RESIDUAL_SCOPE_RE = re.compile(r"本目录的旧物实有：[^。]*。")
+
+
+def _residual_doc(source: str, old: dict, anchors: dict) -> str:
+    """把残留页里的“旧物实有范围”换成按目录扫描得出的版本区间与计数。"""
+    wheel_versions = {w["version"] for w in old["wheels"] if w.get("version")}
+    package_versions = {p["version"] for p in old["packages"] if p.get("version")}
+    anchor_versions = {a["version"] for a in anchors["singles"] + anchors["combined"]
+                       if a["version"]}
+    sentence = (
+        f"本目录的旧物实有：wheel {_version_ranges(wheel_versions)}"
+        f"（{len(wheel_versions)} 个版本）、包 {_version_ranges(package_versions)}"
+        f"（{len(package_versions)} 个版本 / {len(old['packages'])} 个 zip）、"
+        f"锚点 {_version_ranges(anchor_versions)}（{anchors['anchor_total']} 个）。")
+    text, count = RESIDUAL_SCOPE_RE.subn(sentence, source, count=1)
+    if count != 1:
+        raise SystemExit(
+            "已知残留与未闭合项.md 未找到“本目录的旧物实有：…。”句，无法写入实测范围")
+    return text
+
+
 def build(args: argparse.Namespace) -> int:
     version = args.version
     dist: Path = Path(args.dist).resolve()
@@ -390,7 +489,7 @@ def build(args: argparse.Namespace) -> int:
     (out / "docs").mkdir()
     for name in ("签名方案.md", "安全与证据链现状.md", "冻结版本说明.md"):
         shutil.copy2(ROOT / "docs" / name, out / "docs" / name)
-    shutil.copy2(ROOT / "docs" / "已知残留与未闭合项.md", out / "已知残留与未闭合项.md")
+    # `已知残留与未闭合项.md` 的旧物范围句要用扫描结果重写，等锚点扫描完成后写（步骤 8.1）。
     # 包外勘误附件（0.4.17 包的两页勘误）：原样并入，保留原有目录结构与封面衔接说明。
     annex = ROOT / "handoff" / "20261109-包外勘误附件"
     if annex.is_dir():
@@ -522,6 +621,10 @@ def build(args: argparse.Namespace) -> int:
 
     # 8.1 锚点：file 指针逐条判定（可解析 / 显式标注 / 悬空），并找出“未随本目录交付”的包源
     anchors = docfacts.anchor_records(out)
+    # 残留页的“旧物实有范围”由同一份旧物扫描 + 锚点扫描生成，不手写版本区间。
+    _write(out / "已知残留与未闭合项.md",
+           _residual_doc((ROOT / "docs" / "已知残留与未闭合项.md").read_text(encoding="utf-8"),
+                         old, anchors))
     status_text = {"resolvable": "可解析（本目录内）",
                    "marked": "仅记录、不可解析", "dangling": "悬空"}
     acquisitions: dict[tuple[str, str], str] = {}
@@ -551,7 +654,8 @@ def build(args: argparse.Namespace) -> int:
                     status_text[a["status"]], f"{a['bytes']}", f"`{a['sha256']}`"]
                    for a in anchors["singles"] + anchors["combined"]]
     anchor_versions = sorted({a["version"] for a in
-                              anchors["singles"] + anchors["combined"]})
+                              anchors["singles"] + anchors["combined"]},
+                             key=_version_key)
     version_rows = []
     for anchor_version in anchor_versions:
         singles_v = [a for a in anchors["singles"] if a["version"] == anchor_version]
@@ -681,7 +785,8 @@ def build(args: argparse.Namespace) -> int:
     reports_lines = _report_sections(out)
     _write(out / "README-验收.md",
            build_readme(version, release, rel_facts, packages_json, old, anchors,
-                        diff_md, diff_detail, out.name, prev_version, reports_lines))
+                        diff_md, diff_detail, out.name, prev_version, reports_lines,
+                        out))
     _write(out / "READ-ME-FIRST.txt",
            build_first(version, packages_json, old, anchors, diff_detail, out.name))
     key_note = (prev / "KEY-NOTE.txt").read_text(encoding="utf-8").replace(prev_version, version)
@@ -689,28 +794,37 @@ def build(args: argparse.Namespace) -> int:
     old_label = re.search(r"第([零一二三四五六七八九十]+)轮交接", key_note)
     if round_label and old_label:
         key_note = key_note.replace(old_label.group(0), f"第{round_label.group(1)}轮交接")
-    # 旧包/旧 wheel 的落点必须与 OLD-WHEELS.md 的“所在目录”同源，不靠记忆。
-    old_versions_text = "、".join(sorted({p["version"] for p in old["packages"]
-                                         if p.get("version")}))
-    wheels_ow_versions = sorted({w["version"] for w in old["wheels"]
-                                 if "old-wheels" in w["dirs"] and w["version"]})
-    wheels_op_versions = sorted({w["version"] for w in old["wheels"]
-                                 if "old-packages" in w["dirs"] and w["version"]})
-    locks_ow_versions = sorted({x["version"] for x in old["locks"]
-                                if "old-wheels" in x["dirs"] and x["version"]})
-    locks_op_versions = sorted({x["version"] for x in old["locks"]
-                                if "old-packages" in x["dirs"] and x["version"]})
-    only_ow = [v for v in wheels_ow_versions if v not in wheels_op_versions]
+    # 旧包/旧 wheel 的落点必须与 OLD-WHEELS.md 的“所在目录”同源，不靠记忆；
+    # 版本一律按元组排序后由区间函数生成，计数与列举取自同一个集合。
+    package_versions = {p["version"] for p in old["packages"] if p.get("version")}
+    wheels_ow_versions = {w["version"] for w in old["wheels"]
+                          if "old-wheels" in w["dirs"] and w.get("version")}
+    wheels_op_versions = {w["version"] for w in old["wheels"]
+                          if "old-packages" in w["dirs"] and w.get("version")}
+    locks_ow_versions = {x["version"] for x in old["locks"]
+                         if "old-wheels" in x["dirs"] and x.get("version")}
+    locks_op_versions = {x["version"] for x in old["locks"]
+                         if "old-packages" in x["dirs"] and x.get("version")}
+    only_ow = wheels_ow_versions - wheels_op_versions
+    old_roles = {p.get("role") for p in old["packages"] if p.get("role")}
+    missing_package_versions = _missing_versions(package_versions)
+    package_scope = (
+        f"{_version_ranges(package_versions)} 共 {len(old['packages'])} 个 zip"
+        f"（{len(package_versions)} 个版本 × {len(old_roles)} 个角色"
+        + (f"；缺 {_version_ranges(missing_package_versions)} 的包"
+           if missing_package_versions else "")
+        + "）")
     key_note = re.sub(
         r"(?s)旧包必须配.*?本轮新包（[^）]+）用本目录 release/ 的 [\d.]+ wheel。",
         "旧包必须配**同版本** wheel。本目录的旧包只有 "
-        f"{old_versions_text} 共 {len(old['packages'])} 个 zip（版本不连续，0.4.12 没有包）。\n"
-        "  0.4.10/0.4.11 的 wheel 在 release/old-wheels/ 与 release/old-packages/ 各有一份"
-        "（同名同字节）；"
-        + (f"{only_ow[0]}–{only_ow[-1]} 的 wheel 只在 release/old-wheels/。"
-           if only_ow else "其余旧 wheel 只在 release/old-wheels/。")
-        + "\n  **0.4.10/0.4.11 的依赖锁只在 release/old-packages/**，"
-        f"0.4.13–0.4.16 的锁在 release/old-wheels/（实有 {len(locks_ow_versions)} 个版本）。"
+        f"{package_scope}。\n"
+        f"  {_version_ranges(wheels_op_versions)} 的 wheel 在 release/old-wheels/ 与 "
+        "release/old-packages/ 各有一份（同名同字节）；"
+        f"{_version_ranges(only_ow)} 的 wheel 只在 release/old-wheels/。"
+        "\n  **"
+        f"{_version_ranges(locks_op_versions)} 的依赖锁只在 release/old-packages/**，"
+        f"{_version_ranges(locks_ow_versions)} 的锁在 release/old-wheels/"
+        f"（实有 {len(locks_ow_versions)} 个版本）。"
         "按 OLD-WHEELS.md 的“所在目录”列找即可，不要按目录名猜。\n"
         f"  本轮新包（{version}）用本目录 release/ 的 {version} wheel。",
         key_note, flags=re.S)
@@ -796,9 +910,26 @@ def write_unshipped(out: Path) -> str:
     return _gen("unshipped", "\n".join(lines))
 
 
+def _compare_with_prev(out: Path, packages: list[dict], prev_version: str) -> dict:
+    """把本轮八包与上一版实物逐包对拍四联摘要，返回逐键相同的包数。"""
+    same = {name: 0 for name in DIGEST_KEYS}
+    total = 0
+    for pkg in packages:
+        path = out / "release" / "old-packages" / f"{pkg['role']}-{prev_version}.zip"
+        if not path.is_file():
+            continue
+        facts = docfacts.package_facts(path)
+        total += 1
+        for name in DIGEST_KEYS:
+            if str(facts.get(name, "")) == str(pkg.get(name, "")):
+                same[name] += 1
+    return {"total": total, **same}
+
+
 def build_readme(version: str, release: dict, rel: dict, packages: list[dict],
                  old: dict, anchors: dict, diff_md: str, diff_detail: list[str],
-                 handoff_name: str, prev_version: str, reports_lines: str) -> str:
+                 handoff_name: str, prev_version: str, reports_lines: str,
+                 out: Path) -> str:
     current_count, history_count, current_combined, history_combined = \
         _anchor_counts(anchors, version)
     hist_versions = sorted({a["version"] for a in anchors["singles"]
@@ -821,8 +952,17 @@ def build_readme(version: str, release: dict, rel: dict, packages: list[dict],
              f"`{p['inputs_digest'][:8]}…`", f"`{p['input_fingerprint'][:8]}…`"]
             for p in packages]
     counts = packages[1]["counts"]
-    old_versions = sorted({p["version"] for p in old["packages"] if p.get("version")})
-    old_versions_text = " / ".join(old_versions)
+    old_versions = sorted({p["version"] for p in old["packages"] if p.get("version")},
+                          key=_version_key)
+    # 每个版本实有几个角色由扫描结果算，不写死“八个角色”。
+    role_counts = {v: len({p.get("role") for p in old["packages"]
+                           if p["version"] == v and p.get("role")})
+                   for v in old_versions}
+    if len(set(role_counts.values())) == 1 and role_counts:
+        old_scope = (f"{len(old_versions)} 个版本 × "
+                     f"{next(iter(role_counts.values()))} 个角色")
+    else:
+        old_scope = "、".join(f"{v}：{role_counts[v]} 个角色" for v in old_versions)
     wheels_ow = [w for w in old["wheels"] if "old-wheels" in w["dirs"]]
     wheels_op = [w for w in old["wheels"] if "old-packages" in w["dirs"]]
     locks_ow = [x for x in old["locks"] if "old-wheels" in x["dirs"]]
@@ -831,9 +971,22 @@ def build_readme(version: str, release: dict, rel: dict, packages: list[dict],
     wheels_op_count = len(wheels_op)
     locks_ow_count = len(locks_ow)
     locks_op_count = len(locks_op)
-    wheels_op_text = "、".join(sorted(w["version"] for w in wheels_op)) or "（无）"
-    locks_ow_text = "、".join(sorted(x["version"] for x in locks_ow)) or "（无）"
-    locks_op_text = "、".join(sorted(x["version"] for x in locks_op)) or "（无）"
+    wheels_op_text = _version_ranges(w["version"] for w in wheels_op)
+    locks_ow_text = _version_ranges(x["version"] for x in locks_ow)
+    locks_op_text = _version_ranges(x["version"] for x in locks_op)
+    cmp = _compare_with_prev(out, packages, prev_version)
+    cmp_text = ("、".join(f"{name} {cmp[name]}/{cmp['total']} 包相同"
+                          for name in DIGEST_KEYS)
+                if cmp["total"] else f"（本目录没有 {prev_version} 旧包，未对拍）")
+    main_packages = [p for p in packages if p["role"] in MAIN_ROLES]
+    main_same = len({tuple(str(p[name]) for name in DIGEST_KEYS)
+                     for p in main_packages}) == 1
+    main_text = (
+        "四主包（" + "、".join(MAIN_ROLES) + "）四联摘要同值："
+        + "、".join(f"{name} `{main_packages[0][name][:8]}…`" for name in DIGEST_KEYS)
+        + "（实测）。"
+        if main_same else
+        "四主包（" + "、".join(MAIN_ROLES) + "）四联摘要并非同值，逐包实值见 §四 包表。")
     head = _head_commit()
     header = _gen("handoff-header", "\n".join([
         "本目录实测事实（构建时生成，禁止人工编辑）：",
@@ -902,12 +1055,9 @@ def build_readme(version: str, release: dict, rel: dict, packages: list[dict],
 本轮处置见 `reports/0.4.17-锚点纠正与扫描器扩展.md`；上一轮的 16 条见
 `reports/0.4.16-护栏加固与残留页.md`。
 
-八包重导后 `conclusion_digest`、`evidence_digest`、`inputs_digest`、`input_fingerprint`
-与 0.4.15/0.4.16 **逐包相同**；只有 `artifacts_digest` 因包内文档变化（原因见 §四）。
-四主包不变量：conclusion `{packages[1]['conclusion_digest'][:8]}…`、
-evidence `{packages[1]['evidence_digest'][:8]}…`、
-inputs `{packages[1]['inputs_digest'][:8]}…`、
-fingerprint `{packages[1]['input_fingerprint'][:8]}…`（实测）。
+{version} 八包与 {prev_version} 逐包对拍（新包在 `package/`，对照包在 `release/old-packages/`）：
+{cmp_text}；`artifacts_digest` 的变化原因见 §四。
+{main_text}
 
 ## 二、三步先跑通
 
@@ -991,7 +1141,7 @@ py -3.12 -m venv .venv-clean
 ## 九、旧包、旧 wheel 与旧锚点（本目录内可复现）
 
 - **旧包实物**：`release/old-packages/` 实有 **{len(old['packages'])} 个** zip
-  （{old_versions_text} 八个角色），逐文件哈希见 `交付清单.txt`。
+  （版本 {_version_ranges(old_versions)}；{old_scope}），逐文件哈希见 `交付清单.txt`。
 - **旧 wheel**：`release/old-wheels/` 实有 **{wheels_ow_count} 个**；`release/old-packages/`
   另有 **{wheels_op_count} 个**同名副本（{wheels_op_text}）。按文件名唯一计
   **{len(old['wheels'])} 个**，清单见 `OLD-WHEELS.md`（逐行标出真实所在目录）。
@@ -1044,7 +1194,7 @@ py -3.12 -m venv .venv-clean
 | README 结论 | 可否独立复现 | 说明 |
 | --- | --- | --- |
 | 八包 {version} 各 `verify`/`replay` 均 `RESULT OK` | 可 | 包、锚点、公钥、wheel 全在本目录 |
-| {prev_version}→{version} 四联摘要逐包相同（`artifacts_digest` 除外） | 可 | 用 `release/old-packages/` 的 {prev_version} 包与 {prev_version} wheel 对照 |
+| {prev_version}→{version} 四联摘要逐包对拍 | 可 | 实测：{cmp_text}；用 `release/old-packages/` 的 {prev_version} 包与 {prev_version} wheel 对照 |
 | 旧包配旧 wheel 可验可回放 | 可 | §九 旧物表给出每个文件的真实目录；本轮未重跑 {len(old['packages'])} 包矩阵，原始记录见 `已知残留与未闭合项.md` |
 | 退出码 0/1/2/3 分档 | 可 | 按 §三参数变体照做 |
 | 无签名 v2 包 → `RESULT PARTIAL` exit 2 | 可 | 用 {version} wheel 导出无钥包后验算 |
@@ -1117,14 +1267,30 @@ def write_manifest(out: Path, version: str, release: dict, invariants: dict,
         f"release_key_id={release['release_signature']['key_id']}",
         f"package_key_id={packages[0]['key_id']}",
         "",
-        "包级不变量（四联摘要，八包同值）：",
     ]
-    lines += [f"  {key}={value}" for key, value in invariants.items()]
+    # 概括句只能由逐包实测值算出：同值才写同值，否则逐组列名与数值。
+    groups = _digest_groups(packages)
+    if len(groups) == 1:
+        lines.append(f"包级不变量（四联摘要，{len(packages)} 包同值；由逐包实测值确认）：")
+        lines += [f"  {name}={value}"
+                  for name, value in zip(DIGEST_KEYS, groups[0][0])]
+    else:
+        main_group = next((roles for _values, roles in groups
+                           if len(roles) == len(MAIN_ROLES)
+                           and set(roles) == set(MAIN_ROLES)), None)
+        lines.append(
+            f"包级四联摘要分组（由逐包实测值计算，共 {len(groups)} 组；"
+            + ("四主包同值，其余各包见下）：" if main_group else "逐包实值见下）："))
+        for index, (values, roles) in enumerate(groups, 1):
+            lines.append(f"  第 {index} 组（{len(roles)} 包：{'、'.join(roles)}）：")
+            lines += [f"    {name}={value}"
+                      for name, value in zip(DIGEST_KEYS, values)]
     lines += ["", f"八个包（{len(packages)} 个）："]
     for pkg in packages:
         lines.append(f"  {pkg['file'].split('/')[-1]}  sha256={pkg['sha256']}  "
                      f"bytes={pkg['bytes']}")
         lines.append(f"    anchor={pkg['anchor']}")
+        lines += [f"    {name}={pkg[name]}" for name in DIGEST_KEYS]
         lines.append(f"    artifacts_digest={pkg['artifacts_digest']}")
     lines += [
         "",
