@@ -989,6 +989,12 @@ def build_readme(version: str, release: dict, rel: dict, packages: list[dict],
     combined_hist = "、".join(f"`{a['name']}`" for a in sorted(
         (a for a in anchors["combined"] if a["version"] != version), key=lambda a: a["name"])) \
         or "（无历史组合锚点）"
+    # 单包锚点顶层字段数由实物统计得出，不手写。
+    anchor_field_counts = sorted({len(json.loads(p.read_text(encoding="utf-8")))
+                                  for p in out.glob(f"anchor-{version}-*.json")})
+    anchor_field_text = (str(anchor_field_counts[0]) if len(anchor_field_counts) == 1
+                         else f"{anchor_field_counts[0]}–{anchor_field_counts[-1]}") \
+        if anchor_field_counts else "（本目录无单包锚点）"
     rp_unchanged = not any("policies/RULE-PACK.md" in item for item in diff_detail)
     ts_files = sorted({item.split(":", 1)[0].split("/", 1)[1] for item in diff_detail
                        if item.startswith("confirmed/") and "真实时间戳" in item
@@ -1136,9 +1142,14 @@ def build_readme(version: str, release: dict, rel: dict, packages: list[dict],
 
 ### 先确认目录（错目录会伪装成文件缺失）
 
-Windows（PowerShell）：`Test-Path .\\README-验收.md` 必须输出 `True`；
+Windows（PowerShell）：`Test-Path .\\package\\engine-only.zip` 必须输出 `True`；
 
-Linux / macOS（bash）：`test -f README-验收.md && echo cwd-ok` 必须输出 `cwd-ok`。
+Linux / macOS（bash）：`test -f package/engine-only.zip && echo cwd-ok` 必须输出 `cwd-ok`。
+
+**不要**用 `Test-Path .\\README-验收.md` 做自检：`release/` 子目录里也有同名文件，
+在那里会误报 `True`（实测 `release/` 下 `README-验收.md` 为 True、`package/engine-only.zip` 为 False），
+恰好放过了最容易走错的一层。若输出 `False` 或无输出：先 `cd` 到本 README 所在目录（交付根），
+再重新执行本节命令。
 
 在错的目录执行，报错会是 `Could not open requirements file: ...` 或 `anchor 文件不存在：...`，
 看起来像交付缺件，其实是没切到本目录。
@@ -1245,8 +1256,10 @@ echo "exit=$?"
 
 ### 锚点文件怎么选（拿错会误判）
 
-- 单包锚点：`anchor-{version}-<角色>.json`，本批 {len(packages)} 个角色各一份，四个字段
-  （`anchor` / `package_sha256` / `artifacts_digest` / `evidence_digest`）扁平写在顶层；
+- 单包锚点：`anchor-{version}-<角色>.json`，本批 {len(packages)} 个角色各一份，四个**必需**字段
+  （`anchor` / `package_sha256` / `artifacts_digest` / `evidence_digest`）扁平写在顶层
+  （另有 `version` / `role` / `file` / `file_status` / `inputs_digest` / `input_fingerprint` /
+  `comparability_scope` / `counts` 等元数据，实测每个锚点 {anchor_field_text} 个顶层字段）；
   `--anchor-file` 只接受这种，验哪个包就用哪个角色的文件。
 - 本轮组合锚点：{combined_now}，`packages` 是数组、覆盖本批全部 {len(packages)} 个包，只作汇总记录；
   历史轮的组合锚点为 {combined_hist}，格式相同。
