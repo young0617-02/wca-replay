@@ -497,7 +497,8 @@ PACKAGE_README = (
     "本举证包由 worktime-compliance-agent 生成。\r\n"
     "三元组（规则版本 / 输入指纹 / 结论摘要）用于复核：在相同输入与相同规则版本下重跑，"
     "结论摘要必须逐字节一致。\r\n"
-    "本包不含任何应付金额：引擎只输出小时数与法定倍数档位，金额由 HR 负责人在复核台具名录入。\r\n"
+    "引擎不计算应付金额、也不做违法定性：包内 employee.csv 的 normal_hourly_cents 只是工资基数，"
+    "供 HR 按法定倍数测算时参考，不是应付金额；金额由 HR 负责人在复核台具名录入。\r\n"
     "包内 inputs/ 带本次结论真正依赖的原始 CSV；v5 另带审批台账 approval_ledger.csv，"
     "选择规则见 manifest.inputs.selection_rule。"
     "注意：approval_ledger.csv / approval_coverage.csv 由数据库确定性重导出"
@@ -608,7 +609,8 @@ def responsibility_block(conn: Connection, cfg: Config, run_id: str) -> dict:
         "WHERE action = 'evidence.sign' AND run_id = ? ORDER BY seq", (run_id,)).fetchall()
     approved_count = sum(1 for c in confirmed if c.get("decision") == "APPROVED")
     return {
-        "principle": "数值一律由确定性规则引擎计算；AI 只做意图归类与已有事实的叙述，"
+        "principle": "引擎输出的数值一律由确定性规则引擎计算（输入数据如工资基数来自源表，不由引擎计算）；"
+                     "AI 只做意图归类与已有事实的叙述，"
                      "且出口有数字白名单与重大事项拒诺两道闸；对外结论必须由具名人工确认。",
         "engine_only_outputs": ["分钟数", "法定倍数档位（千分位）", "规则 ID", "条文号", "原始行号"],
         "never_output": ["应付金额", "赔偿数额", "违法定性"],
@@ -1610,8 +1612,8 @@ def _export_package_locked(conn: Connection, cfg: Config, run_id: str, *,
                       + [README_FILE, VERIFY_REQUIREMENTS_FILE, "verify.py"]
                       + [f"policies/{p.name}" for p in policy_files]
                       + [INPUTS_MANIFEST_NAME] + [e["arcname"] for e in collected["entries"]],
-        "disclaimer": "本包不产出应付金额（需求 D-03）；金额是 HR 负责人具名录入的人工结论，不属于引擎输出；"
-                      "数据为合成数据，非任何真实个人信息。",
+        "disclaimer": "引擎不产出应付金额、不做违法定性；employee.csv 里的 normal_hourly_cents 仅为工资基数参考，"
+                      "不是应付金额，金额由 HR 负责人具名录入；数据为合成数据，非任何真实个人信息。",
     }
     if signing_key:
         # 结论集文件哈希也放进 manifest；它被自校验和覆盖，进而被签名覆盖。

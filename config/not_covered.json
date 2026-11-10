@@ -11,7 +11,7 @@
     ],
     "excluded_reason": "需求裁决 D-02：周期超额与豁免判定的分支不可控，本期只做 8 小时标准工时；命中即产出 SCOPE-02/03 未覆盖标记，不套用标准工时硬判",
     "cities_covered_from": "config/region_profile.json",
-    "money_outputs": "引擎不产出任何应付金额（需求 D-03）；金额为 HR 负责人具名人工录入"
+    "money_outputs": "引擎不产出应付金额、不做违法定性；employee.csv 里的 normal_hourly_cents 仅为工资基数参考，不是应付金额，金额由 HR 负责人具名录入"
   },
   "rules_excluded": [
     {"rule_id": "COMP-C01", "why": "综合计算工时周期超额：退出范围（D-02）"},
