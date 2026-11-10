@@ -585,6 +585,11 @@ def test_numbers_are_artifact_facts_or_declared_constants() -> None:
         for value in manifest["counts"].get("rule_versions", {}).values():
             actual.add(str(value))
     actual.update(NON_ARTIFACT_NUMBERS)
+    # 离线依赖的规模由 `offline-deps/` 实物算出（不写进豁免表，也不是手写常量）。
+    offline = _offline_facts(base)
+    actual.update({str(offline["files"]), str(offline["wheels"]),
+                   str(offline["bytes"]), f"{offline['bytes']:,}",
+                   str(offline["wheel_bytes"]), f"{offline['wheel_bytes']:,}"})
     # 旧物与旧锚点的计数由同一扫描器给出（与 README 生成区同源）。
     actual.add(str(len(old["wheels"])))
     actual.add(str(len(old["locks"])))
@@ -816,6 +821,18 @@ def test_json_and_jsonl_files_are_parseable() -> None:
 # 数字—名词绑定：数字必须与它紧跟的名词对应，不能“换个名词就通过”
 # ---------------------------------------------------------------------------
 
+def _offline_facts(base: Path) -> dict[str, int]:
+    """`offline-deps/` 的规模事实：文件数、wheel 数、字节数（全部由目录扫描得出）。"""
+    root = base / "offline-deps"
+    if not root.is_dir():
+        return {"files": 0, "wheels": 0, "bytes": 0, "wheel_bytes": 0}
+    files = [p for p in root.rglob("*") if p.is_file()]
+    wheels = list((root / "wheels").glob("*.whl"))
+    return {"files": len(files), "wheels": len(wheels),
+            "bytes": sum(p.stat().st_size for p in files),
+            "wheel_bytes": sum(p.stat().st_size for p in wheels)}
+
+
 def _noun_actuals(base: Path) -> dict[str, set[int]]:
     old = docfacts.old_assets(base / "release")
     records = docfacts.anchor_records(base)
@@ -838,6 +855,7 @@ def _noun_actuals(base: Path) -> dict[str, set[int]]:
         len([p for p in base.rglob("*") if p.is_file()]),
         len(packages), len(old["packages"]),
         len(list((base / "docs").glob("*"))), len(list((base / "reports").glob("*"))),
+        _offline_facts(base)["files"],
     }
     return {
         "锚点": {records["anchor_total"], len(singles), len(combined),
@@ -851,7 +869,8 @@ def _noun_actuals(base: Path) -> dict[str, set[int]]:
         "wheel": {len(old["wheels"]),
                   sum(1 for w in old["wheels"] if "old-wheels" in w["dirs"]),
                   sum(1 for w in old["wheels"] if "old-packages" in w["dirs"]),
-                  len(list((base / "release").glob("*.whl")))},
+                  len(list((base / "release").glob("*.whl"))),
+                  _offline_facts(base)["wheels"]},
         "锁": {len(old["locks"]),
                sum(1 for x in old["locks"] if "old-wheels" in x["dirs"]),
                sum(1 for x in old["locks"] if "old-packages" in x["dirs"])},

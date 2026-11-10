@@ -450,6 +450,15 @@ def build(args: argparse.Namespace) -> int:
         shutil.copy2(prev / "package" / filename,
                      out / "release" / "old-packages" / f"{role}-{prev_version}.zip")
 
+    # 2.5) 离线依赖（空气隙验算用）：原样并入，**不放进 `release/`**，签名范围保持不变
+    offline_src = (Path(args.offline_deps) if args.offline_deps
+                   else ROOT / "var" / f"offline-deps-{version}")
+    if not (offline_src / "wheels").is_dir():
+        raise SystemExit(f"缺少离线依赖目录：{offline_src}（用 --offline-deps 指定）")
+    shutil.copytree(offline_src / "wheels", out / "offline-deps" / "wheels")
+    for name in ("README.md", "summary.json"):
+        shutil.copy2(offline_src / name, out / "offline-deps" / name)
+
     # 3) 公钥、历史锚点：文件名一律由“内容里的 version”派生，不沿用源文件名。
     for name in ("trusted-public-key.pub", "release-public-key.pub"):
         shutil.copy2(prev / name, out / name)
@@ -936,6 +945,14 @@ def build_readme(version: str, release: dict, rel: dict, packages: list[dict],
                             if a["version"] and a["version"] != version},
                            key=lambda s: tuple(int(x) for x in s.split(".")))
     history_last = hist_versions[-1] if hist_versions else version
+    # 离线依赖的规模由目录扫描得出，数字不手写；缺失即失败（不允许静默少交付）。
+    offline_root = out / "offline-deps"
+    if not (offline_root / "wheels").is_dir():
+        raise SystemExit("交付目录内缺少 offline-deps/wheels/，无法生成规模统计")
+    offline_files = [p for p in offline_root.rglob("*") if p.is_file()]
+    offline_wheels = sorted((offline_root / "wheels").glob("*.whl"))
+    offline_bytes = sum(p.stat().st_size for p in offline_files)
+    offline_wheel_bytes = sum(p.stat().st_size for p in offline_wheels)
     rp_unchanged = not any("policies/RULE-PACK.md" in item for item in diff_detail)
     ts_files = sorted({item.split(":", 1)[0].split("/", 1)[1] for item in diff_detail
                        if item.startswith("confirmed/") and "真实时间戳" in item
@@ -998,6 +1015,9 @@ def build_readme(version: str, release: dict, rel: dict, packages: list[dict],
         f"file 可解析 {anchors['by_status']['resolvable']}、"
         f"显式标注 {anchors['by_status']['marked']}、悬空 {anchors['by_status']['dangling']}）",
         f"- producer commit `{release['git_commit']}`；构建时间 `{release['build_time']}`",
+        f"- 离线依赖：`offline-deps/wheels/` **{len(offline_wheels)} 个 wheel / "
+        f"{offline_wheel_bytes:,} 字节**；`offline-deps/` 合计 **{len(offline_files)} 个文件 / "
+        f"{offline_bytes:,} 字节**（逐文件哈希见 `交付清单.txt`，不进 `release/` 签名范围）",
         f"- 目录生成于 `{head}`；包由构建提交 `{release['git_commit']}` 构建"
         "（两者不同属正常：文档/生成器改动不改变包字节）",
         f"- 包签名钥 `{packages[0]['key_id'].split(':')[1][:12]}…`；"
@@ -1075,6 +1095,15 @@ def build_readme(version: str, release: dict, rel: dict, packages: list[dict],
 三平台命令只差三处：解释器名（Windows `py -3.12` / Linux、macOS `python3.12`）、
 虚拟环境可执行目录（`Scripts\\` / `bin/`，入口名 `wca-verify.exe` / `wca-verify`）、
 路径分隔符（`\\` / `/`）。其余参数完全一致。
+
+**空气隙 / 内网环境**：第 2 步不要联网，改用本目录的依赖缓存：
+
+```text
+pip install --no-index --find-links=<本目录>/offline-deps/wheels --require-hashes -r release/requirements.lock.txt
+```
+
+信任链条与逐 wheel 校验方式见 `offline-deps/README.md`；`offline-deps/` 不替代
+`release/`，主验算路径仍是 `release/` 内的 wheel。
 
 ### Windows（PowerShell）
 
@@ -1224,6 +1253,8 @@ python3.12 -m venv .venv-clean
   trusted-public-key.pub / release-public-key.pub
   package/                   # {len(packages)} 个 {version} 包
   release/                   # {version} 发行物 + old-wheels/ + old-packages/
+  offline-deps/              # 依赖 wheel 缓存（{len(offline_wheels)} 个 wheel）+ README + summary.json；
+                             # 空气隙环境用本目录装依赖；不计入 release/ 签名范围
   包外勘误附件/              # 0.4.17 包的两页勘误（4 文件）；计入 交付清单.txt，不在 SHA256SUMS 签名范围
   docs/                      # 签名方案 / 安全与证据链现状 / 冻结版本说明 / 护栏豁免表
   reports/                   # 历史报告 + 原始输出 + round17-diff.md
@@ -1308,6 +1339,13 @@ def write_manifest(out: Path, version: str, release: dict, invariants: dict,
     files = sorted((p for p in out.rglob("*")
                     if p.is_file() and p.name != "交付清单.txt"),
                    key=lambda p: p.relative_to(out).as_posix())
+    offline_root = out / "offline-deps"
+    offline_all = [p for p in offline_root.rglob("*") if p.is_file()]
+    offline_wheels = list((offline_root / "wheels").glob("*.whl"))
+    offline_files_count = len(offline_all)
+    offline_wheels_count = len(offline_wheels)
+    offline_bytes = sum(p.stat().st_size for p in offline_all)
+    offline_wheel_bytes = sum(p.stat().st_size for p in offline_wheels)
     reports = sorted({p.relative_to(out).as_posix() for p in out.rglob("reports/*")})
     lines = [
         f"{version} 第{_round_label(out.name)}轮交付清单",
@@ -1349,6 +1387,10 @@ def write_manifest(out: Path, version: str, release: dict, invariants: dict,
         f"  wheel={release['wheel']}",
         f"  build_time={release['build_time']}",
         "",
+        "离线依赖（offline-deps/，空气隙验算用；不在 release/ 签名范围，哈希由本清单负责）：",
+        f"  文件={offline_files_count}  wheel={offline_wheels_count}  "
+        f"wheel_bytes={offline_wheel_bytes}  bytes={offline_bytes}",
+        "",
         f"报告（{len(reports)} 个）：" + ", ".join(reports),
         "锚点：anchor.json, anchor.txt, "
         f"anchor-{version}-<role>.json（{len(packages)} 个）, OLD-ANCHORS.md",
@@ -1369,6 +1411,9 @@ def main() -> int:
     parser.add_argument("--dist", type=Path, required=True)
     parser.add_argument("--summary", type=Path, required=True)
     parser.add_argument("--prev", type=Path, required=True)
+    parser.add_argument("--offline-deps", type=Path, default=None,
+                        help="离线依赖源目录（含 wheels/、README.md、summary.json）；"
+                             "默认 var/offline-deps-<version>")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--force", action="store_true")
     return build(parser.parse_args())
