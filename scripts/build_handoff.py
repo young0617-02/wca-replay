@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -175,9 +176,12 @@ def _digest_groups(packages: list[dict]) -> list[tuple[tuple[str, ...], list[str
     return sorted(groups.items(), key=lambda item: (-len(item[1]), item[1][0]))
 
 
-def _report_sections(out: Path) -> str:
-    """§十 的 `reports/` 明细：本轮逐条、历史逐条，均由目录扫描得出。"""
-    label = _round_label(out.name)
+def _report_sections(out: Path, out_name: str | None = None) -> str:
+    """§十 的 `reports/` 明细：本轮逐条、历史逐条，均由目录扫描得出。
+
+    `out_name` 为最终交付目录名：生成时目录可能是临时名，轮次标签必须按目标名算。
+    """
+    label = _round_label(out_name or out.name)
     index = _cjk_to_int(label)
     prefix = f"round{index}-"
     role_order = ("techcheck", "redphase", "offline-raw", "pg-raw", "cleanvenv")
@@ -417,18 +421,159 @@ def _residual_doc(source: str, old: dict, anchors: dict) -> str:
     return text
 
 
+def _need(errors: list[str], path: Path, what: str) -> None:
+    if not path.exists():
+        errors.append(f"{what}不存在：{path}")
+    elif not os.access(path, os.R_OK):
+        errors.append(f"{what}不可读：{path}")
+
+
+def validate_inputs(args: argparse.Namespace) -> dict:
+    """在动任何输出之前解析并校验全部输入；失败即 SystemExit(2)，输出目录一字节不动。"""
+    version = args.version
+    dist = Path(args.dist).resolve()
+    prev = Path(args.prev).resolve()
+    summary_path = Path(args.summary).resolve()
+    out = Path(args.out).resolve()
+    offline = (Path(args.offline_deps).resolve() if args.offline_deps
+               else (ROOT / "var" / f"offline-deps-{version}").resolve())
+    errors: list[str] = []
+
+    for path, what in (
+        (dist, "dist 目录"),
+        (dist / "RELEASE.json", "dist/RELEASE.json"),
+        (summary_path, "包摘要 summary.json"),
+        (prev, "--prev 轮次目录"),
+        (prev / "release" / "RELEASE.json", "前序 release/RELEASE.json"),
+        (prev / "release" / "old-wheels", "前序 release/old-wheels 目录"),
+        (prev / "release" / "old-packages", "前序 release/old-packages 目录"),
+        (prev / "package", "前序 package 目录"),
+        (prev / "trusted-public-key.pub", "前序 trusted-public-key.pub"),
+        (prev / "release-public-key.pub", "前序 release-public-key.pub"),
+        (prev / "KEY-NOTE.txt", "前序 KEY-NOTE.txt"),
+        (offline / "wheels", "离线依赖 wheels 目录"),
+        (offline / "README.md", "离线依赖 README.md"),
+        (offline / "summary.json", "离线依赖 summary.json"),
+        (ROOT / "policies" / "RULE-PACK.md", "规则包 policies/RULE-PACK.md"),
+        (ROOT / "reports", "仓库 reports 目录"),
+    ):
+        _need(errors, path, what)
+    for name in ("签名方案.md", "安全与证据链现状.md", "冻结版本说明.md"):
+        _need(errors, ROOT / "docs" / name, f"仓库 docs/{name}")
+
+    summary = release = None
+    if summary_path.is_file():
+        try:
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            errors.append(f"包摘要无法解析：{summary_path}（{exc}）")
+    if (dist / "RELEASE.json").is_file():
+        try:
+            release = json.loads((dist / "RELEASE.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            errors.append(f"dist/RELEASE.json 无法解析：{exc}")
+    if summary is not None:
+        for role, key_path, _filename, _desc in ROLES:
+            try:
+                source = Path(_path_of(summary, key_path))
+            except (KeyError, IndexError, TypeError):
+                errors.append(f"包摘要缺少 {role} 的路径：{'/'.join(map(str, key_path))}")
+                continue
+            _need(errors, source, f"{role} 包")
+    if release is not None:
+        if release.get("version") != version:
+            errors.append(f"dist 版本 {release.get('version')} 与 --version {version} 不一致")
+        wheel = release.get("wheel")
+        if wheel:
+            _need(errors, dist / wheel, "dist wheel")
+        else:
+            errors.append("dist/RELEASE.json 缺少 wheel 字段")
+    if (prev / "package").is_dir():
+        for role, _key, filename, _desc in ROLES:
+            _need(errors, prev / "package" / filename, f"前序 {role} 包")
+    if prev.is_dir() and not any(prev.glob("anchor*.json")):
+        errors.append(f"前序目录没有锚点 anchor*.json：{prev}")
+    if out.exists() and not out.is_dir():
+        errors.append(f"--out 已存在但不是目录：{out}")
+    if not out.parent.is_dir():
+        errors.append(f"--out 的父目录不存在（不会自动创建）：{out.parent}")
+    elif not os.access(out.parent, os.W_OK):
+        errors.append(f"--out 的父目录不可写：{out.parent}")
+
+    if errors:
+        raise SystemExit("输入校验失败（输出目录未动）：\n" +
+                         "\n".join(f"- {e}" for e in errors))
+    return {"dist": dist, "prev": prev, "out": out, "offline": offline,
+            "summary": summary, "release": release}
+
+
+def _guard_overwrite(out: Path, args: argparse.Namespace) -> None:
+    """覆盖保护：`交付清单.txt` 在，说明那是一次已完成的交付，必须显式承认。
+
+    取舍：`--force` 保留“覆盖本工具中断留下的半成品（无 `交付清单.txt`）”的旧语义；
+    `--force-overwrite` 专门用于重生已完成的交付目录，且蕴含 `--force`。
+    这样日常重跑不会被无谓拦住，而“清掉一份已交付成品”必须多打一个开关。
+    """
+    if not out.exists():
+        return
+    has_manifest = (out / "交付清单.txt").is_file()
+    if has_manifest and not args.force_overwrite:
+        raise SystemExit(
+            f"{out} 已是一份含 交付清单.txt 的交付目录；确认重生请加 --force-overwrite")
+    if not has_manifest and not (args.force or args.force_overwrite):
+        raise SystemExit(
+            f"{out} 已存在但没有 交付清单.txt（可能是中断产物）；覆盖请加 --force")
+
+
+def _commit(work: Path, target: Path) -> None:
+    """原子替换：目标先改名备份，临时目录再换名；成功后删备份，失败则回滚。"""
+    backup = target.parent / f"{target.name}.old-{os.getpid()}"
+    if backup.exists():
+        shutil.rmtree(backup)
+    had_target = target.exists()
+    if had_target:
+        target.rename(backup)
+    try:
+        os.replace(work, target)
+    except BaseException:
+        if had_target and backup.exists() and not target.exists():
+            backup.rename(target)
+        raise
+    if backup.exists():
+        shutil.rmtree(backup)
+
+
 def build(args: argparse.Namespace) -> int:
+    """入口：先校验输入、再判覆盖、生成到临时目录、最后原子替换。"""
+    ctx = validate_inputs(args)
+    final_out: Path = ctx["out"]
+    _guard_overwrite(final_out, args)
+    work = final_out.parent / f"{final_out.name}.tmp-{os.getpid()}"
+    if work.exists():
+        shutil.rmtree(work)
+    try:
+        package_count, file_count = _build_tree(args, work, final_out.name)
+        _commit(work, final_out)
+    except BaseException:
+        if work.exists():
+            shutil.rmtree(work, ignore_errors=True)
+        raise
+    print(f"OK {final_out}：{package_count} 包，文件 {file_count} 个")
+    return 0
+
+
+def _build_tree(args: argparse.Namespace, out: Path, out_name: str) -> tuple[int, int]:
+    """在 `out`（临时目录）里生成完整交付；`out_name` 是最终目录名（文档里的轮次标签用它）。"""
     version = args.version
     dist: Path = Path(args.dist).resolve()
-    out: Path = Path(args.out).resolve()
     prev: Path = Path(args.prev).resolve()
     summary = json.loads(args.summary.read_text(encoding="utf-8"))
     release = json.loads((dist / "RELEASE.json").read_text(encoding="utf-8"))
-    if out.exists():
-        if not args.force:
-            raise SystemExit(f"{out} 已存在；确认重建请加 --force")
-        shutil.rmtree(out)
+    # `out` 是本次新建的临时目录；目标目录的处置已由 `_guard_overwrite` 与 `_commit` 负责。
     out.mkdir(parents=True)
+    # `target` 是最终目录（`<目标>.tmp-<pid>` 去掉后缀）：仅供“排除自己”的扫描用，
+    # 否则重建时旧交付目录会被当成历史锚点来源，同一仓库两次重建结果不一致。
+    target = out.parent / out_name
 
     # 1) 包
     (out / "package").mkdir()
@@ -473,7 +618,7 @@ def build(args: argparse.Namespace) -> int:
         allowed_versions.add(docfacts._version_from_name(path.name))
     allowed_versions.discard("")
     anchor_candidates, anchor_sources = _collect_anchor_candidates(
-        prev, out, allowed_versions)
+        prev, target, allowed_versions)
     historical_versions = sorted({v for (_kind, v, _role) in anchor_candidates
                                   if v != version})
     for anchor_version in historical_versions:
@@ -648,7 +793,7 @@ def build(args: argparse.Namespace) -> int:
             anchor_version = str(doc.get("version") or "")
             if (anchor_version, role) in acquisitions:
                 continue
-            for directory in _handoff_search_dirs(prev, out):
+            for directory in _handoff_search_dirs(prev, target):
                 candidate = directory / "package" / f"{role}.zip"
                 if not candidate.is_file():
                     continue
@@ -704,7 +849,7 @@ def build(args: argparse.Namespace) -> int:
             dirs = sorted({s["source"].parent.relative_to(ROOT).as_posix() for s in single_items})
             source_rows.append([anchor_version, f"单包（{len(single_items)} 个）",
                                 "、".join(f"`{d}/`" for d in dirs), "按内容版本逐一改名"])
-    mismatches = _scan_version_mismatches(prev, out)
+    mismatches = _scan_version_mismatches(prev, target)
     mismatch_rows = [[f"`{row['path']}`", row["name_version"], row["content_version"],
                       row["disposition"]] for row in mismatches["anchors"]]
     manifest_rows = [[f"`{row['path']}`", row["claimed"], row["actual"]]
@@ -791,15 +936,15 @@ def build(args: argparse.Namespace) -> int:
     _write(out / "未随交付清单.md", unshipped)
 
     # 11) README / READ-ME-FIRST / KEY-NOTE
-    reports_lines = _report_sections(out)
+    reports_lines = _report_sections(out, out_name)
     _write(out / "README-验收.md",
            build_readme(version, release, rel_facts, packages_json, old, anchors,
-                        diff_md, diff_detail, out.name, prev_version, reports_lines,
+                        diff_md, diff_detail, out_name, prev_version, reports_lines,
                         out))
     _write(out / "READ-ME-FIRST.txt",
-           build_first(version, packages_json, old, anchors, diff_detail, out.name))
+           build_first(version, packages_json, old, anchors, diff_detail, out_name))
     key_note = (prev / "KEY-NOTE.txt").read_text(encoding="utf-8").replace(prev_version, version)
-    round_label = re.search(r"第([零一二三四五六七八九十]+)轮整改", out.name)
+    round_label = re.search(r"第([零一二三四五六七八九十]+)轮整改", out_name)
     old_label = re.search(r"第([零一二三四五六七八九十]+)轮交接", key_note)
     if round_label and old_label:
         key_note = key_note.replace(old_label.group(0), f"第{round_label.group(1)}轮交接")
@@ -843,7 +988,7 @@ def build(args: argparse.Namespace) -> int:
     write_coverage(out, version)
 
     # 12) 交付清单（排除自身）
-    write_manifest(out, version, release, invariants, packages_json)
+    write_manifest(out, version, release, invariants, packages_json, out_name)
     errors = check_handoff_refs.check_refs(out)
     if errors:
         raise SystemExit("未随交付清单未覆盖全部引用：\n" + "\n".join(errors[:20]))
@@ -851,9 +996,7 @@ def build(args: argparse.Namespace) -> int:
     missing = check_handoff_refs.check_delivery_files(out)
     if missing:
         raise SystemExit("文档指名了不存在的交付文件：\n" + "\n".join(missing[:20]))
-    print(f"OK {out}：{len(packages_json)} 包，文件 "
-          f"{sum(1 for p in out.rglob('*') if p.is_file())} 个")
-    return 0
+    return len(packages_json), sum(1 for p in out.rglob('*') if p.is_file())
 
 
 def hash_scope(rel_path: str, signed: set[str]) -> str:
@@ -1444,7 +1587,7 @@ def build_first(version: str, packages: list[dict], old: dict, anchors: dict,
 
 
 def write_manifest(out: Path, version: str, release: dict, invariants: dict,
-                   packages: list[dict]) -> None:
+                   packages: list[dict], out_name: str | None = None) -> None:
     files = sorted((p for p in out.rglob("*")
                     if p.is_file() and p.name != "交付清单.txt"),
                    key=lambda p: p.relative_to(out).as_posix())
@@ -1457,7 +1600,7 @@ def write_manifest(out: Path, version: str, release: dict, invariants: dict,
     offline_wheel_bytes = sum(p.stat().st_size for p in offline_wheels)
     reports = sorted({p.relative_to(out).as_posix() for p in out.rglob("reports/*")})
     lines = [
-        f"{version} 第{_round_label(out.name)}轮交付清单",
+        f"{version} 第{_round_label(out_name or out.name)}轮交付清单",
         f"producer_commit={release['git_commit']}",
         f"generated_from_commit={_head_commit()}",
         "说明：producer_commit 是包的构建提交；generated_from_commit 是交付目录组装时的仓库 HEAD，",
@@ -1524,7 +1667,11 @@ def main() -> int:
                         help="离线依赖源目录（含 wheels/、README.md、summary.json）；"
                              "默认 var/offline-deps-<version>")
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--force", action="store_true")
+    parser.add_argument("--force", action="store_true",
+                        help="覆盖没有 交付清单.txt 的既有目录（本工具上次中断留下的半成品）")
+    parser.add_argument("--force-overwrite", action="store_true",
+                        help="允许覆盖已含 交付清单.txt 的交付目录（重生已交付成品）；"
+                             "蕴含 --force")
     return build(parser.parse_args())
 
 
