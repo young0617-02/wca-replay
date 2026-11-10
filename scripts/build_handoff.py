@@ -847,6 +847,10 @@ def build(args: argparse.Namespace) -> int:
     errors = check_handoff_refs.check_refs(out)
     if errors:
         raise SystemExit("未随交付清单未覆盖全部引用：\n" + "\n".join(errors[:20]))
+    # 文档点名的交付文件（锚点/包/wheel/公钥）必须真实存在：手写文件名漂移过两次，固化为构建门禁。
+    missing = check_handoff_refs.check_delivery_files(out)
+    if missing:
+        raise SystemExit("文档指名了不存在的交付文件：\n" + "\n".join(missing[:20]))
     print(f"OK {out}：{len(packages_json)} 包，文件 "
           f"{sum(1 for p in out.rglob('*') if p.is_file())} 个")
     return 0
@@ -979,6 +983,12 @@ def build_readme(version: str, release: dict, rel: dict, packages: list[dict],
     offline_wheels = sorted((offline_root / "wheels").glob("*.whl"))
     offline_bytes = sum(p.stat().st_size for p in offline_files)
     offline_wheel_bytes = sum(p.stat().st_size for p in offline_wheels)
+    # 组合锚点名由扫描结果生成，不手写：写死 `anchor-<版本>.json` 会指向不存在的文件。
+    combined_now = "、".join(f"`{a['name']}`" for a in anchors["combined"]
+                             if a["version"] == version) or "（本目录没有本轮组合锚点）"
+    combined_hist = "、".join(f"`{a['name']}`" for a in sorted(
+        (a for a in anchors["combined"] if a["version"] != version), key=lambda a: a["name"])) \
+        or "（无历史组合锚点）"
     rp_unchanged = not any("policies/RULE-PACK.md" in item for item in diff_detail)
     ts_files = sorted({item.split(":", 1)[0].split("/", 1)[1] for item in diff_detail
                        if item.startswith("confirmed/") and "真实时间戳" in item
@@ -1053,8 +1063,9 @@ def build_readme(version: str, release: dict, rel: dict, packages: list[dict],
 
 **交付边界（先读）**：本目录之外的 `scripts/`、`tests/`、`docs/交付与验收SOP.md` 等属
 仓库内开发参考，**不随交付提供**；**验算与回放只依赖本目录内文件**。验算步骤见本文件 §二（含 Windows / Linux / macOS
-三平台写法）或 [release/README-验收.md](release/README-验收.md) 第 2–4 节：两份**判定口径相同**、
-照任一份执行即可，若两份有出入以 `release/` 为准；锚点、公钥与样例包均在本目录。
+三平台写法，**可在本目录直接照抄执行**）；**判定口径**（`RESULT` 标签与退出码）以
+[release/README-验收.md](release/README-验收.md) 第 2–4 节为准，**安装方式以本文件第 2 步（离线）为准**；
+锚点、公钥与样例包均在本目录。
 `src/` 源码随 wheel 提供（可用于 diff 复核），仓库内测试/脚本不随交付。
 文档里出现的仓库路径，要么在本目录内真实存在，要么逐条列在
 [未随交付清单.md](未随交付清单.md)（该表由扫描器生成，覆盖 `docs/ scripts/ tests/ src/`
@@ -1065,10 +1076,13 @@ def build_readme(version: str, release: dict, rel: dict, packages: list[dict],
 > **同名文件提示（先读）**：本目录有**两个同名 `README-验收.md`**。被签名的是
 > `release/README-验收.md`（在 `release/SHA256SUMS` 的 {rel['covered_count']} 行内）；**根目录这份 `README-验收.md`
 > 不在签名范围**，其完整性只由 `交付清单.txt` 的记录负责。核对签名时勿取错文件。
-> **两份的关系**：判定口径相同（四步、五项外部门禁、`RESULT OK` 且 exit 0 才算通过），
-> **写法不同**——`release/` 那份用“包外锚点字符串 + 显式 `--expect-*` 参数”，本目录这份用
-> `--anchor-file` 单包锚点文件，两者等价；**若两份有出入，以 `release/` 为准**（它在签名覆盖内）。
-> 照任一份执行即可；本目录这份另负责组合锚点、离线依赖与样例包的说明。
+> **两份的关系（分工，不是任选）**：**判定口径**（`RESULT` 标签与退出码）以
+> `release/README-验收.md` 为准（它在签名覆盖内）；**安装方式以本文件第 2 步为准（离线）**——
+> `release/` 那份**不承诺离线自足**，安装命令不带 `--no-index`，断网时不要按它装依赖。
+> 离线 wheel 在 `../offline-deps/wheels`（相对 `release/`）。
+> **本文件（根目录）可直接照抄执行**；`release/README-验收.md` 是签名内的**模板**，含
+> `<包.zip>`、`<固定公钥文件>` 占位符且说明相对 `release/` 目录，需自行替换占位符后使用，
+> 不要把它当成可粘贴到根目录的脚本。
 
 **验算用哪个构建（先读）**：验算请使用本目录 `release/` 内随附的
 `worktime_compliance_agent-{version}-py3-none-any.whl` 及其锁定依赖，**不要**用源码树、
@@ -1119,6 +1133,15 @@ def build_readme(version: str, release: dict, rel: dict, packages: list[dict],
 ## 二、验算四步（Windows / Linux / macOS）
 
 > **以下命令均在本交付目录内执行（先切到该目录）；退出码 0 且 `RESULT OK` 才算法通过。**
+
+### 先确认目录（错目录会伪装成文件缺失）
+
+Windows（PowerShell）：`Test-Path .\\README-验收.md` 必须输出 `True`；
+
+Linux / macOS（bash）：`test -f README-验收.md && echo cwd-ok` 必须输出 `cwd-ok`。
+
+在错的目录执行，报错会是 `Could not open requirements file: ...` 或 `anchor 文件不存在：...`，
+看起来像交付缺件，其实是没切到本目录。
 
 > **看到 `RESULT PARTIAL`（exit 2）不算通过。** 最常见的原因是漏了 `--public-key`，
 > 或漏了 `--expect-anchor` / `--anchor-file`。PARTIAL 只表示“能核的都核了”，
@@ -1180,6 +1203,12 @@ py -3.12 -m venv .venv-clean
 "exit=$LASTEXITCODE"
 ```
 
+> **别被红色输出吓到**：pip 的 `notice` / `warning` 走 stderr，PowerShell 里可能显示成
+> `NativeCommandError` 样式，只要安装以 exit 0 结束就不是失败。
+> **`exit=0` 也不等于通过**：如果屏幕上**没有** `RESULT OK`，`exit=0` 可能是上一条命令留下的值
+> （命令本身没执行成功时 PowerShell 不一定更新 `$LASTEXITCODE`），不算通过。
+> 判据永远是“`RESULT` 标签”和“退出码”**同时**满足。
+
 ### Linux（bash）
 
 ```bash
@@ -1216,13 +1245,15 @@ echo "exit=$?"
 
 ### 锚点文件怎么选（拿错会误判）
 
-- `anchor-{version}-<角色>.json`：**单包扁平锚点**（`anchor` / `package_sha256` /
-  `artifacts_digest` / `evidence_digest`），`--anchor-file` 只接受这种；验哪个包就用哪个角色的文件。
-- `anchor-{version}.json` 与 `anchor.json`：**组合锚点**，`packages` 是数组、覆盖本批全部
-  {len(packages)} 个包，只作汇总记录；传给 `--anchor-file` 会被拒绝（“组合式 anchor.json 含多个包”）。
+- 单包锚点：`anchor-{version}-<角色>.json`，本批 {len(packages)} 个角色各一份，四个字段
+  （`anchor` / `package_sha256` / `artifacts_digest` / `evidence_digest`）扁平写在顶层；
+  `--anchor-file` 只接受这种，验哪个包就用哪个角色的文件。
+- 本轮组合锚点：{combined_now}，`packages` 是数组、覆盖本批全部 {len(packages)} 个包，只作汇总记录；
+  历史轮的组合锚点为 {combined_hist}，格式相同。
+  组合锚点**不能**传给 `--anchor-file`，会被拒绝（“组合式 anchor.json 含多个包”）。
 - `anchor.txt`：组合锚点的人读版本，用于抄进邮件/台账，不是命令行参数。
-- 拿错文件的典型症状：拿 A 包的锚点验 B 包 → `PACKAGE SHA256 FAIL`（exit 1）或
-  “组合式 anchor.json 含多个包”；这**不是包坏了**，换对文件即可。
+- 拿错文件的典型症状：拿 A 包的锚点验 B 包 → `PACKAGE SHA256 FAIL`（exit 1）；
+  拿组合锚点 → “组合式 anchor.json 含多个包”。这**不是包坏了**，换对文件即可。
 
 ## 三、退出码与默认流程（统一口径）
 

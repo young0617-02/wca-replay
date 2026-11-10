@@ -1,7 +1,14 @@
-"""断言交接目录文档里出现的仓库路径，要么在交付目录内真实存在，要么已列入未随交付清单。
+"""断言交接目录文档里出现的仓库路径与交付文件名都真实存在。
+
+两类检查：
+1. 仓库路径：要么在交付目录内真实存在，要么已列入未随交付清单；
+2. 交付文件名（`anchor-*.json` / `anchor.json` / `anchor.txt` / `*.zip` / `*.whl` / `*.pub`）：
+   必须在同目录、交付根目录，或其说明的相对位置（如 `package/`、`release/`）真实存在。
+   第三次出现“文档指名不存在的文件”（`docs/口径声明.md`、`anchor-0.4.19.json`）之后加的，
+   防止手写文件名再次漂移。
 
 用法：
-    uv run python scripts/check_handoff_refs.py handoff/20261104-第十四轮整改
+    uv run python scripts/check_handoff_refs.py handoff/20261110-第二十一轮整改
 """
 from __future__ import annotations
 
@@ -89,14 +96,60 @@ def check_refs(root: Path) -> list[str]:
     return errors
 
 
+# 交付文件名：锚点、包、wheel、公钥。`<包.zip>` 这类占位符因前一个字符是 `<` 而不匹配。
+DELIVERY_PATTERN = re.compile(
+    r"(?<![<\w./\\-])((?:[\w.\-]+[\\/])*[\w.\-]+\.(?:zip|whl|pub)"
+    r"|anchor[\w.\-]*\.(?:json|txt))")
+
+
+def check_delivery_files(root: Path) -> list[str]:
+    """文档里点名的交付文件必须真实存在（同目录 / 根目录 / 其说明的相对位置）。
+
+    裸文件名允许在交付目录内任意子目录命中（`engine-only.zip` 在 `package/`、
+    wheel 在 `release/`），这样“同目录或其说明的相对位置”都算数；
+    但只要全目录找不到同名文件，就是文档写错了。
+
+    范围例外（写死并说明理由，避免把历史取证当成现交付）：
+    - `reports/` 与 `release/旧发行物-SHA256清单.md` 是历史快照，里面的文件名属于
+      当时产物，不承诺仍在本交付目录里；
+    - 以仓库前缀（`var/`、`handoff/`、`dist/` 等）开头的路径由 `check_refs` 负责，
+      这里跳过，避免同一问题报两遍。
+    """
+    names: set[str] = {p.name for p in root.rglob("*") if p.is_file()}
+    errors: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for doc in text_files(root):
+        rel = doc.relative_to(root).as_posix()
+        if rel.startswith("reports/") or rel == "release/旧发行物-SHA256清单.md":
+            continue
+        text = doc.read_text(encoding="utf-8")
+        for match in DELIVERY_PATTERN.finditer(text):
+            token = match.group(1)
+            key = (rel, token)
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized = token.replace("\\", "/")
+            if normalized.split("/", 1)[0] in PREFIXES:
+                continue
+            candidates = (doc.parent / normalized, root / normalized,
+                          doc.parent.parent / normalized)
+            if any(path.is_file() for path in candidates):
+                continue
+            if "/" not in normalized and normalized in names:
+                continue
+            errors.append(f"{rel} 指名了不存在的交付文件：{token}")
+    return errors
+
+
 def main(argv: list[str]) -> int:
     root = Path(argv[1]) if len(argv) > 1 else Path(".")
-    errors = check_refs(root)
+    errors = check_refs(root) + check_delivery_files(root)
     if errors:
         for msg in errors:
             print(f"FAIL {msg}")
         return 1
-    print(f"OK {root}：文档中的仓库路径均已交付或已列入 {UNSHIPPED}")
+    print(f"OK {root}：仓库路径与交付文件名均真实存在或已列入 {UNSHIPPED}")
     return 0
 
 
