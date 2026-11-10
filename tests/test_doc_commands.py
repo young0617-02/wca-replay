@@ -23,7 +23,6 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-CURRENT_HANDOFF = ROOT / "handoff" / "20261104-第十九轮整改"
 BLOCK_RE = re.compile(r"```powershell\s*\n(.*?)```", re.S)
 LABEL_RE = re.compile(r"RESULT (OK|PARTIAL|FAIL|INCOMPARABLE)")
 RC_RE = re.compile(r"(?:rc=|exit(?: code)?\s*)(\d)")
@@ -31,17 +30,35 @@ REQUIRED_GATES = ("--public-key", "--expect-anchor", "--expect-package-sha256",
                   "--expect-artifacts-digest", "--expect-evidence-digest")
 
 
+def _release_info(base: Path) -> dict:
+    path = base / "release" / "RELEASE.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+
+
 def handoff_dir() -> Path:
-    return Path(os.environ.get("WCA_DOC_COMMANDS_DIR", CURRENT_HANDOFF))
+    """按 `release/RELEASE.json` 自动定位交付目录，不写死轮次。
+
+    `WCA_DOC_COMMANDS_DIR=<交接目录>` 可显式覆盖（取证旧交付时用）。
+    """
+    override = os.environ.get("WCA_DOC_COMMANDS_DIR")
+    if override:
+        return Path(override)
+    candidates = [p for p in (ROOT / "handoff").glob("*")
+                  if (p / "release" / "RELEASE.json").is_file()]
+    if not candidates:
+        pytest.skip("仓库内没有可用的交接目录（缺少 release/RELEASE.json）")
+    return max(candidates, key=lambda p: (p / "release" / "RELEASE.json").stat().st_mtime)
 
 
 def _doc_paths() -> list[Path]:
     base = handoff_dir()
     paths = [base / "README-验收.md", base / "release" / "README-验收.md",
              base / "docs" / "安全与证据链现状.md"]
-    dist_readme = ROOT / "dist" / "wca-replay-0.4.17" / "README-验收.md"
-    if dist_readme.is_file():
-        paths.append(dist_readme)
+    version = _release_info(base).get("version")
+    if version:
+        dist_readme = ROOT / "dist" / f"wca-replay-{version}" / "README-验收.md"
+        if dist_readme.is_file():
+            paths.append(dist_readme)
     return [p for p in paths if p.is_file()]
 
 
@@ -56,8 +73,12 @@ def _facts(base: Path, role: str) -> dict:
     if not anchor_files:
         pytest.skip(f"交接目录缺少 {role} 的锚点文件")
     anchor = json.loads(anchor_files[-1].read_text(encoding="utf-8"))
+    # 构建提交以包内 producer 为准，RELEASE.json 只作兜底；测试注入它，而不是比运行期 HEAD。
+    producer_commit = ((manifest.get("producer") or {}).get("commit")
+                       or _release_info(base).get("git_commit") or "")
     return {
         "package": package,
+        "producer_commit": producer_commit,
         "public_key": base / "trusted-public-key.pub",
         "anchor": anchor["anchor"],
         "package_sha256": anchor["package_sha256"],
@@ -144,7 +165,19 @@ def _map_token(token: str, base: Path, facts: dict) -> str:
     return token
 
 
-def _argv(command: str, base: Path) -> list[str]:
+def _env_with_commit(facts: dict) -> dict:
+    """把包内构建提交注入 `WCA_BUILD_COMMIT`：producer 门仍按“包内 == 注入值”判断。
+
+    这样门禁不再把“运行期 HEAD”当不变量（否则发版后任何提交都会让示例命令转红）；
+    注入值与包内不一致时门照样 FAIL，见 `test_wrong_build_commit_still_fails_producer_gate`。
+    """
+    env = dict(os.environ)
+    if facts.get("producer_commit"):
+        env["WCA_BUILD_COMMIT"] = facts["producer_commit"]
+    return env
+
+
+def _argv(command: str, base: Path) -> tuple[list[str], dict]:
     facts = _facts(base, _role_of(command, base))
     tokens = shlex.split(command.replace("\\", "/"), posix=True)
     head, rest = tokens[0], tokens[1:]
@@ -156,16 +189,17 @@ def _argv(command: str, base: Path) -> list[str]:
     if "wca-verify" in head:
         return [sys.executable, "-c",
                 "import sys; from src.verify_pkg import main; sys.exit(main(sys.argv[1:]))",
-                *rest]
-    return [sys.executable, "-m", "src.cli", "replay", *rest]
+                *rest], facts
+    return [sys.executable, "-m", "src.cli", "replay", *rest], facts
 
 
 def _run(doc: Path) -> list[dict]:
     base = handoff_dir()
     results = []
     for item in _commands(doc.read_text(encoding="utf-8")):
-        argv = _argv(item["command"], base)
-        proc = subprocess.run(argv, cwd=ROOT, capture_output=True, text=True,
+        argv, facts = _argv(item["command"], base)
+        proc = subprocess.run(argv, cwd=ROOT, env=_env_with_commit(facts),
+                              capture_output=True, text=True,
                               encoding="utf-8", errors="replace")
         results.append({**item, "rc": proc.returncode,
                         "output": (proc.stdout or "") + (proc.stderr or ""),
@@ -218,13 +252,40 @@ def test_missing_evidence_gate_yields_partial_exit_2() -> None:
             "--expect-anchor", facts["anchor"],
             "--expect-package-sha256", facts["package_sha256"],
             "--expect-artifacts-digest", facts["artifacts_digest"]]
-    proc = subprocess.run(argv, cwd=ROOT, capture_output=True, text=True,
+    proc = subprocess.run(argv, cwd=ROOT, env=_env_with_commit(facts),
+                          capture_output=True, text=True,
                           encoding="utf-8", errors="replace")
     assert proc.returncode == 2, (
         f"缺 --expect-evidence-digest 竟未降级为 PARTIAL：rc={proc.returncode}\n"
         f"{(proc.stdout or '') + (proc.stderr or '')}")
     assert "RESULT PARTIAL" in (proc.stdout or ""), (
         "缺 --expect-evidence-digest 时必须输出 RESULT PARTIAL：\n" + (proc.stdout or ""))
+
+
+def test_wrong_build_commit_still_fails_producer_gate() -> None:
+    """反向用例：注入与包内不一致的构建提交时，producer 门必须 FAIL、rc≠0。
+
+    保证 `_env_with_commit` 的注入没有把门禁削弱成“永远通过”。
+    """
+    base = handoff_dir()
+    facts = _facts(base, "engine-only")
+    env = dict(os.environ)
+    env["WCA_BUILD_COMMIT"] = "0" * 40
+    argv = [sys.executable, "-c",
+            "import sys; from src.verify_pkg import main; sys.exit(main(sys.argv[1:]))",
+            facts["package"].as_posix(),
+            "--public-key", facts["public_key"].as_posix(),
+            "--expect-anchor", facts["anchor"],
+            "--expect-package-sha256", facts["package_sha256"],
+            "--expect-artifacts-digest", facts["artifacts_digest"],
+            "--expect-evidence-digest", facts["evidence_digest"]]
+    proc = subprocess.run(argv, cwd=ROOT, env=env, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
+    output = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode != 0, (
+        f"注入错误构建提交竟通过 producer 门：rc={proc.returncode}\n{output}")
+    assert "PRODUCER FAIL" in output, (
+        "注入错误构建提交未报 PRODUCER FAIL：\n" + output)
 
 
 def test_commands_claiming_ok_carry_all_five_gates() -> None:

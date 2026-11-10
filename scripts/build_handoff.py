@@ -18,6 +18,7 @@ import argparse
 import json
 import re
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -92,6 +93,16 @@ def renumber_sections(text: str) -> tuple[str, list[str]]:
             titles.append(title)
             lines[index] = f"## {cjk_number(counter)}、{title}"
     return "\n".join(lines), titles
+
+
+def _head_commit() -> str:
+    """组装本目录时的仓库 HEAD，用于与“包构建提交”区分（两者不同属正常）。"""
+    try:
+        out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
+                             capture_output=True, text=True, timeout=15, check=True)
+        return out.stdout.strip()
+    except Exception:
+        return "unknown"
 
 
 def _round_label(name: str) -> str:
@@ -823,6 +834,7 @@ def build_readme(version: str, release: dict, rel: dict, packages: list[dict],
     wheels_op_text = "、".join(sorted(w["version"] for w in wheels_op)) or "（无）"
     locks_ow_text = "、".join(sorted(x["version"] for x in locks_ow)) or "（无）"
     locks_op_text = "、".join(sorted(x["version"] for x in locks_op)) or "（无）"
+    head = _head_commit()
     header = _gen("handoff-header", "\n".join([
         "本目录实测事实（构建时生成，禁止人工编辑）：",
         "",
@@ -833,6 +845,8 @@ def build_readme(version: str, release: dict, rel: dict, packages: list[dict],
         f"file 可解析 {anchors['by_status']['resolvable']}、"
         f"显式标注 {anchors['by_status']['marked']}、悬空 {anchors['by_status']['dangling']}）",
         f"- producer commit `{release['git_commit']}`；构建时间 `{release['build_time']}`",
+        f"- 目录生成于 `{head}`；包由构建提交 `{release['git_commit']}` 构建"
+        "（两者不同属正常：文档/生成器改动不改变包字节）",
         f"- 包签名钥 `{packages[0]['key_id'].split(':')[1][:12]}…`；"
         f"发行钥 `{release['release_signature']['key_id'].split(':')[1][:12]}…`",
     ]))
@@ -1097,6 +1111,9 @@ def write_manifest(out: Path, version: str, release: dict, invariants: dict,
     lines = [
         f"{version} 第{_round_label(out.name)}轮交付清单",
         f"producer_commit={release['git_commit']}",
+        f"generated_from_commit={_head_commit()}",
+        "说明：producer_commit 是包的构建提交；generated_from_commit 是交付目录组装时的仓库 HEAD，",
+        "两者不同属正常——文档与生成器改动不改变包字节。",
         f"release_key_id={release['release_signature']['key_id']}",
         f"package_key_id={packages[0]['key_id']}",
         "",
