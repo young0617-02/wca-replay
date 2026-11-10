@@ -380,6 +380,10 @@ def build(args: argparse.Namespace) -> int:
     for name in ("签名方案.md", "安全与证据链现状.md", "冻结版本说明.md"):
         shutil.copy2(ROOT / "docs" / name, out / "docs" / name)
     shutil.copy2(ROOT / "docs" / "已知残留与未闭合项.md", out / "已知残留与未闭合项.md")
+    # 包外勘误附件（0.4.17 包的两页勘误）：原样并入，保留原有目录结构与封面衔接说明。
+    annex = ROOT / "handoff" / "20261109-包外勘误附件"
+    if annex.is_dir():
+        shutil.copytree(annex, out / "包外勘误附件")
     import fact_exemptions
     _write(out / "docs" / "护栏豁免表.md",
            _gen("exemptions", fact_exemptions.render_markdown(version)))
@@ -786,6 +790,10 @@ def build_readme(version: str, release: dict, rel: dict, packages: list[dict],
                  handoff_name: str, prev_version: str, reports_lines: str) -> str:
     current_count, history_count, current_combined, history_combined = \
         _anchor_counts(anchors, version)
+    hist_versions = sorted({a["version"] for a in anchors["singles"]
+                            if a["version"] and a["version"] != version},
+                           key=lambda s: tuple(int(x) for x in s.split(".")))
+    history_last = hist_versions[-1] if hist_versions else version
     rp_unchanged = not any("policies/RULE-PACK.md" in item for item in diff_detail)
     ts_files = sorted({item.split(":", 1)[0].split("/", 1)[1] for item in diff_detail
                        if item.startswith("confirmed/") and "真实时间戳" in item
@@ -999,11 +1007,12 @@ py -3.12 -m venv .venv-clean
   RULE-PACK.md / OLD-WHEELS.md / OLD-ANCHORS.md
   anchor.json / anchor.txt   # 汇总记录，无签名保护
   anchor-{version}-<role>.json   # {len(packages)} 个新包单包锚点（file 指向 package/）
-  anchor-0.4.10 … 0.4.16-<role>.json   # 历史单包锚点（实有 {history_count} 个）
-  anchor-0.4.10 … 0.4.16.json          # 历史组合锚点（实有 {history_combined} 个）
+  anchor-0.4.10 … {history_last}-<role>.json   # 历史单包锚点（实有 {history_count} 个）
+  anchor-0.4.10 … {history_last}.json          # 历史组合锚点（实有 {history_combined} 个）
   trusted-public-key.pub / release-public-key.pub
   package/                   # {len(packages)} 个 {version} 包
   release/                   # {version} 发行物 + old-wheels/ + old-packages/
+  包外勘误附件/              # 0.4.17 包的两页勘误（4 文件）；计入 交付清单.txt，不在 SHA256SUMS 签名范围
   docs/                      # 签名方案 / 安全与证据链现状 / 冻结版本说明 / 护栏豁免表
   reports/                   # 历史报告 + 原始输出 + round17-diff.md
 {reports_lines}
