@@ -695,7 +695,7 @@ def _trim_input_entry(entry: dict, fields: set[str], work: Path) -> None:
 
 
 # 0.4.18：员工主数据若带姓名/工号列，导出默认剔除；列不存在不报错（样例数据无这两列）。
-# 客户仍可用 --omit-fields 追加其他列；这里只处理身份直标识，不碰工资基数。
+# 使用方仍可用 --omit-fields 追加其他列；这里只处理身份直标识，不碰工资基数。
 DEFAULT_EMPLOYEE_OMIT_FIELDS = ("name", "emp_no")
 
 
