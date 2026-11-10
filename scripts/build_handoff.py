@@ -1065,26 +1065,68 @@ def build_readme(version: str, release: dict, rel: dict, packages: list[dict],
 {cmp_text}；`artifacts_digest` 的变化原因见 §四。
 {main_text}
 
-## 二、三步先跑通
+## 二、验算四步（Windows / Linux / macOS）
+
+> **`RESULT PARTIAL`（exit 2）看起来像通过，其实少验了一项。** 最常见的原因是漏了
+> `--public-key`，或漏了 `--expect-anchor` / `--anchor-file`。PARTIAL 只表示“能核的都核了”，
+> 不表示验算完整；**只有 `RESULT OK`（exit 0）才算通过**。看到 PARTIAL 不要往下走，
+> 先补齐公钥与锚点再重跑。
+
+三平台命令只差三处：解释器名（Windows `py -3.12` / Linux、macOS `python3.12`）、
+虚拟环境可执行目录（`Scripts\\` / `bin/`，入口名 `wca-verify.exe` / `wca-verify`）、
+路径分隔符（`\\` / `/`）。其余参数完全一致。
+
+### Windows（PowerShell）
 
 ```powershell
-# 1) 建干净环境（仅本目录 wheel + 锁定依赖）
+# 1) 建干净环境
 py -3.12 -m venv .venv-clean
+
+# 2) 装锁定依赖与本目录 wheel
 .venv-clean\\Scripts\\python -m pip install --require-hashes -r release\\requirements.lock.txt
 .venv-clean\\Scripts\\python -m pip install --no-deps release\\{release['wheel']}
 
-# 2) 验任一包（锚点、包 SHA、工件摘要、证据摘要一次给全）
+# 3) 验任一包（锚点、包 SHA、工件摘要、证据摘要一次给全）
 .venv-clean\\Scripts\\wca-verify.exe package\\engine-only.zip `
   --anchor-file anchor-{version}-engine-only.json `
   --public-key trusted-public-key.pub
 # 期望：RESULT OK，exit 0
 
-# 3) 回放同一个包
+# 4) 回放同一个包
 .venv-clean\\Scripts\\wca.exe replay package\\engine-only.zip `
   --anchor-file anchor-{version}-engine-only.json `
   --public-key trusted-public-key.pub
 # 期望：RESULT OK，exit 0
 ```
+
+### Linux（bash）
+
+```bash
+# 1) 建干净环境
+python3.12 -m venv .venv-clean
+
+# 2) 装锁定依赖与本目录 wheel
+.venv-clean/bin/python -m pip install --require-hashes -r release/requirements.lock.txt
+.venv-clean/bin/python -m pip install --no-deps release/{release['wheel']}
+
+# 3) 验任一包（锚点、包 SHA、工件摘要、证据摘要一次给全）
+.venv-clean/bin/wca-verify package/engine-only.zip \\
+  --anchor-file anchor-{version}-engine-only.json \\
+  --public-key trusted-public-key.pub
+# 期望：RESULT OK，exit 0
+
+# 4) 回放同一个包
+.venv-clean/bin/wca replay package/engine-only.zip \\
+  --anchor-file anchor-{version}-engine-only.json \\
+  --public-key trusted-public-key.pub
+# 期望：RESULT OK，exit 0
+```
+
+### macOS（bash）
+
+命令与 Linux 完全相同：Homebrew 或 python.org 安装的 Python 3.12 都提供 `python3.12`，
+虚拟环境入口在 `bin/`。若 `python3.12` 不在 `PATH`，用
+`$(brew --prefix python@3.12)/bin/python3.12` 建环境即可，后续命令不变。
 
 八个包逐一替换 `engine-only` 为对应角色名即可；实物 SHA 见 §四。
 
@@ -1245,7 +1287,8 @@ def build_first(version: str, packages: list[dict], old: dict, anchors: dict,
     return _gen("read-me-first", "\n".join([
         f"{version} 交付验收包（第{_round_label(handoff_name)}轮整改）——先读这一页",
         "",
-        "1) 先读 README-验收.md §0（演示必须用 v3 包）与 §二（三步先跑通）；",
+        "1) 先读 README-验收.md §0（演示必须用 v3 包）与 §二（验算四步，含 Windows / "
+        "Linux / macOS 三套命令）；",
         f"2) 包在 package/（{len(packages)} 个），单包锚点 anchor-{version}-<role>.json，",
         "   公钥 trusted-public-key.pub；验算与回放只依赖本目录；",
         f"   验算请用本目录 release/ 的 {version} wheel，用源码树或其它版本构建会先 "
