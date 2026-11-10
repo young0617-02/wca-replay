@@ -1019,6 +1019,12 @@ def build_readme(version: str, release: dict, rel: dict, packages: list[dict],
 > `release/README-验收.md`（在 `release/SHA256SUMS` 的 {rel['covered_count']} 行内）；**根目录这份 `README-验收.md`
 > 不在签名范围**，其完整性只由 `交付清单.txt` 的记录负责。核对签名时勿取错文件。
 
+**验算用哪个构建（先读）**：验算请使用本目录 `release/` 内随附的
+`worktime_compliance_agent-{version}-py3-none-any.whl` 及其锁定依赖，**不要**用源码树、
+系统里已装的 `wca`、或其它版本的构建去验。包内 `manifest.producer` 记录了构建版本与提交，
+一旦与验算所用构建不一致，会**先**报 `PRODUCER FAIL`（exit 1）。这是**设计上的配对保护**
+（保证“用 A 版代码验 A 版包”），**不是包有问题**；换回随附 wheel 即可通过。
+
 {header}
 
 **PoC 边界（先读）**：本交付是**验证工具 + {len(packages)} 个样例包**的 PoC，
@@ -1242,6 +1248,8 @@ def build_first(version: str, packages: list[dict], old: dict, anchors: dict,
         "1) 先读 README-验收.md §0（演示必须用 v3 包）与 §二（三步先跑通）；",
         f"2) 包在 package/（{len(packages)} 个），单包锚点 anchor-{version}-<role>.json，",
         "   公钥 trusted-public-key.pub；验算与回放只依赖本目录；",
+        f"   验算请用本目录 release/ 的 {version} wheel，用源码树或其它版本构建会先 "
+        "PRODUCER FAIL（配对保护，不是包有问题）；",
         f"3) 旧物：old-wheels {len(old['wheels'])}、old-packages {len(old['packages'])}、",
         f"   锚点 {anchors['anchor_total']} 个（本轮 {current_count + current_combined} + 历史 "
         f"{history_count + history_combined}）；file 可解析 {anchors['by_status']['resolvable']}、"
