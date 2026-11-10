@@ -21,6 +21,25 @@ from src.kb import build_kb
 RULE_PACK = "rp-2026.10.gd-pilot-standard.v4"
 
 
+def pytest_collection_modifyitems(config, items):
+    """默认不收集 `release` 组：只有 `-m` 表达式显式提到 release 时才跑。
+
+    为什么不用 `addopts = -m "not release"`：命令行上的 `-m` 会整条覆盖 addopts，
+    于是 `pytest -m "not llm"`（旧文档里的日常命令）会把 release 组悄悄放回来，
+    又变成“发版后必然红”的噪音。这里直接看表达式：没提到 release 就一律排除。
+
+    入口：`pytest -m release`（发版前）；日常 `pytest -q` 会显示为 deselected。
+    """
+    if "release" in (config.getoption("markexpr") or ""):
+        return
+    keep, drop = [], []
+    for item in items:
+        (drop if item.get_closest_marker("release") else keep).append(item)
+    if drop:
+        config.hook.pytest_deselected(items=drop)
+        items[:] = keep
+
+
 @pytest.fixture
 def cfg(tmp_path: Path) -> Config:
     return Config.load(

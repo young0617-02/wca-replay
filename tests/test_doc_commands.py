@@ -7,6 +7,16 @@
 - 示例命令没有写期望（无从比对）。
 
 用环境变量 `WCA_DOC_COMMANDS_DIR=<交接目录>` 可把同一套断言指到旧交付，用于“先红”取证。
+
+两组用例，按是否依赖“当前构建”分开：
+
+- **默认组**（`pytest -q` 收集）：静态文本红线，以及
+  `test_package_producer_matches_release_record` 这条只读对账——它只比“包内 `producer`
+  与 `release/RELEASE.json`”，不看运行期 HEAD，任何时刻都成立，能抓出包与发行记录不一致。
+- **release 组**（`@pytest.mark.release`，入口 `pytest -m release`）：真跑示例命令与
+  producer 门。它们要求包内 `producer.version`/`commit` 等于当前构建，所以升版本后、重出前
+  必然红；这是发布一致性检查，不是日常回归。门禁强度不变，反向用例
+  `test_wrong_build_commit_still_fails_producer_gate` 仍在 release 组内。
 """
 
 from __future__ import annotations
@@ -228,6 +238,38 @@ def _assert_matches(result: dict) -> None:
             f"文档期望 RESULT {label}\n输出：\n{result['output']}")
 
 
+def test_package_producer_matches_release_record() -> None:
+    """默认组的轻量只读校验：包内 `producer` 必须与 `release/RELEASE.json` 对得上。
+
+    这条不启动验算器、不比对运行期 HEAD，所以升版本或新增提交都不会让它转红；
+    它抓的是“包与发行记录不一致”：包由另一次构建产出、`RELEASE.json` 被替换、
+    或交付目录混入旧包等。完整的 producer 门（含版本与反向注入）仍在 release 组，
+    用 `pytest -m release` 跑。
+    """
+    base = handoff_dir()
+    release = _release_info(base)
+    packages = sorted((base / "package").glob("*.zip"))
+    if not packages:
+        pytest.skip("交接目录没有 package/*.zip，无法对账")
+    problems: list[str] = []
+    for package in packages:
+        with zipfile.ZipFile(package) as zf:
+            manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
+        producer = manifest.get("producer") or {}
+        for field, expected, actual in (
+            ("version", release.get("version"), producer.get("version")),
+            ("commit", release.get("git_commit"), producer.get("commit")),
+        ):
+            if not expected:
+                problems.append(f"{package.name}: release/RELEASE.json 缺 {field}，无从对账")
+            elif actual != expected:
+                problems.append(
+                    f"{package.name}: producer.{field}={actual!r} != "
+                    f"release/RELEASE.json {field}={expected!r}")
+    assert not problems, "包内 producer 与发行记录不一致：\n" + "\n".join(problems)
+
+
+@pytest.mark.release
 @pytest.mark.parametrize("doc_index", range(4))
 def test_documented_commands_execute_as_written(doc_index: int) -> None:
     docs = _doc_paths()
@@ -240,6 +282,7 @@ def test_documented_commands_execute_as_written(doc_index: int) -> None:
         _assert_matches(result)
 
 
+@pytest.mark.release
 def test_missing_evidence_gate_yields_partial_exit_2() -> None:
     """A1 的运行时红线：声称 `RESULT OK` 的命令若缺 `--expect-evidence-digest`，
     真实结果只能是 `RESULT PARTIAL` exit 2。这条测试证明“文档写 OK 却不给该参数”必错。"""
@@ -262,10 +305,12 @@ def test_missing_evidence_gate_yields_partial_exit_2() -> None:
         "缺 --expect-evidence-digest 时必须输出 RESULT PARTIAL：\n" + (proc.stdout or ""))
 
 
+@pytest.mark.release
 def test_wrong_build_commit_still_fails_producer_gate() -> None:
     """反向用例：注入与包内不一致的构建提交时，producer 门必须 FAIL、rc≠0。
 
     保证 `_env_with_commit` 的注入没有把门禁削弱成“永远通过”。
+    这条**必须在 release 组内**：它是 producer 门未被削弱的证据，不能随日常循环一起消失。
     """
     base = handoff_dir()
     facts = _facts(base, "engine-only")
