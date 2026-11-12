@@ -19,7 +19,7 @@ from .config import Config
 from .db import (DatabaseIdentityMismatch, DatabaseUnavailable, connect, count, get_meta,
                  init_db, set_meta)
 from .evidence import (AuditEpochClosed, export_package, input_fingerprint,
-                       verify_chain)
+                       scan_audit_chain, verify_chain)
 from .ingest import _reject_unreconstructable_path, import_csv_file
 from .kb import build_kb, citation_ids_missing
 from .rules.citations import ALL_CITATIONS
@@ -30,8 +30,8 @@ from .util import CN_TZ
 INGEST_ORDER = ("org", "employee", "schedule", "punch", "leave", "trip", "correction")
 # 供演示脚本自洽性检查（A12）使用：命令名必须与 build_parser 中的注册保持一致
 SUBCOMMAND_NAMES = ("init", "db-target", "gen", "ingest", "kb", "check", "report", "export",
-                    "replay", "ask", "verify", "covers", "start", "stop", "status", "users",
-                    "approval", "approval-doc", "approval-migrate", "keygen", "all")
+                    "replay", "ask", "verify", "audit-scan", "covers", "start", "stop", "status",
+                    "users", "approval", "approval-doc", "approval-migrate", "keygen", "all")
 KIND_BY_FILE = {
     "org.csv": "org",
     "employee.csv": "employee", "schedule.csv": "schedule", "punch.csv": "punch",
@@ -763,6 +763,41 @@ def cmd_verify(args) -> int:
     return 0 if chain.ok else 4
 
 
+def cmd_audit_scan(args) -> int:
+    """只读自检活动库审计链：seq 跳号/重复、prev_hash 断裂、链头截断、事件删除。"""
+    cfg = _cfg(args)
+    # provision=False：不建库、不写 identity、不跑建表；自检必须对活动库零写入。
+    conn = connect(cfg, provision=False)
+    scan = scan_audit_chain(conn, cfg, expect_head=args.expect_head,
+                            expect_max_seq=args.expect_max_seq)
+    if args.json:
+        print(json.dumps(scan.as_dict(), ensure_ascii=False, indent=2))
+    else:
+        print(f"审计链自检（只读，不写库）：{cfg.safe_database_target}")
+        for segment in scan.segments:
+            span = (f"seq {segment['first_seq']}–{segment['last_seq']}"
+                    if segment["rows"] else "空段")
+            status = "OK" if not segment["issues"] else f"FAIL（{segment['issues']} 处）"
+            closed = "已封闭" if segment["closed"] else "开放"
+            print(f"  段 {segment['name']}（{segment['rule_pack_version']}，{closed}）："
+                  f"{span}，{segment['rows']} 条，{status}")
+        print(f"合计 {scan.total_rows} 条；链头 seq={scan.head_seq} "
+              f"hash={(scan.head_hash or '-')[:16]}…")
+        if scan.ok:
+            print("结论：完整")
+        else:
+            first = scan.first_issue or {}
+            print(f"结论：从 seq={first.get('seq')} 起不对（共 {len(scan.issues)} 处问题）")
+            for item in scan.issues[:5]:
+                where = item.get("seq") if item.get("seq") is not None else "-"
+                print(f"  · [{item['kind']}] 段 {item['segment']} seq {where}：{item['detail']}")
+            if len(scan.issues) > 5:
+                print(f"  · 其余 {len(scan.issues) - 5} 处见 --json")
+        if scan.note:
+            print(f"提示：{scan.note}")
+    return 0 if scan.ok else 4
+
+
 def cmd_covers(args) -> int:
     """打印判据分支覆盖情况，供 reports/ 直接引用。"""
     cfg = _cfg(args)
@@ -919,6 +954,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("question"); p.add_argument("--as", dest="actor", default="E001")
     p.set_defaults(fn=cmd_ask)
     p = sub.add_parser("verify", help="校验审计 hash 链"); p.set_defaults(fn=cmd_verify)
+    p = sub.add_parser("audit-scan",
+                       help="只读自检活动库审计链：seq 跳号/重复、prev_hash 断裂、"
+                            "链头截断、事件删除（不写库）")
+    p.add_argument("--expect-head", dest="expect_head", default=None,
+                   help="外部记录（备份前/已交付包）的链头哈希；用于判定开放段尾部截断")
+    p.add_argument("--expect-max-seq", dest="expect_max_seq", type=int, default=None,
+                   help="外部记录的链头 seq；用于判定开放段尾部截断")
+    p.add_argument("--json", action="store_true", help="输出完整机器可读结果")
+    p.set_defaults(fn=cmd_audit_scan)
     p = sub.add_parser("covers", help="规则命中覆盖表"); p.set_defaults(fn=cmd_covers)
     p = sub.add_parser("users", help="配置界面账号（只写 scrypt 口令哈希，不存明文）")
     p.add_argument("--username", default="op1")

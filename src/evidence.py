@@ -449,6 +449,247 @@ def tamper_check_report(ver: ChainVerification) -> str:
     return "链完整" if ver.ok else f"链在 seq={ver.broken_at_seq} 处断裂：{ver.reason}"
 
 
+@dataclass
+class ChainScan:
+    """活动库审计链的全量只读体检结果（不写库、不改任何行）。"""
+
+    ok: bool
+    segments: list[dict]
+    issues: list[dict]
+    total_rows: int
+    head_seq: int | None
+    head_hash: str
+    open_tail_checked: bool
+    note: str = ""
+
+    @property
+    def first_issue(self) -> dict | None:
+        keyed = [item for item in self.issues if item.get("seq") is not None]
+        if keyed:
+            return min(keyed, key=lambda item: int(item["seq"]))
+        return self.issues[0] if self.issues else None
+
+    def as_dict(self) -> dict:
+        return {
+            "ok": self.ok,
+            "total_rows": self.total_rows,
+            "head_seq": self.head_seq,
+            "head_hash": self.head_hash,
+            "open_tail_checked": self.open_tail_checked,
+            "note": self.note,
+            "segments": self.segments,
+            "issues": self.issues,
+            "first_issue": self.first_issue,
+        }
+
+
+def _scan_segment_rows(rows: list, *, name: str, expected_start_seq: int,
+                       start_prev: str) -> tuple[list[dict], str]:
+    """逐行核对一个审计段：起始 seq、连续 seq、prev_hash 衔接、entry_hash 重算。"""
+    issues: list[dict] = []
+    expected = int(expected_start_seq)
+    prev = start_prev
+    for row in rows:
+        seq = int(row["seq"])
+        if seq != expected:
+            issues.append({
+                "kind": "seq_gap", "segment": name, "seq": expected,
+                "expected": expected, "actual": seq,
+                "detail": f"seq 跳号：期望 {expected}，实际 {seq}",
+            })
+        if row["prev_hash"] != prev:
+            issues.append({
+                "kind": "prev_hash_break", "segment": name, "seq": seq,
+                "expected": prev, "actual": row["prev_hash"],
+                "detail": "prev_hash 与前一条 entry_hash 不衔接（中间事件被删除或改写）",
+            })
+        calculated = _chain_hash(prev, seq, row["actor"], row["action"], row["ts"],
+                                  row["payload_sha256"])
+        if row["entry_hash"] != calculated:
+            issues.append({
+                "kind": "entry_hash_mismatch", "segment": name, "seq": seq,
+                "expected": calculated, "actual": row["entry_hash"],
+                "detail": "entry_hash 与内容重算不一致（事件内容被改写）",
+            })
+        prev = str(row["entry_hash"])
+        expected = seq + 1
+    return issues, prev
+
+
+def scan_audit_chain(conn: Connection, cfg: Config, *, expect_head: str | None = None,
+                     expect_max_seq: int | None = None) -> ChainScan:
+    """只读扫描活动库审计链，覆盖 `verify_chain` 不检查的断裂类型。
+
+    与 `verify_chain` 的区别：
+    * 扫描**全部**段（legacy + 每一个 rule_pack_epoch），不是只验当前规则包那一段；
+    * 显式检查 seq 连续（跳号/缺号）与重复 seq；
+    * 用纪元行 `activation_event_seq` / `prev_head_hash` 做跨段锚点，
+      可发现**已封闭段**链头被截断、纪元切换事件被删除；
+    * 开放段（当前链头所在段）的尾部截断只能靠外部锚点判定：
+      传 `expect_head` / `expect_max_seq`（来自已交付包、外部台账或备份前记录）才可检出。
+
+    全程只执行 SELECT，不写库。
+    """
+    issues: list[dict] = []
+    segments: list[dict] = []
+    if not table_exists(conn, "audit_event"):
+        return ChainScan(False, [], [{
+            "kind": "no_audit_table", "segment": "-", "seq": None,
+            "detail": "库中不存在 audit_event 表",
+        }], 0, None, "", False, "无审计事件表，无法自检")
+
+    cols = ("seq, actor, action, ts, payload_sha256, prev_hash, entry_hash, "
+            "rule_pack_version, segment_id")
+    genesis = get_meta(conn, "audit_genesis") or genesis_hash(cfg)
+    epochs: list[dict] = []
+    if table_exists(conn, "rule_pack_epoch"):
+        epochs = [dict(row) for row in conn.execute(
+            "SELECT epoch_id, rule_pack_version, prev_rule_pack_version, prev_head_hash, "
+            "activation_event_seq, segment_start_seq, segment_start_prev_hash, switched_at "
+            "FROM rule_pack_epoch ORDER BY activation_event_seq, segment_start_seq").fetchall()]
+
+    legacy_rows = conn.execute(
+        f"SELECT {cols} FROM audit_event WHERE segment_id IS NULL ORDER BY seq").fetchall()
+    legacy_issues, legacy_head = _scan_segment_rows(
+        legacy_rows, name="legacy", expected_start_seq=1, start_prev=genesis)
+    segments.append({
+        "name": "legacy", "rule_pack_version": "legacy",
+        "rows": len(legacy_rows),
+        "first_seq": int(legacy_rows[0]["seq"]) if legacy_rows else None,
+        "last_seq": int(legacy_rows[-1]["seq"]) if legacy_rows else None,
+        "head_hash": legacy_head if legacy_rows else "",
+        "expected_start_seq": 1, "closed": bool(epochs), "issues": len(legacy_issues),
+    })
+    issues.extend(legacy_issues)
+
+    for index, epoch in enumerate(epochs):
+        name = str(epoch["epoch_id"])
+        rows = conn.execute(
+            f"SELECT {cols} FROM audit_event WHERE segment_id = ? ORDER BY seq",
+            (name,)).fetchall()
+        seg_issues, seg_head = _scan_segment_rows(
+            rows, name=name, expected_start_seq=int(epoch["segment_start_seq"]),
+            start_prev=str(epoch["segment_start_prev_hash"]))
+        segments.append({
+            "name": name, "rule_pack_version": str(epoch["rule_pack_version"]),
+            "rows": len(rows),
+            "first_seq": int(rows[0]["seq"]) if rows else None,
+            "last_seq": int(rows[-1]["seq"]) if rows else None,
+            "head_hash": seg_head if rows else str(epoch["segment_start_prev_hash"]),
+            "expected_start_seq": int(epoch["segment_start_seq"]),
+            "closed": index < len(epochs) - 1, "issues": len(seg_issues),
+        })
+        issues.extend(seg_issues)
+
+    # 跨段锚点：每个纪元行都记录了切换点；用它核对前一段的尾部没有被截断。
+    epoch_ids = {str(epoch["epoch_id"]) for epoch in epochs}
+    for index, epoch in enumerate(epochs):
+        activation_seq = int(epoch["activation_event_seq"])
+        if activation_seq <= 0:   # genesis 纪元：没有切换事件，只核对起点自洽
+            if str(epoch["segment_start_prev_hash"]) != str(epoch["prev_head_hash"]):
+                issues.append({
+                    "kind": "genesis_anchor_mismatch", "segment": str(epoch["epoch_id"]),
+                    "seq": int(epoch["segment_start_seq"]),
+                    "expected": epoch["prev_head_hash"], "actual": epoch["segment_start_prev_hash"],
+                    "detail": "genesis 纪元的段起点与旧链头不一致",
+                })
+            continue
+        activation = conn.execute(
+            f"SELECT {cols} FROM audit_event WHERE seq = ?", (activation_seq,)).fetchone()
+        if activation is None:
+            issues.append({
+                "kind": "epoch_anchor_missing", "segment": str(epoch["epoch_id"]),
+                "seq": activation_seq, "expected": activation_seq, "actual": None,
+                "detail": "纪元切换事件缺失（已封闭段的链头可能被整段删除）",
+            })
+            continue
+        if str(activation["entry_hash"]) != str(epoch["segment_start_prev_hash"]):
+            issues.append({
+                "kind": "epoch_anchor_mismatch", "segment": str(epoch["epoch_id"]),
+                "seq": activation_seq, "expected": epoch["segment_start_prev_hash"],
+                "actual": activation["entry_hash"],
+                "detail": "纪元切换事件的 entry_hash 与纪元记录不一致",
+            })
+        if str(activation["prev_hash"]) != str(epoch["prev_head_hash"]):
+            issues.append({
+                "kind": "epoch_anchor_mismatch", "segment": str(epoch["epoch_id"]),
+                "seq": activation_seq, "expected": epoch["prev_head_hash"],
+                "actual": activation["prev_hash"],
+                "detail": "纪元切换事件的 prev_hash 与纪元记录的旧链头不一致",
+            })
+        previous = segments[index]   # segments[0] 是 legacy
+        previous_last = previous["last_seq"]
+        if previous_last is None or int(previous_last) < activation_seq:
+            issues.append({
+                "kind": "previous_head_truncated", "segment": str(previous["name"]),
+                "seq": activation_seq, "expected": activation_seq, "actual": previous_last,
+                "detail": "前一段链头被截断：切换事件及之后的事件不在该段内",
+            })
+        elif int(previous_last) > activation_seq:
+            issues.append({
+                "kind": "previous_head_overrun", "segment": str(previous["name"]),
+                "seq": activation_seq, "expected": activation_seq, "actual": previous_last,
+                "detail": "前一段末条 seq 超过纪元切换点（事件归属与纪元记录矛盾）",
+            })
+
+    # 段外事件：segment_id 指向不存在的纪元
+    for row in conn.execute(
+            "SELECT DISTINCT segment_id FROM audit_event WHERE segment_id IS NOT NULL").fetchall():
+        segment_id = str(row["segment_id"])
+        if segment_id not in epoch_ids:
+            issues.append({
+                "kind": "orphan_segment", "segment": segment_id, "seq": None,
+                "detail": f"事件引用了不存在的纪元段 {segment_id}",
+            })
+
+    # 重复 seq：主键通常已阻止，但显式检查并报告，避免“假设主键一定在”。
+    for row in conn.execute(
+            "SELECT seq, COUNT(*) AS c FROM audit_event GROUP BY seq HAVING COUNT(*) > 1"
+    ).fetchall():
+        issues.append({
+            "kind": "duplicate_seq", "segment": "-", "seq": int(row["seq"]),
+            "actual": int(row["c"]),
+            "detail": f"seq={row['seq']} 出现 {row['c']} 次",
+        })
+
+    head = conn.execute(
+        "SELECT seq, entry_hash FROM audit_event ORDER BY seq DESC LIMIT 1").fetchone()
+    head_seq = int(head["seq"]) if head is not None else None
+    head_hash = str(head["entry_hash"]) if head is not None else ""
+    open_tail_checked = expect_head is not None or expect_max_seq is not None
+    if expect_max_seq is not None:
+        if head_seq is None or head_seq < int(expect_max_seq):
+            issues.append({
+                "kind": "head_truncated", "segment": "-", "seq": int(expect_max_seq),
+                "expected": int(expect_max_seq), "actual": head_seq,
+                "detail": "链头被截断：库内最大 seq 小于外部锚点记录",
+            })
+        elif head_seq > int(expect_max_seq):
+            issues.append({
+                "kind": "head_ahead", "segment": "-", "seq": int(expect_max_seq),
+                "expected": int(expect_max_seq), "actual": head_seq,
+                "detail": "库内最大 seq 超过外部锚点记录（库在锚点之后又有追加）",
+            })
+    if expect_head is not None and head_hash != str(expect_head):
+        if expect_max_seq is not None and (head_seq is None or head_seq < int(expect_max_seq)):
+            pass  # 已按“截断”判定；同一根因不再重复报“哈希不一致”
+        else:
+            issues.append({
+                "kind": "head_mismatch", "segment": "-", "seq": head_seq,
+                "expected": str(expect_head), "actual": head_hash,
+                "detail": "链头哈希与外部锚点不一致（尾部事件被替换或删除）",
+            })
+
+    issues.sort(key=lambda item: (item.get("seq") is None, item.get("seq") or 0))
+    note = ""
+    if not open_tail_checked:
+        note = ("未提供 --expect-head/--expect-max-seq：开放段尾部若被整段截断，"
+                "仅靠库内数据无法自证；已封闭段由纪元锚点核对。")
+    total_rows = conn.execute("SELECT COUNT(*) AS c FROM audit_event").fetchone()["c"]
+    return ChainScan(not issues, segments, issues, int(total_rows), head_seq, head_hash,
+                     open_tail_checked, note)
+
+
 # ------------------------------------------------------------------ 输入指纹 / 结论摘要
 def input_fingerprint(conn: Connection, scope: dict,
                       file_ids: set[int] | None = None) -> str:
